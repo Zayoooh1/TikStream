@@ -213,6 +213,21 @@ QWidget *SettingsDialog::pageGeneral()
     m_snapping = track(new QCheckBox("Snap to screen edges and center"));
     m_snapping->setChecked(m_s["snapping"].toBool(true));
     f2->addRow(m_snapping);
+
+    QFormLayout *f3;
+    v->addWidget(card(w, &f3, "Updates", "Checks GitHub Releases for newer TikStream versions."));
+    m_autoUpdate = track(new QCheckBox("Automatically check for updates on startup and periodically"));
+    m_autoUpdate->setChecked(m_s["autoUpdateEnabled"].toBool(true));
+    f3->addRow(m_autoUpdate);
+    auto *checkRow = new QHBoxLayout();
+    auto *checkBtn = new QPushButton("Check for Updates Now");
+    checkBtn->setCursor(Qt::PointingHandCursor);
+    connect(checkBtn, &QPushButton::clicked, this, &SettingsDialog::checkForUpdatesRequested);
+    const QString ver = EngineHost::instance().callObj("appVersion")["version"].toString();
+    checkRow->addWidget(checkBtn);
+    if (!ver.isEmpty()) checkRow->addWidget(hint("Installed version: v" + ver));
+    checkRow->addStretch();
+    f3->addRow("", checkRow);
     return scrollPage(w, v);
 }
 
@@ -678,6 +693,7 @@ QJsonObject SettingsDialog::result() const
     s["confirmStreamStop"] = m_confirmStop->isChecked();
     s["recordToFile"] = m_autoRecord->isChecked();
     s["snapping"] = m_snapping->isChecked();
+    s["autoUpdateEnabled"] = m_autoUpdate->isChecked();
 
     s["serverUrl"] = m_server->text().trimmed();
     s["streamKey"] = m_key->text().trimmed();

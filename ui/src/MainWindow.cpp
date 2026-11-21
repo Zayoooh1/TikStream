@@ -40,6 +40,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSet>
@@ -279,6 +280,20 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     connect(devicesTimer, &QTimer::timeout, this, [this] { refreshAudioDevices(); });
     devicesTimer->start(3000);
     m_levelsTimer->start(40);
+
+    m_updateTimer = new QTimer(this);
+    m_updateTimer->setInterval(6 * 3600 * 1000); // check every 6 hours when enabled
+    connect(m_updateTimer, &QTimer::timeout, this, [this] {
+        if (m_s["autoUpdateEnabled"].toBool(true) && !m_streaming && !m_recording)
+            checkForUpdates(false);
+    });
+    if (!QCoreApplication::arguments().contains("--test")) {
+        m_updateTimer->start();
+        QTimer::singleShot(5000, this, [this] {
+            if (m_s["autoUpdateEnabled"].toBool(true) && !m_streaming && !m_recording)
+                checkForUpdates(false);
+        });
+    }
 }
 
 MainWindow::~MainWindow() = default;
@@ -349,6 +364,8 @@ void MainWindow::buildMenu()
     }
 
     auto *help = menuBar()->addMenu("Help");
+    help->addAction(themedIcon("refresh"), "Check for Updates…", this, [this] { checkForUpdates(true); });
+    help->addSeparator();
     help->addAction("Open Log File", this, [] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(EngineHost::instance().callObj("logPath")["path"].toString()));
     });
@@ -2906,6 +2923,7 @@ void MainWindow::openSettings()
 {
     m_audioDevices = EngineHost::instance().callObj("listAudioDevices");
     SettingsDialog dlg(m_s, m_audioDevices, m_streaming || m_recording || m_replayActive, this);
+    connect(&dlg, &SettingsDialog::checkForUpdatesRequested, this, [this] { checkForUpdates(true); });
     connect(&dlg, &SettingsDialog::applied, this, [this](const QJsonObject &s) {
         m_s = s;
         pushSettings();
@@ -2914,6 +2932,151 @@ void MainWindow::openSettings()
         m_mixerSignature.clear();
         rebuildMixer();
         loadProperties();
+    });
+    dlg.exec();
+}
+
+void MainWindow::checkForUpdates(bool manual)
+{
+    if (m_updateCheckPending) return;
+    m_updateCheckPending = true;
+    auto res = std::make_shared<QJsonObject>();
+    auto *worker = QThread::create([res] {
+        *res = EngineHost::instance().callObj("checkUpdate");
+    });
+    connect(worker, &QThread::finished, this, [this, res, manual] {
+        m_updateCheckPending = false;
+        const QJsonObject info = *res;
+        const QString err = info["error"].toString();
+        if (!err.isEmpty()) {
+            if (manual) QMessageBox::warning(this, "Updates", "Could not check for updates:\n" + err);
+            return;
+        }
+        const QString latest = info["latestVersion"].toString();
+        const QString current = info["currentVersion"].toString();
+        if (info["updateAvailable"].toBool()) {
+            if (!manual && latest == m_skippedUpdateVersion) return;
+            showUpdateDialog(info);
+        } else if (manual) {
+            QMessageBox::information(this, "Updates",
+                QString("You are using the latest version of TikStream (v%1).").arg(current.isEmpty() ? latest : current));
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void MainWindow::showUpdateDialog(const QJsonObject &info)
+{
+    const QString current = info["currentVersion"].toString();
+    const QString latest = info["latestVersion"].toString();
+    const QString releaseUrl = info["releaseUrl"].toString();
+    const QString downloadUrl = info["downloadUrl"].toString();
+    const qint64 sizeBytes = qint64(info["downloadSize"].toDouble());
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("TikStream Update Available");
+    dlg.resize(560, 420);
+    auto *v = new QVBoxLayout(&dlg);
+    v->setContentsMargins(16, 16, 16, 16);
+    v->setSpacing(10);
+
+    auto *title = new QLabel(QString("<b>TikStream v%1 is available</b> (installed: v%2)").arg(latest, current));
+    v->addWidget(title);
+
+    auto *notes = new QPlainTextEdit;
+    notes->setReadOnly(true);
+    notes->setPlainText(info["notes"].toString("New version available on GitHub Releases."));
+    v->addWidget(notes, 1);
+
+    auto *statusLbl = hintLabel(sizeBytes > 0
+        ? QString("Installer size: %1 MB. Your scenes and settings will be preserved.").arg(sizeBytes / 1024.0 / 1024.0, 0, 'f', 1)
+        : "Your scenes and settings will be preserved during upgrade.");
+    v->addWidget(statusLbl);
+
+    auto *progress = new QProgressBar;
+    progress->setRange(0, 100);
+    progress->setValue(0);
+    progress->hide();
+    v->addWidget(progress);
+
+    auto *buttons = new QDialogButtonBox;
+    auto *installBtn = buttons->addButton("Download & Install", QDialogButtonBox::AcceptRole);
+    installBtn->setObjectName("primary");
+    installBtn->setEnabled(!downloadUrl.isEmpty());
+    auto *webBtn = buttons->addButton("Open Release Page", QDialogButtonBox::ActionRole);
+    auto *laterBtn = buttons->addButton("Later", QDialogButtonBox::RejectRole);
+    v->addWidget(buttons);
+
+    auto *poll = new QTimer(&dlg);
+    poll->setInterval(250);
+    connect(poll, &QTimer::timeout, &dlg, [this, &dlg, poll, progress, statusLbl, installBtn, laterBtn] {
+        const auto st = EngineHost::instance().callObj("updateStatus");
+        progress->setValue(st["progress"].toInt());
+        statusLbl->setText(st["status"].toString());
+        const QString err = st["error"].toString();
+        if (!err.isEmpty()) {
+            poll->stop();
+            statusLbl->setText("Download failed: " + err);
+            installBtn->setEnabled(true);
+            laterBtn->setEnabled(true);
+            return;
+        }
+        if (st["ready"].toBool()) {
+            poll->stop();
+            if (m_streaming || m_recording) {
+                QMessageBox::information(&dlg, "Update Ready",
+                    "The update has been downloaded. Stop streaming or recording, then click Download & Install again to apply it.");
+                installBtn->setText("Install Now");
+                installBtn->setEnabled(true);
+                laterBtn->setEnabled(true);
+                return;
+            }
+            const auto r = EngineHost::instance().callObj("installUpdate");
+            if (r.contains("error")) {
+                QMessageBox::warning(&dlg, "Update", r["error"].toString());
+                installBtn->setEnabled(true);
+                laterBtn->setEnabled(true);
+                return;
+            }
+            dlg.accept();
+            QTimer::singleShot(300, this, &QWidget::close);
+        }
+    });
+
+    connect(installBtn, &QPushButton::clicked, &dlg, [this, &dlg, downloadUrl, poll, progress, statusLbl, installBtn, laterBtn] {
+        if (m_streaming || m_recording) {
+            QMessageBox::warning(&dlg, "Update", "Please stop streaming or recording before installing an update.");
+            return;
+        }
+        const auto st = EngineHost::instance().callObj("updateStatus");
+        if (st["ready"].toBool()) {
+            const auto r = EngineHost::instance().callObj("installUpdate");
+            if (r.contains("error")) { QMessageBox::warning(&dlg, "Update", r["error"].toString()); return; }
+            dlg.accept();
+            QTimer::singleShot(300, this, &QWidget::close);
+            return;
+        }
+        installBtn->setEnabled(false);
+        laterBtn->setEnabled(false);
+        progress->setValue(0);
+        progress->show();
+        statusLbl->setText("Starting download…");
+        const auto r = EngineHost::instance().callObj("startUpdate", {{"url", downloadUrl}});
+        if (r.contains("error")) {
+            QMessageBox::warning(&dlg, "Update", r["error"].toString());
+            installBtn->setEnabled(true);
+            laterBtn->setEnabled(true);
+            return;
+        }
+        poll->start();
+    });
+    connect(webBtn, &QPushButton::clicked, &dlg, [releaseUrl] {
+        if (!releaseUrl.isEmpty()) QDesktopServices::openUrl(QUrl(releaseUrl));
+    });
+    connect(laterBtn, &QPushButton::clicked, &dlg, [this, &dlg, latest] {
+        m_skippedUpdateVersion = latest;
+        dlg.reject();
     });
     dlg.exec();
 }

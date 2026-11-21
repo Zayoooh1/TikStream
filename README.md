@@ -15,7 +15,7 @@ A lightweight, high-performance Windows streaming and recording application buil
 - **Multi-Track MKV Audio Recording**: Optional multi-track Matroska recording — Track 1 holds the Full Mix (same as RTMP stream) while Tracks 2+ store individual labeled audio sources (e.g., Microphone, Desktop Audio, Game Audio) for clean post-production editing.
 - **Multistreaming**: Stream simultaneously to a second RTMP destination sharing the same NVENC and AAC encoders.
 - **TikTok LIVE Chat & Overlay**: Built-in LIVE chat dock for any `@username` with gift notifications, tap counter, and a **LIVE Chat Overlay** source (bundles portable `node.exe` in the installer — no separate Node.js installation required).
-- **WiX 5 MSI Installer**: Clean default state on first install, preserves user settings on upgrades/reinstalls, and performs a complete user-data cleanup on uninstall.
+- **WiX 5 MSI Installer & Auto-Updater**: Clean default state on first install, automatic in-app update checks via GitHub Releases (with a toggle in Settings → General), seamless upgrades preserving all scenes/settings, and complete user-data cleanup on uninstall.
 
 ## Architecture
 

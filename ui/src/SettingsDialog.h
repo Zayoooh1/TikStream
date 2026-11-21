@@ -22,6 +22,7 @@ public:
 
 signals:
     void applied(const QJsonObject &settings);
+    void checkForUpdatesRequested();
 
 private:
     QWidget *pageGeneral();
@@ -44,7 +45,7 @@ private:
     QPushButton *m_apply = nullptr;
 
     // general
-    QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr;
+    QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr, *m_autoUpdate = nullptr;
     // stream
     QLineEdit *m_server = nullptr, *m_key = nullptr;
     QCheckBox *m_secondEnabled = nullptr;

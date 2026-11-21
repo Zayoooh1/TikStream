@@ -134,6 +134,8 @@ private:
     void toggleReplay();
     void saveReplay();
     void openSettings();
+    void checkForUpdates(bool manual);
+    void showUpdateDialog(const QJsonObject &info);
     void pollStats();
     void pollLevels();
     void updateLiveButtons();
@@ -164,7 +166,9 @@ private:
     QPointF m_dragStart, m_anchor;
     QRectF m_startRect;
 
-    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr;
+    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr;
+    bool m_updateCheckPending = false;
+    QString m_skippedUpdateVersion;
     Hotkeys *m_hotkeys = nullptr;
 
     PreviewWidget *m_preview = nullptr;

@@ -182,6 +182,7 @@ public sealed class AppSettings
     public Dictionary<string, string> Hotkeys { get; set; } = new();
 
     // ---------- Scenes and sources ----------
+    public bool AutoUpdateEnabled { get; set; } = true;
     public List<SourceDef> Sources { get; set; } = new();
     public List<Scene> Scenes { get; set; } = new();
     public string ActiveSceneId { get; set; } = "";

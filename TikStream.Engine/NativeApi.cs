@@ -31,7 +31,8 @@ public static unsafe class NativeApi
         try
         {
             // Read-only queries and render-queue commands do not wait on settings saves or output operations.
-            if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection")
+            if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection"
+                  or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion")
                 result = Dispatch(m, a);
             else lock (Lock) result = Dispatch(m, a);
         }
@@ -212,6 +213,31 @@ public static unsafe class NativeApi
 
             case "logPath":
                 return Ok(new { path = Log.FilePath });
+
+            case "appVersion":
+                return Ok(new { version = AutoUpdater.CurrentVersion });
+
+            case "checkUpdate":
+            {
+                var t = AutoUpdater.CheckAsync();
+                if (!t.Wait(15000)) return JsonSerializer.Serialize(new { currentVersion = AutoUpdater.CurrentVersion, error = "Update check timed out." }, Json);
+                return JsonSerializer.Serialize(t.Result, Json);
+            }
+
+            case "startUpdate":
+            {
+                var err = AutoUpdater.StartDownload(j["url"]?.GetValue<string>() ?? "");
+                return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
+            }
+
+            case "updateStatus":
+                return JsonSerializer.Serialize(AutoUpdater.GetStatus(), Json);
+
+            case "installUpdate":
+            {
+                var err = AutoUpdater.LaunchInstaller();
+                return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
+            }
 
             case "shutdown":
                 TikTok.Clear();
