@@ -34,7 +34,7 @@ public:
     MainWindow(int canvasW, int canvasH, const QString &gpuName);
     ~MainWindow() override;
 
-    // używane przez tryb testowy w main.cpp
+    // used by test mode in main.cpp
     void triggerAction(const QString &action);
 
 protected:
@@ -43,7 +43,7 @@ protected:
     void showEvent(QShowEvent *e) override;
 
 private:
-    // ---------- budowa ----------
+    // ---------- construction ----------
     void buildMenu();
     void buildCentral();
     void buildDocks();
@@ -85,7 +85,7 @@ private:
     void updateSourceStatus();
     void pushSettings();
 
-    // ---------- widoki ----------
+    // ---------- views ----------
     void rebuildScenes();
     void rebuildSourceList();
     void rebuildMixer();
@@ -95,7 +95,7 @@ private:
     void fillCameraModes(const QString &cameraName);
     void selectItem(const QString &itemId);
 
-    // ---------- operacje ----------
+    // ---------- actions ----------
     void addSourceDialog();
     QString addSource(const QString &type, const QString &name, const QString &existingId, bool visible, const QJsonObject &options = {});
     void removeSelectedItem();
@@ -115,7 +115,7 @@ private:
     void duplicateSelectedItem();
     void nudgeSelectedItem(int dxPx, int dyPx);
 
-    // ---------- podgląd ----------
+    // ---------- preview ----------
     QSizeF naturalSize(const QString &sourceId) const;
     QRectF displayRect(const QJsonObject &item) const;
     bool croppable(const QString &type) const;
@@ -126,7 +126,7 @@ private:
     QJsonObject makeFree(QJsonObject item) const;
     double snap(double v, const QList<double> &targets, double tol, double *delta = nullptr) const;
 
-    // ---------- na żywo ----------
+    // ---------- live ----------
     void toggleStream();
     bool prepareStream();
     void toggleRecord();
@@ -169,7 +169,7 @@ private:
     QListWidget *m_sceneList = nullptr, *m_sourceList = nullptr;
     QToolButton *m_btnRemove = nullptr, *m_btnUp = nullptr, *m_btnDown = nullptr;
 
-    // właściwości
+    // properties
     QStackedWidget *m_propsStack = nullptr;
     QLabel *m_propsIcon = nullptr, *m_srcStatus = nullptr;
     QLineEdit *m_srcName = nullptr;
@@ -199,16 +199,16 @@ private:
     QCheckBox *m_chatShowMessages = nullptr, *m_chatShowGifts = nullptr, *m_chatShowTaps = nullptr;
     QPushButton *m_chatDemoBtn = nullptr;
 
-    // mikser
+    // mixer
     QBoxLayout *m_mixerLayout = nullptr;
     bool m_mixerVertical = false;
     struct Strip { MeterWidget *meter; QLabel *db; QToolButton *mute; QSlider *slider; };
     QHash<QString, Strip> m_strips;
 
-    // panel sterujący
+    // controls panel
     QPushButton *m_btnStream = nullptr, *m_btnRecord = nullptr;
 
-    // pasek stanu
+    // status bar
     QLabel *m_stLive = nullptr, *m_stRec = nullptr, *m_stCpu = nullptr, *m_stFps = nullptr,
            *m_stBitrate = nullptr, *m_stRender = nullptr, *m_stDropped = nullptr, *m_stMsg = nullptr;
 };

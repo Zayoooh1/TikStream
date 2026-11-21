@@ -14,27 +14,27 @@ public enum DrawMode { Normal, Blur }
 public struct DrawCmd
 {
     public ID3D11ShaderResourceView Srv;
-    public Vector4 SrcUv;   // u0, v0, u1, v1 (u0>u1 = lustro)
-    public NRect Dst;       // znormalizowany cel na płótnie
+    public Vector4 SrcUv;   // u0, v0, u1, v1 (u0>u1 = mirror)
+    public NRect Dst;       // normalized destination on canvas
     public float Opacity;
     public float RadiusPx;
-    public bool Opaque;     // ignoruj kanał alfa źródła (gry/kamerki potrafią mieć śmieci w alfie)
-    public float Darken;    // mnożnik jasności (1 = bez zmian)
-    public bool Yuv;        // Srv = plan Y (R8), Srv2 = plan UV (R8G8) — kamerka NV12 konwertowana w shaderze
+    public bool Opaque;     // ignore source alpha channel (games/webcams may leave garbage in alpha)
+    public float Darken;    // brightness multiplier (1 = unchanged)
+    public bool Yuv;        // Srv = Y plane (R8), Srv2 = UV plane (R8G8) — NV12 camera converted in shader
     public ID3D11ShaderResourceView? Srv2;
-    public float Brightness;       // delta jasności (-0.5..+0.5, 0 = bez zmian)
-    public float ContrastDelta;    // kontrast = 1 + ContrastDelta (0 = 1.0)
-    public float SaturationDelta;  // nasycenie = 1 + SaturationDelta (0 = 1.0)
+    public float Brightness;       // brightness delta (-0.5..+0.5, 0 = unchanged)
+    public float ContrastDelta;    // contrast = 1 + ContrastDelta (0 = 1.0)
+    public float SaturationDelta;  // saturation = 1 + SaturationDelta (0 = 1.0)
     public bool ChromaKeyEnabled;
-    public Vector3 ChromaKeyRgb;   // kolor klucza (0..1)
+    public Vector3 ChromaKeyRgb;   // key color (0..1)
     public float ChromaKeySimilarity;
     public float ChromaKeySmoothness;
-    public bool Hdr;               // tekstura scRGB R16G16B16A16_Float → tone-mapping HDR→SDR
+    public bool Hdr;               // scRGB R16G16B16A16_Float texture -> HDR-to-SDR tone mapping
 }
 
 /// <summary>
-/// Cały obraz powstaje na GPU: warstwy → płótno BGRA → (shader) NV12 prosto w teksturę enkodera.
-/// Zero kopiowania przez CPU, zero konwersji kolorów po stronie NVENC.
+/// Entire frame is composited on the GPU: layers -> BGRA canvas -> (shader) NV12 directly into encoder texture.
+/// Zero CPU copies, zero color conversion on the NVENC side.
 /// </summary>
 public sealed class Compositor : IDisposable
 {
@@ -67,7 +67,7 @@ VO VS(uint id : SV_VertexID)
 
 Texture2D tex2 : register(t1);
 
-// NV12 (BT.709, zakres TV) → RGB albo zwykła tekstura BGRA
+// NV12 (BT.709, TV range) -> RGB or regular BGRA texture
 float4 SampleSrc(float2 uv, float yuv)
 {
     if (yuv > 0.5)
@@ -86,7 +86,7 @@ float2 RgbToCbCr(float3 rgb)
     return float2(cb, cr);
 }
 
-// scRGB (liniowy 16-bit float, 1.0 = 80 nitów) → sRGB SDR (ACES filmic + gamma 2.2)
+// scRGB (linear 16-bit float, 1.0 = 80 nits) -> sRGB SDR (ACES filmic + gamma 2.2)
 float3 ToneMapHdrToSdr(float3 rgb)
 {
     float3 x = max(rgb, 0.0) * 0.35;
@@ -108,7 +108,7 @@ float4 PSLayer(VO i) : SV_Target
             float sim = max(0.001, p3.w);
             float sm = max(0.001, p4.x);
             float mask = smoothstep(sim, sim + sm, dist);
-            // lekkie usuwanie poświaty tła (despill) przy krawędziach
+            // subtle background edge despill
             float spill = smoothstep(sim, sim + sm * 2.5, dist);
             float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
             rgb = lerp(luma.xxx, rgb, lerp(0.35, 1.0, spill));
@@ -149,7 +149,7 @@ float4 PSBlur(VO i) : SV_Target
     return float4(col, 1);
 }
 
-// BT.709, zakres ograniczony (TV) — standard dla H.264 w streamingu
+// BT.709, limited range (TV) — standard for H.264 streaming
 float4 PSY(VO i) : SV_Target
 {
     float3 c = tex.Sample(smp, i.uv).rgb;
@@ -159,7 +159,7 @@ float4 PSY(VO i) : SV_Target
 
 float4 PSUV(VO i) : SV_Target
 {
-    float3 c = tex.Sample(smp, i.uv).rgb; // próbka liniowa w środku bloku 2x2 = średnia z 4 pikseli
+    float3 c = tex.Sample(smp, i.uv).rgb; // bilinear sample at 2x2 block center = average of 4 pixels
     float u = dot(c, float3(-0.114572, -0.385428, 0.5));
     float v = dot(c, float3(0.5, -0.454153, -0.045847));
     return float4(128.0 / 255.0 + u * (224.0 / 255.0), 128.0 / 255.0 + v * (224.0 / 255.0), 0, 1);
@@ -187,7 +187,7 @@ float4 PSUV(VO i) : SV_Target
     public ID3D11RenderTargetView CanvasRtv { get; }
     public ID3D11ShaderResourceView CanvasSrv { get; }
 
-    // małe bufory tła (rozmyte źródło) — rozmycie liczone w niskiej rozdzielczości, prawie zero kosztu
+    // small background blur buffers — computed at low resolution for near-zero GPU cost
     public const int BlurSlots = 4;
     private const int BgW = 144, BgH = 256;
     private readonly ID3D11Texture2D[] _bg = new ID3D11Texture2D[BlurSlots];
@@ -198,7 +198,7 @@ float4 PSUV(VO i) : SV_Target
     private readonly ID3D11Texture2D _white;
     public ID3D11ShaderResourceView WhiteSrv { get; }
 
-    // podgląd
+    // preview
     private IDXGISwapChain1? _swap;
     private ID3D11RenderTargetView? _swapRtv;
     private IntPtr _swapHwnd;
@@ -295,7 +295,7 @@ float4 PSUV(VO i) : SV_Target
         _ctx.Draw(4, 0);
     }
 
-    /// <summary>Renderuje rozmyte tło z fragmentu tekstury do małego bufora <paramref name="slot"/> (wynik w <see cref="BgSrv"/>).</summary>
+    /// <summary>Renders a blurred background from a texture region into small buffer <paramref name="slot"/> (output in <see cref="BgSrv"/>).</summary>
     public void RenderBlurBackground(int slot, ID3D11ShaderResourceView srcSrv, ID3D11ShaderResourceView? uvSrv, Vector4 srcUv, bool hdr = false)
     {
         SetCommon();
@@ -313,7 +313,7 @@ float4 PSUV(VO i) : SV_Target
         _ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
     }
 
-    /// <summary>Składa warstwy na płótnie.</summary>
+    /// <summary>Composites layers onto the canvas.</summary>
     public void RenderCanvas(ReadOnlySpan<DrawCmd> cmds)
     {
         SetCommon();
@@ -340,7 +340,7 @@ float4 PSUV(VO i) : SV_Target
             new Vector4(c.ChromaKeySmoothness, c.Hdr ? 1 : 0, 0, 0));
     }
 
-    /// <summary>Rysuje warstwę na dowolnej teksturze (np. kursor na klatce z przechwytu).</summary>
+    /// <summary>Draws a layer onto an arbitrary render target (e.g. cursor overlay onto a captured frame).</summary>
     public void DrawOnto(ID3D11RenderTargetView rtv, int w, int h, in DrawCmd cmd)
     {
         SetCommon();
@@ -353,7 +353,7 @@ float4 PSUV(VO i) : SV_Target
         _ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
     }
 
-    /// <summary>Konwersja płótna do NV12 bezpośrednio w teksturze enkodera (dwa przebiegi: Y i UV).</summary>
+    /// <summary>Converts the canvas to NV12 directly in the encoder texture (two passes: Y and UV).</summary>
     public void ConvertToNv12(ID3D11RenderTargetView yRtv, ID3D11RenderTargetView uvRtv)
     {
         SetCommon();
@@ -374,7 +374,7 @@ float4 PSUV(VO i) : SV_Target
         _ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
     }
 
-    // ---------------- Podgląd ----------------
+    // ---------------- Preview ----------------
 
     public void SetPreviewTarget(IntPtr hwnd, int w, int h)
     {
@@ -402,7 +402,7 @@ float4 PSUV(VO i) : SV_Target
         using var back = _swap!.GetBuffer<ID3D11Texture2D>(0);
         _swapRtv = _dev.CreateRenderTargetView(back);
         _swapW = w; _swapH = h;
-        Log.Info($"Podgląd: swapchain {w}x{h}");
+        Log.Info($"Preview: swapchain {w}x{h}");
     }
 
     private IDXGIFactory2 GetFactory()
@@ -412,13 +412,13 @@ float4 PSUV(VO i) : SV_Target
         return adapter.GetParent<IDXGIFactory2>();
     }
 
-    /// <summary>Rysuje płótno do okna podglądu (z zachowaniem proporcji) + ramkę zaznaczonej warstwy. Nigdy nie blokuje.</summary>
+    /// <summary>Draws the canvas into the preview window (aspect-preserving) + selected layer border. Never blocks.</summary>
     public void PresentPreview(NRect? selection)
     {
         if (_swap == null || _swapRtv == null) return;
         SetCommon();
         _ctx.OMSetRenderTargets(_swapRtv);
-        _ctx.ClearRenderTargetView(_swapRtv, new Color4(0.063f, 0.067f, 0.086f, 1)); // #101116 = tło podglądu w UI
+        _ctx.ClearRenderTargetView(_swapRtv, new Color4(0.063f, 0.067f, 0.086f, 1)); // #101116 = preview background in UI
         var vp = PreviewViewport(_swapW, _swapH, Width, Height);
         _ctx.RSSetViewport(new Viewport(vp.X, vp.Y, vp.Width, vp.Height));
         _ctx.OMSetBlendState(_opaque);
@@ -435,7 +435,7 @@ float4 PSUV(VO i) : SV_Target
             DrawQuad(WhiteSrv, new Vector4(s.X, s.Y + s.H - ty, s.W, ty), full, p0, Vector4.Zero);
             DrawQuad(WhiteSrv, new Vector4(s.X, s.Y, tx, s.H), full, p0, Vector4.Zero);
             DrawQuad(WhiteSrv, new Vector4(s.X + s.W - tx, s.Y, tx, s.H), full, p0, Vector4.Zero);
-            // uchwyty w rogach (do zmiany rozmiaru) — biały kwadrat z ciemną obwódką
+            // corner resize handles — white square with dark border
             float hw = 10f / vp.Width, hh = 10f / vp.Height, bw = 2f / vp.Width, bh = 2f / vp.Height;
             foreach (var (cx, cy) in new[] { (s.X, s.Y), (s.X + s.W, s.Y), (s.X, s.Y + s.H), (s.X + s.W, s.Y + s.H) })
             {
@@ -444,8 +444,8 @@ float4 PSUV(VO i) : SV_Target
             }
         }
         _ctx.PSSetShaderResource(0, null!);
-        var pr = _swap.Present(0, PresentFlags.DoNotWait); // DXGI_ERROR_WAS_STILL_DRAWING = pomijamy klatkę podglądu
-        if (pr.Failure && pr.Code != unchecked((int)0x887A000A) && _presentErrors++ < 5) Log.Warn($"Present podglądu: 0x{pr.Code:X8}");
+        var pr = _swap.Present(0, PresentFlags.DoNotWait); // DXGI_ERROR_WAS_STILL_DRAWING = skip preview frame
+        if (pr.Failure && pr.Code != unchecked((int)0x887A000A) && _presentErrors++ < 5) Log.Warn($"Preview present: 0x{pr.Code:X8}");
     }
 
     public static System.Drawing.RectangleF PreviewViewport(int vw, int vh, int cw, int ch)

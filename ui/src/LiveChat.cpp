@@ -48,7 +48,7 @@ public:
     explicit GiftNotifications(QWidget *parent) : QWidget(parent)
     {
         setObjectName("liveChatGifts");
-        setAccessibleName("Prezenty LIVE");
+        setAccessibleName("LIVE Gifts");
         hide();
         m_turn.setDuration(240);
         m_turn.setStartValue(0.0);
@@ -77,7 +77,7 @@ public:
     {
         const Row incoming{sender, nick, text};
         const bool moving = m_turn.state() == QAbstractAnimation::Running;
-        // Wpis, który właśnie znika, może wrócić na dół jako nowe powiadomienie.
+        // An entry that is currently fading out can reappear at the bottom as a new notification.
         for (int i = moving ? 1 : 0; i < m_rows.size(); ++i) {
             if (m_rows[i].sender != sender) continue;
             m_rows[i] = incoming;
@@ -164,16 +164,16 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     accRow->setSpacing(4);
     auto *atLabel = new QLabel("@", this);
     m_accountEdit = new QLineEdit(this);
-    m_accountEdit->setPlaceholderText("nick_tiktok");
-    m_accountEdit->setToolTip("Wpisz nazwę użytkownika TikTok (bez @) i naciśnij Enter");
-    auto *connectBtn = new QPushButton("Połącz", this);
+    m_accountEdit->setPlaceholderText("tiktok_username");
+    m_accountEdit->setToolTip("Enter a TikTok username (without @) and press Enter");
+    auto *connectBtn = new QPushButton("Connect", this);
     accRow->addWidget(atLabel);
     accRow->addWidget(m_accountEdit, 1);
     accRow->addWidget(connectBtn);
 
-    m_status = new QLabel("Wpisz @nick TikToka powyżej, aby połączyć czat LIVE.", this);
+    m_status = new QLabel("Enter a TikTok @username above to connect to LIVE chat.", this);
     m_status->setWordWrap(true);
-    m_taps = new QLabel("Tapy: —", this);
+    m_taps = new QLabel("Likes: —", this);
     m_taps->setObjectName("liveChatTaps");
     m_gifts = new GiftNotifications(this);
     m_messages = new QListWidget(this);
@@ -183,10 +183,10 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_messages->setTextElideMode(Qt::ElideNone);
     m_messages->setIconSize({26, 26});
     m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_connection = new QPushButton("Połącz", this);
-    auto *refresh = new QPushButton("Odśwież", this);
-    refresh->setToolTip("Sprawdź natychmiast, czy transmisja LIVE jest aktywna (bez czekania 30 s)");
-    auto *open = new QPushButton("Otwórz LIVE", this);
+    m_connection = new QPushButton("Connect", this);
+    auto *refresh = new QPushButton("Refresh", this);
+    refresh->setToolTip("Check immediately if the LIVE stream is active (without waiting 30 s)");
+    auto *open = new QPushButton("Open LIVE", this);
     auto *actions = new QHBoxLayout;
     actions->addWidget(m_connection);
     actions->addWidget(refresh);
@@ -222,13 +222,13 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     connect(&m_process, &QProcess::readyReadStandardOutput, this, &LiveChat::readEvents);
     connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            m_status->setText("Nie udało się uruchomić połączenia czatu.");
-            m_connection->setText("Połącz ponownie");
+            m_status->setText("Failed to start chat connection.");
+            m_connection->setText("Reconnect");
         }
     });
     connect(&m_process, &QProcess::finished, this, [this] {
-        m_status->setText(m_paused ? "Czat wstrzymany." : "Połączenie czatu zakończone.");
-        m_connection->setText(m_paused ? "Wznów" : "Połącz ponownie");
+        m_status->setText(m_paused ? "Chat paused." : "Chat connection ended.");
+        m_connection->setText(m_paused ? "Resume" : "Reconnect");
     });
 }
 
@@ -277,8 +277,8 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
     int topY = pad;
     int bottomY = height - pad;
 
-    // 1. Tapy w prawym dolnym rogu
-    const QString tapsLabel = m_demoPreview && m_tapsText.isEmpty() ? QStringLiteral("Tapy: 12 450") : m_tapsText;
+    // 1. Likes counter in bottom-right corner
+    const QString tapsLabel = m_demoPreview && m_tapsText.isEmpty() ? QStringLiteral("Likes: 12,450") : m_tapsText;
     if (showTaps && !tapsLabel.isEmpty()) {
         QFont tf("Segoe UI", 20, QFont::Bold);
         p.setFont(tf);
@@ -295,11 +295,11 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
         bottomY = int(pill.top()) - 10;
     }
 
-    // 2. Prezenty u góry po prawej (maks. 3 karty)
+    // 2. Gifts in top-right corner (max 3 cards)
     QList<GiftNotifications::Row> giftRows = m_gifts->rows();
     if (m_demoPreview && giftRows.isEmpty()) {
-        giftRows.append({"demo1", "kuba_gg", "🎁 Róża ×5"});
-        giftRows.append({"demo2", "marta_live", "🎁 Serce ×2"});
+        giftRows.append({"demo1", "alex_gg", "🎁 Rose ×5"});
+        giftRows.append({"demo2", "maya_live", "🎁 Heart ×2"});
     }
     if (showGifts && !giftRows.isEmpty()) {
         QFont nickF("Segoe UI", 14, QFont::Bold);
@@ -325,7 +325,7 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
         topY += 4;
     }
 
-    // 3. Wiadomości czatu od dołu do góry (ostatnie widoczne)
+    // 3. Chat messages from bottom to top (most recent visible)
     if (showChat && bottomY > topY + 40) {
         struct Msg { QString nick, text; QIcon icon; };
         QList<Msg> msgs;
@@ -337,9 +337,9 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
             msgs.append({nl >= 0 ? raw.left(nl) : raw, nl >= 0 ? raw.mid(nl + 1) : QString(), it->icon()});
         }
         if (m_demoPreview && msgs.isEmpty()) {
-            msgs.append({"kuba_gg", "Lecimy dzisiaj po zwycięstwo! 🔥", QIcon()});
-            msgs.append({"ania_pl", "Super jakość obrazu i 60 FPS!", QIcon()});
-            msgs.append({"marek99", "Pozdro ze streamu!", QIcon()});
+            msgs.append({"alex_gg", "Let's get the win today! 🔥", QIcon()});
+            msgs.append({"sarah_tv", "Crisp quality and smooth 60 FPS!", QIcon()});
+            msgs.append({"mark99", "Shoutout from the stream!", QIcon()});
         }
 
         QFont nickF("Segoe UI", 14, QFont::Bold);
@@ -393,17 +393,17 @@ void LiveChat::setAccount(const QString &username)
     m_messages->clear();
     m_gifts->clear();
     m_tapsText.clear();
-    m_taps->setText("Tapy: —");
+    m_taps->setText("Likes: —");
     notifyOverlay();
     stopProcess();
     if (m_account.isEmpty()) {
         m_started = false;
-        m_status->setText("Wpisz @nick TikToka powyżej, aby połączyć czat LIVE.");
-        m_connection->setText("Połącz");
+        m_status->setText("Enter a TikTok @username above to connect to LIVE chat.");
+        m_connection->setText("Connect");
         return;
     }
     if (m_started || isVisible()) start();
-    else m_status->setText(QStringLiteral("@%1 · oczekiwanie na połączenie").arg(m_account));
+    else m_status->setText(QStringLiteral("@%1 · waiting to connect").arg(m_account));
 }
 
 void LiveChat::applyAccountFromInput()
@@ -416,7 +416,7 @@ void LiveChat::applyAccountFromInput()
         m_messages->clear();
         m_gifts->clear();
         m_tapsText.clear();
-        m_taps->setText("Tapy: —");
+        m_taps->setText("Likes: —");
         notifyOverlay();
         emit accountChanged(m_account);
     }
@@ -428,8 +428,8 @@ void LiveChat::applyAccountFromInput()
 void LiveChat::start()
 {
     if (m_account.isEmpty()) {
-        m_status->setText("Wpisz @nick TikToka powyżej, aby połączyć czat LIVE.");
-        m_connection->setText("Połącz");
+        m_status->setText("Enter a TikTok @username above to connect to LIVE chat.");
+        m_connection->setText("Connect");
         return;
     }
     m_started = true;
@@ -439,12 +439,12 @@ void LiveChat::start()
     const auto bundledNode = QCoreApplication::applicationDirPath() + "/chat/node.exe";
     const auto node = QFileInfo::exists(bundledNode) ? bundledNode : QStandardPaths::findExecutable("node");
     if (node.isEmpty() || !QFileInfo::exists(script) || !QFileInfo::exists(QFileInfo(script).path() + "/node_modules/tiktok-live-connector/package.json")) {
-        m_status->setText("Brakuje Node.js lub modułu czatu TikTok.");
-        m_connection->setText("Połącz ponownie");
+        m_status->setText("Node.js or TikTok chat module is missing.");
+        m_connection->setText("Reconnect");
         return;
     }
-    m_status->setText(QStringLiteral("Łączenie z @%1…").arg(m_account));
-    m_connection->setText("Wstrzymaj");
+    m_status->setText(QStringLiteral("Connecting to @%1…").arg(m_account));
+    m_connection->setText("Pause");
     m_process.setStandardErrorFile(QProcess::nullDevice());
     m_process.start(node, {script, m_account});
 }
@@ -460,10 +460,10 @@ void LiveChat::readEvents()
         if (event["type"] == "clearGifts") { m_gifts->clear(); notifyOverlay(); }
         if (event["type"] == "taps") {
             const auto count = event["count"].toInteger(-1);
-            if (count < 0) { m_tapsText.clear(); m_taps->setText("Tapy: —"); }
+            if (count < 0) { m_tapsText.clear(); m_taps->setText("Likes: —"); }
             else {
-                m_tapsText = QString(event["partial"].toBool() ? "Odebrane tapy: %1" : "Tapy: %1")
-                                 .arg(QLocale(QLocale::Polish).toString(count));
+                m_tapsText = QString(event["partial"].toBool() ? "Received likes: %1" : "Likes: %1")
+                                 .arg(QLocale(QLocale::English).toString(count));
                 m_taps->setText(m_tapsText);
             }
             notifyOverlay();
@@ -472,19 +472,19 @@ void LiveChat::readEvents()
         const auto state = event["state"].toString();
         const auto codeVal = event["code"];
         const QString codeText = codeVal.isDouble()
-            ? QStringLiteral(" (kod %1)").arg(codeVal.toInteger())
+            ? QStringLiteral(" (code %1)").arg(codeVal.toInteger())
             : (codeVal.isString() && !codeVal.toString().isEmpty()
                 ? QStringLiteral(" (%1)").arg(codeVal.toString().left(24))
                 : QString());
-        if (state == "connecting") m_status->setText(QStringLiteral("Łączenie z @%1…").arg(m_account));
+        if (state == "connecting") m_status->setText(QStringLiteral("Connecting to @%1…").arg(m_account));
         else if (state == "connected") m_status->setText(QStringLiteral("LIVE · @%1").arg(m_account));
-        else if (state == "offline") m_status->setText(QStringLiteral("@%1 jest offline. Następna próba za 30 s.").arg(m_account));
-        else if (state == "disconnected") m_status->setText(QStringLiteral("Przerwano połączenie WebSocket%1. Ponowna próba za 30 s.").arg(codeText));
-        else if (state == "rate_limited") m_status->setText(QStringLiteral("Ograniczenie częstotliwości usługi podpisującej%1. Następna próba za 30 s.").arg(codeText));
-        else if (state == "sign_error") m_status->setText(QStringLiteral("Błąd usługi podpisującej czatu%1. Następna próba za 30 s.").arg(codeText));
-        else if (state == "ws_error") m_status->setText(QStringLiteral("Błąd połączenia WebSocket%1. Następna próba za 30 s.").arg(codeText));
-        else if (state == "room_error") m_status->setText(QStringLiteral("Brak dostępu do pokoju LIVE%1. Następna próba za 30 s.").arg(codeText));
-        else if (state == "unavailable") m_status->setText(QStringLiteral("Czat TikTok jest niedostępny%1. Następna próba za 30 s.").arg(codeText));
+        else if (state == "offline") m_status->setText(QStringLiteral("@%1 is offline. Retrying in 30 s.").arg(m_account));
+        else if (state == "disconnected") m_status->setText(QStringLiteral("WebSocket connection lost%1. Retrying in 30 s.").arg(codeText));
+        else if (state == "rate_limited") m_status->setText(QStringLiteral("Signing service rate-limited%1. Retrying in 30 s.").arg(codeText));
+        else if (state == "sign_error") m_status->setText(QStringLiteral("Chat signing service error%1. Retrying in 30 s.").arg(codeText));
+        else if (state == "ws_error") m_status->setText(QStringLiteral("WebSocket connection error%1. Retrying in 30 s.").arg(codeText));
+        else if (state == "room_error") m_status->setText(QStringLiteral("Cannot access LIVE room%1. Retrying in 30 s.").arg(codeText));
+        else if (state == "unavailable") m_status->setText(QStringLiteral("TikTok chat is unavailable%1. Retrying in 30 s.").arg(codeText));
     }
     m_input.remove(0, consumed);
     if (m_input.size() > 512 * 1024) m_input.clear();

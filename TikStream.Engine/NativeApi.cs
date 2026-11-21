@@ -8,9 +8,9 @@ using TikStream.Engine;
 namespace TikStream;
 
 /// <summary>
-/// API silnika dla interfejsu Qt (C++), ładowane przez hostfxr w tym samym procesie.
-/// Kontrakt: Call(metoda, json) → json (UTF-8, zwalniany przez FreeString).
-/// Piksele źródeł obraz/tekst idą osobną funkcją, bez kodowania w JSON.
+/// Engine API for the Qt (C++) UI, loaded in-process via hostfxr.
+/// Contract: Call(method, json) -> json (UTF-8, freed via FreeString).
+/// Image/text source pixels are uploaded through a dedicated function without JSON encoding.
 /// </summary>
 public static unsafe class NativeApi
 {
@@ -30,7 +30,7 @@ public static unsafe class NativeApi
         string result;
         try
         {
-            // Odczyty i polecenia kolejki renderera nie czekają na zapis ustawień ani operacje wyjść.
+            // Read-only queries and render-queue commands do not wait on settings saves or output operations.
             if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection")
                 result = Dispatch(m, a);
             else lock (Lock) result = Dispatch(m, a);
@@ -77,7 +77,7 @@ public static unsafe class NativeApi
                 if (_engine != null) return Ok(new { ok = true, gpu = _engine.Gpu.AdapterName, canvasWidth = _engine.CanvasWidth, canvasHeight = _engine.CanvasHeight });
                 var dir = Path.GetDirectoryName(typeof(NativeApi).Assembly.Location)!;
                 FF.Init(Path.Combine(dir, "native"));
-                Log.Info($"Silnik TikStream, .NET {Environment.Version}");
+                Log.Info($"TikStream Engine, .NET {Environment.Version}");
                 _settings = AppSettings.Load();
                 _settings.Save();
                 _engine = new StreamEngine(_settings);
@@ -99,7 +99,7 @@ public static unsafe class NativeApi
                 var s = JsonSerializer.Deserialize<AppSettings>(args, Json) ?? new AppSettings();
                 s.StreamKey = j["streamKey"]?.GetValue<string>() ?? _settings.StreamKey;
                 s.SecondStreamKey = j["secondStreamKey"]?.GetValue<string>() ?? _settings.SecondStreamKey;
-                if (s.Scenes.Count == 0) s.Scenes = _settings.Scenes; // ochrona przed pustym stanem
+                if (s.Scenes.Count == 0) s.Scenes = _settings.Scenes; // guard against empty state
                 s.NormalizeVideo();
                 Engine().ApplySettings(s, _settings);
                 _settings = s;
@@ -214,17 +214,17 @@ public static unsafe class NativeApi
                 return Ok();
 
             default:
-                throw new InvalidOperationException("Nieznana metoda: " + method);
+                throw new InvalidOperationException("Unknown method: " + method);
         }
     }
 
     private static string Result(Task<string?> t)
     {
-        var err = t.Wait(15000) ? t.Result : "Przekroczono czas oczekiwania";
+        var err = t.Wait(15000) ? t.Result : "Operation timed out";
         return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
     }
 
-    private static StreamEngine Engine() => _engine ?? throw new InvalidOperationException("Silnik nie został zainicjalizowany.");
+    private static StreamEngine Engine() => _engine ?? throw new InvalidOperationException("Engine is not initialized.");
 
     private static void ScheduleSave()
     {

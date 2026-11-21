@@ -6,16 +6,16 @@
            Manufacturer="TikStream"
            Version="1.0.0.0"
            UpgradeCode="7F8C3D21-6E94-4A1B-9C52-3E4A7B1D8F02"
-           Language="1045"
-           Codepage="1250"
+           Language="1033"
+           Codepage="1252"
            Scope="perMachine">
 
     <MajorUpgrade AllowSameVersionUpgrades="yes"
                   Schedule="afterInstallInitialize"
-                  DowngradeErrorMessage="Nowsza wersja programu TikStream jest już zainstalowana." />
+                  DowngradeErrorMessage="A newer version of TikStream is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-    <!-- Zapamiętaj poprzedni folder instalacji przy reinstalacji/aktualizacji -->
+    <!-- Remember previous install folder on reinstall/upgrade -->
     <Property Id="PREVIOUS_INSTALLFOLDER">
       <RegistrySearch Id="FindPrevInstallFolder" Root="HKLM" Key="Software\TikStream" Name="InstallFolder" Type="directory" />
     </Property>
@@ -23,10 +23,10 @@
 
     <Icon Id="TikStreamIcon.ico" SourceFile="TikStream.ico" />
     <Property Id="ARPPRODUCTICON" Value="TikStreamIcon.ico" />
-    <Property Id="ARPHELPLINK" Value="https://www.tiktok.com" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Zayoooh1/TikStream" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
-    <!-- Domyślne opcje instalatora (Secure="yes" wymagane do przekazania przez UAC w perMachine) -->
+    <!-- Default installer options (Secure="yes" required across UAC in perMachine installs) -->
     <Property Id="INSTALLFOLDER" Secure="yes" />
     <Property Id="INSTALL_STARTMENU" Value="1" Secure="yes" />
     <Property Id="INSTALL_DESKTOP" Value="1" Secure="yes" />
@@ -34,12 +34,12 @@
     <Property Id="INSTALL_MINIMIZED" Value="0" Secure="yes" />
     <Property Id="LAUNCH_AFTER_INSTALL" Value="1" />
 
-    <!-- Argument przekazywany przy opcji 'Uruchamiaj zminimalizowany' -->
+    <!-- Argument passed when 'Start minimized' is checked -->
     <SetProperty Id="SHORTCUT_ARGS" Action="SetShortcutArgsMin" Value="--minimized" After="CostFinalize" Condition="INSTALL_MINIMIZED = 1" />
     <SetProperty Id="AUTOSTART_CMD" Action="SetAutostartMin" Value="&quot;[INSTALLFOLDER]TikStream.exe&quot; --minimized" After="CostFinalize" Condition="INSTALL_MINIMIZED = 1" />
     <SetProperty Id="AUTOSTART_CMD" Action="SetAutostartNorm" Value="&quot;[INSTALLFOLDER]TikStream.exe&quot;" After="CostFinalize" Condition="INSTALL_MINIMIZED &lt;&gt; 1" />
 
-    <!-- Cichy reset przy świeżej instalacji ORAZ pełne usunięcie wszystkich danych użytkownika przy odinstalowaniu ('Usuń', ale NIE przy aktualizacji/reinstalacji!) -->
+    <!-- Silent reset on fresh install AND full user-data cleanup on uninstall (NOT on upgrade/reinstall) -->
     <SetProperty Id="WixQuietExec64CmdLine"
                  Action="SetResetFreshCmd"
                  Value="&quot;[System64Folder]cmd.exe&quot; /c del /f /q &quot;%APPDATA%\TikStream\settings.json&quot; &quot;%APPDATA%\TikStream\settings.json.tmp&quot; 2&gt;nul &amp; reg delete &quot;HKCU\Software\TikStream\UI2&quot; /f 2&gt;nul"
@@ -71,7 +71,7 @@
       <Custom Action="PurgeUserDataOnUninstall" After="InstallFinalize" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
-    <!-- Uruchomienie aplikacji po zakończeniu instalacji -->
+    <!-- Launch application after installation -->
     <CustomAction Id="LaunchTikStream"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]TikStream.exe [SHORTCUT_ARGS]"
@@ -101,42 +101,42 @@
       <ComponentRef Id="AutostartRegistryComp" />
     </Feature>
 
-    <!-- Główny plik EXE + zapis ścieżki instalacji dla przyszłych aktualizacji/reinstalacji -->
+    <!-- Main executable + store install folder for future upgrades/reinstalls -->
     <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="2B9D4E11-1C34-4B78-8F21-9A0C6E3B2D14">
       <File Id="TikStreamExe" Source="stage\TikStream.exe" KeyPath="yes" />
       <RegistryValue Root="HKLM" Key="Software\TikStream" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" />
     </Component>
 
-    <!-- Wszystkie pozostałe pliki runtime z czystego katalogu stage -->
+    <!-- All remaining runtime files from clean stage directory -->
     <ComponentGroup Id="StageFiles" Directory="INSTALLFOLDER">
       <Files Include="stage\**">
         <Exclude Files="stage\TikStream.exe" />
       </Files>
     </ComponentGroup>
 
-    <!-- Skrót w Menu Start -->
+    <!-- Start Menu shortcuts -->
     <Component Id="StartMenuShortcutComp" Directory="ApplicationProgramsFolder" Guid="4A7C1D82-5B63-4E91-A123-7D8E9F012B34" Condition="INSTALL_STARTMENU = 1">
       <Shortcut Id="StartMenuShortcut"
                 Name="TikStream"
-                Description="Aplikacja do transmisji TikTok LIVE"
+                Description="TikTok LIVE streaming application"
                 Target="[INSTALLFOLDER]TikStream.exe"
                 Arguments="[SHORTCUT_ARGS]"
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="TikStreamIcon.ico" />
       <Shortcut Id="UninstallShortcut"
-                Name="Odinstaluj TikStream"
-                Description="Usuwa program TikStream"
+                Name="Uninstall TikStream"
+                Description="Removes TikStream from your computer"
                 Target="[System64Folder]msiexec.exe"
                 Arguments="/x [ProductCode]" />
       <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\TikStream\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
-    <!-- Skrót na Pulpicie -->
+    <!-- Desktop shortcut -->
     <Component Id="DesktopShortcutComp" Directory="DesktopFolder" Guid="8E2F5A93-3D14-4C82-B456-1E2F3A4B5C67" Condition="INSTALL_DESKTOP = 1">
       <Shortcut Id="DesktopShortcut"
                 Name="TikStream"
-                Description="Aplikacja do transmisji TikTok LIVE"
+                Description="TikTok LIVE streaming application"
                 Target="[INSTALLFOLDER]TikStream.exe"
                 Arguments="[SHORTCUT_ARGS]"
                 WorkingDirectory="INSTALLFOLDER"
@@ -144,7 +144,7 @@
       <RegistryValue Root="HKCU" Key="Software\TikStream\Installer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
-    <!-- Autostart z systemem Windows -->
+    <!-- Start with Windows -->
     <Component Id="AutostartRegistryComp" Directory="INSTALLFOLDER" Guid="C1D2E3F4-9A8B-4C7D-8E6F-5A4B3C2D1E0F" Condition="INSTALL_AUTOSTART = 1">
       <RegistryValue Root="HKCU"
                      Key="Software\Microsoft\Windows\CurrentVersion\Run"

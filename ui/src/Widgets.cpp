@@ -15,7 +15,7 @@ PaddedSpinBox::PaddedSpinBox(QWidget *parent) : QSpinBox(parent)
 
 QIcon themedIcon(const QString &name)
 {
-    // ikony rysowane z SVG w dwóch stanach: normalny i wyłączony
+    // Icons rendered from SVG in two states: normal and disabled
     QIcon icon;
     QSvgRenderer r(QStringLiteral(":/icons/%1.svg").arg(name));
     for (int size : {16, 20, 24, 32}) {
@@ -101,7 +101,7 @@ void MeterWidget::paintEvent(QPaintEvent *)
     auto xFor = [&](float db) { return int(r.left() + (db + 60.f) / 60.f * r.width()); };
     const int xYellow = xFor(-20.f), xRed = xFor(-9.f);
 
-    // tło stref (przygaszone) — jak w OBS
+    // Zone backgrounds (dimmed) — OBS style
     p.fillRect(QRect(QPoint(r.left(), r.top()), QPoint(xYellow, r.bottom())), QColor(0x1f, 0x3d, 0x2a));
     p.fillRect(QRect(QPoint(xYellow, r.top()), QPoint(xRed, r.bottom())), QColor(0x45, 0x3f, 0x1e));
     p.fillRect(QRect(QPoint(xRed, r.top()), QPoint(r.right(), r.bottom())), QColor(0x4a, 0x1f, 0x24));
@@ -120,7 +120,7 @@ void MeterWidget::paintEvent(QPaintEvent *)
             p.fillRect(QRect(px - 1, r.top(), 2, r.height() + 1), QColor(235, 235, 240));
         }
     }
-    // podziałka co 6 dB
+    // Tick marks every 6 dB
     p.setPen(QColor(0, 0, 0, 90));
     for (int db = -54; db < 0; db += 6) {
         int x = xFor(float(db));
@@ -152,7 +152,7 @@ void ColorButton::refresh()
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-    // szachownica pod przezroczystość
+    // Transparency backdrop
     p.setBrush(QColor(90, 90, 100));
     p.setPen(Qt::NoPen);
     p.drawRoundedRect(QRectF(2, 2, 24, 24), 6, 6);

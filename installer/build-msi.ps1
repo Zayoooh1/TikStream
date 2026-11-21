@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"
 $stage = Join-Path $PSScriptRoot "stage"
@@ -93,7 +93,7 @@ Write-Host "Staged $fileCount files ($totalMb MB) -> $stage"
 $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
 Push-Location $PSScriptRoot
 try {
-    & wix build -arch x64 -culture pl-PL -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext TikStream.wxs TikStreamUI.wxs -o $msiOut
+    & wix build -arch x64 -culture en-US -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext TikStream.wxs TikStreamUI.wxs -o $msiOut
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
     Pop-Location

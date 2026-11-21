@@ -5,10 +5,10 @@ using TikStream.Core;
 namespace TikStream.Capture;
 
 /// <summary>
-/// Tłumienie hałasu 48 kHz stereo float (ramki po 480 próbek = 10 ms):
-/// • RNNoise 0.2 (sieć neuronowa Xiph.org — wysoka jakość, jak w OBS Studio)
-/// • SpeexDSP 1.2.1 (niskie użycie CPU, regulowany poziom tłumienia w dB)
-/// Zero alokacji w metodzie Read; przy wyłączeniu czysty passthrough.
+/// 48 kHz stereo float noise suppression (480-sample frames = 10 ms):
+/// • RNNoise 0.2 (Xiph.org neural network — high quality, same as OBS Studio)
+/// • SpeexDSP 1.2.1 (low CPU usage, configurable suppression level in dB)
+/// Zero allocations in Read; clean passthrough when disabled.
 /// </summary>
 internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposable
 {
@@ -28,7 +28,7 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
     private IntPtr _spxL, _spxR;
     private bool _rnnoiseUnavailable, _speexUnavailable;
 
-    // Bufory reszty (FIFO) i ramki 480 próbek (zero alokacji per Read)
+    // Remainder (FIFO) and 480-sample frame buffers (zero allocations per Read)
     private readonly float[] _inL = new float[FrameSize];
     private readonly float[] _inR = new float[FrameSize];
     private readonly float[] _outL = new float[FrameSize];
@@ -103,13 +103,13 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
             {
                 DestroyRnnoise();
                 _rnnoiseUnavailable = true;
-                Log.Warn("RNNoise: nie udało się utworzyć stanu dekodera.");
+                Log.Warn("RNNoise: failed to create denoiser state.");
             }
         }
         catch (Exception ex)
         {
             _rnnoiseUnavailable = true;
-            Log.Warn("RNNoise niedostępny: " + ex.Message);
+            Log.Warn("RNNoise unavailable: " + ex.Message);
         }
     }
 
@@ -141,7 +141,7 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
         catch (Exception ex)
         {
             _speexUnavailable = true;
-            Log.Warn("SpeexDSP niedostępny: " + ex.Message);
+            Log.Warn("SpeexDSP unavailable: " + ex.Message);
         }
     }
 
@@ -157,7 +157,7 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
             if (useRnn && _rnnL == IntPtr.Zero) return read;
             if (!useRnn && _spxL == IntPtr.Zero) return read;
 
-            // Przepuść wszystkie dostarczone próbki przez bloki 480 próbek (10 ms)
+            // Process all incoming samples in 480-sample (10 ms) blocks
             int framesIn = read / 2;
             for (int i = 0; i < framesIn; i++)
             {
@@ -173,7 +173,7 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
                 }
             }
 
-            // Zwróć dokładnie tyle próbek, ile przeczytano (początkowe 10 ms to cisza rozruchowa)
+            // Return the exact number of samples read (initial 10 ms is startup silence)
             int outIdx = 0;
             while (outIdx < read && _pendRead < _pendWrite)
                 buffer[offset + outIdx++] = _pending[_pendRead++];
@@ -259,7 +259,7 @@ internal sealed unsafe class NoiseSuppressorProvider : ISampleProvider, IDisposa
             _pendWrite = rem;
             if (_pendWrite + needed > _pending.Length)
             {
-                // Nadmiar — odrzuć najstarsze próbki, żeby nie przekroczyć bufora
+                // Overflow — drop oldest samples to stay within buffer bounds
                 _pendRead = _pendWrite = 0;
             }
         }

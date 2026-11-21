@@ -12,15 +12,15 @@ namespace TikStream.Capture;
 
 public sealed record CaptureSource(string Kind, string Id, string Label, IntPtr Handle, bool IsPrimary = false);
 
-/// <summary>Kursor do narysowania na przechwyconej klatce (w pikselach klatki).</summary>
+/// <summary>Cursor to draw onto a captured frame (in frame pixel coordinates).</summary>
 public readonly record struct CursorDraw(ID3D11ShaderResourceView Srv, int X, int Y, int W, int H);
 
 /// <summary>
-/// Przechwytywanie ekranu / okna przez DXGI Desktop Duplication — BEZ żółtej ramki (to WGC ją rysuje).
-/// Okno = wycinek monitora, na którym leży.
-/// • monitor podpięty do RTX  → wszystko na GPU (zero-copy do naszej tekstury),
-/// • monitor podpięty do Intela (Optimus) → osobny wątek na urządzeniu Intela, kopia przez dwa bufory staging
-///   naprzemiennie (bez czekania na GPU), upload do RTX.
+/// Display / window capture via DXGI Desktop Duplication — WITHOUT the yellow border (which WGC draws).
+/// Window = cropped region of the display it resides on.
+/// • Display connected to RTX -> all on GPU (zero-copy to our texture),
+/// • Display connected to Intel (Optimus) -> dedicated thread on the Intel device, alternating double staging buffers
+///   (no GPU stalls), uploaded to RTX.
 /// </summary>
 public sealed unsafe class DesktopCapture : IDisposable
 {
@@ -28,16 +28,16 @@ public sealed unsafe class DesktopCapture : IDisposable
     private readonly CaptureSource _src;
     private readonly bool _isWindow;
 
-    // urządzenie, na którym działa duplikacja (nasze albo Intela)
+    // device running the duplication (ours or Intel's)
     private ID3D11Device? _dupDevice;
     private ID3D11DeviceContext? _dupContext;
     private IDXGIOutputDuplication? _dup;
     private IntPtr _monitor;
-    private RawRect _outRect;   // współrzędne monitora na pulpicie (piksele fizyczne)
+    private RawRect _outRect;   // display coordinates on desktop (physical pixels)
     private bool _crossGpu;
     private long _nextRetryTicks;
 
-    // tekstura wynikowa na RTX (RT+SR: kursor dorysowujemy shaderem)
+    // output texture on RTX (RT+SR: cursor is drawn via shader)
     private ID3D11Texture2D? _copy;
     private Format _format = Format.B8G8R8A8_UNorm;
     public ID3D11ShaderResourceView? View { get; private set; }
@@ -49,9 +49,9 @@ public sealed unsafe class DesktopCapture : IDisposable
     public bool Closed { get; private set; }
     public long FramesReceived { get; private set; }
     public string Label => _src.Label;
-    public string Mode => _crossGpu ? "kopia Intel→RTX" : "GPU zero-copy";
+    public string Mode => _crossGpu ? "Intel→RTX copy" : "GPU zero-copy";
 
-    // ścieżka między kartami
+    // cross-GPU path
     private Thread? _thread;
     private volatile bool _run = true;
     private readonly object _lock = new();
@@ -60,12 +60,12 @@ public sealed unsafe class DesktopCapture : IDisposable
     private Format _bufFmt = Format.B8G8R8A8_UNorm;
     private long _bufSeq, _consumedSeq;
 
-    // kursor
+    // cursor
     private readonly object _curLock = new();
     private byte[]? _curPixels;
     private int _curW, _curH, _curHotX, _curHotY;
     private long _curVersion, _curUploaded = -1;
-    private int _curX, _curY;         // pozycja względem monitora
+    private int _curX, _curY;         // position relative to display
     private bool _curVisible;
     private ID3D11Texture2D? _curTex;
     private ID3D11ShaderResourceView? _curSrv;
@@ -85,7 +85,7 @@ public sealed unsafe class DesktopCapture : IDisposable
         }
     }
 
-    // ======================= inicjalizacja =======================
+    // ======================= initialization =======================
 
     private void Init(IntPtr monitor)
     {
@@ -96,14 +96,14 @@ public sealed unsafe class DesktopCapture : IDisposable
 
         _monitor = monitor;
         var (adapter, output) = FindOutput(_gpu.Factory, monitor);
-        if (adapter == null || output == null) throw new InvalidOperationException("Nie znaleziono monitora dla źródła " + _src.Label);
+        if (adapter == null || output == null) throw new InvalidOperationException("Display not found for source " + _src.Label);
         using (adapter)
         using (output)
         {
             var od = output.Description;
             _outRect = od.DesktopCoordinates;
             if (od.Rotation != ModeRotation.Identity && od.Rotation != ModeRotation.Unspecified)
-                Log.Warn($"Monitor {od.DeviceName} jest obrócony ({od.Rotation}) — obraz może być obrócony.");
+                Log.Warn($"Display {od.DeviceName} is rotated ({od.Rotation}) — captured image may appear rotated.");
 
             _crossGpu = adapter.Description1.Luid != _gpu.Adapter.Description1.Luid;
             if (_crossGpu)
@@ -118,7 +118,7 @@ public sealed unsafe class DesktopCapture : IDisposable
                 _dupContext = _gpu.Context;
             }
             _dup = Duplicate(output, _dupDevice);
-            Log.Info($"Desktop Duplication: {od.DeviceName} {_outRect.Right - _outRect.Left}x{_outRect.Bottom - _outRect.Top} na '{adapter.Description1.Description}' → {Mode}");
+            Log.Info($"Desktop Duplication: {od.DeviceName} {_outRect.Right - _outRect.Left}x{_outRect.Bottom - _outRect.Top} on '{adapter.Description1.Description}' -> {Mode}");
         }
 
         if (_crossGpu)
@@ -131,10 +131,10 @@ public sealed unsafe class DesktopCapture : IDisposable
 
     private static IDXGIOutputDuplication Duplicate(IDXGIOutput output, ID3D11Device device)
     {
-        // DuplicateOutput1 działa też przy włączonym HDR (zwykłe DuplicateOutput wtedy odmawia)
-        // Wywołanie prosto z vtable — wrapper Vortice dla tej metody ma błędną sygnaturę (crash 0xC0000005).
+        // DuplicateOutput1 also works when HDR is enabled (standard DuplicateOutput refuses)
+        // Direct vtable call — Vortice's wrapper has an incorrect signature (crash 0xC0000005).
         // HRESULT IDXGIOutput5::DuplicateOutput1(IUnknown*, UINT Flags, UINT Count, const DXGI_FORMAT*, IDXGIOutputDuplication**)
-        // indeks 26: IUnknown(3) + IDXGIObject(4) + IDXGIOutput(12) + IDXGIOutput1(4) + Output2/3/4 (po 1)
+        // index 26: IUnknown(3) + IDXGIObject(4) + IDXGIOutput(12) + IDXGIOutput1(4) + Output2/3/4 (1 each)
         if (output.QueryInterfaceOrNull<IDXGIOutput5>() is { } o5)
         {
             using (o5)
@@ -163,7 +163,7 @@ public sealed unsafe class DesktopCapture : IDisposable
                 IntPtr dup = IntPtr.Zero;
                 int hr = fn(o5.NativePointer, device.NativePointer, 0, count, fmts, &dup);
                 if (hr >= 0 && dup != IntPtr.Zero) return new IDXGIOutputDuplication(dup);
-                Log.Info($"DuplicateOutput1: 0x{hr:X8}, używam DuplicateOutput.");
+                Log.Info($"DuplicateOutput1: 0x{hr:X8}, falling back to DuplicateOutput.");
             }
         }
         using var o1 = output.QueryInterface<IDXGIOutput1>();
@@ -184,7 +184,7 @@ public sealed unsafe class DesktopCapture : IDisposable
         return (null, null);
     }
 
-    /// <summary>Wycinek do skopiowania, w pikselach względem monitora. Null = nic do skopiowania (okno zminimalizowane itp.).</summary>
+    /// <summary>Region to copy, in pixels relative to the display. Null = nothing to copy (minimized window, etc.).</summary>
     private RawRect? CropRect()
     {
         int mw = _outRect.Right - _outRect.Left, mh = _outRect.Bottom - _outRect.Top;
@@ -199,19 +199,19 @@ public sealed unsafe class DesktopCapture : IDisposable
         return new RawRect(l, t, rr & ~1, b & ~1);
     }
 
-    // ======================= wątek renderujący =======================
+    // ======================= render thread =======================
 
-    /// <summary>Wołać co klatkę z wątku renderującego. Zwraca true, gdy przyszła nowa klatka.</summary>
+    /// <summary>Call every frame from the render thread. Returns true when a new frame arrived.</summary>
     public bool Update(ID3D11DeviceContext ctx, out CursorDraw? cursor)
     {
         cursor = null;
         if (Closed) return false;
 
-        // okno przeniesione na inny monitor → przełącz duplikację
+        // window moved to another display -> switch duplication
         if (_isWindow && Native.IsWindow(_src.Handle))
         {
             var mon = Native.MonitorFromWindow(_src.Handle, 2);
-            if (mon != _monitor) { try { Init(mon); } catch (Exception ex) { Log.Warn("Zmiana monitora: " + ex.Message); } return false; }
+            if (mon != _monitor) { try { Init(mon); } catch (Exception ex) { Log.Warn("Display switch: " + ex.Message); } return false; }
         }
 
         bool got = _crossGpu ? ConsumeCross(ctx) : AcquireSameGpu(ctx);
@@ -250,8 +250,8 @@ public sealed unsafe class DesktopCapture : IDisposable
 
     private void HandleLost(SharpGen.Runtime.Result res)
     {
-        // ACCESS_LOST: zmiana trybu, UAC, gra w pełnym ekranie przełączyła tryb → odtwórz
-        Log.Warn($"Desktop Duplication utracone ({res.Code:X8}) — odtwarzam.");
+        // ACCESS_LOST: mode change, UAC, fullscreen game switched mode -> recreate
+        Log.Warn($"Desktop Duplication lost ({res.Code:X8}) — recreating.");
         _dup?.Dispose(); _dup = null;
         _nextRetryTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
     }
@@ -265,9 +265,9 @@ public sealed unsafe class DesktopCapture : IDisposable
             var (adapter, output) = FindOutput(_gpu.Factory, _monitor);
             if (adapter == null || output == null) return;
             using (adapter) using (output) _dup = Duplicate(output, _dupDevice!);
-            Log.Info("Desktop Duplication odtworzone.");
+            Log.Info("Desktop Duplication restored.");
         }
-        catch (Exception ex) { Log.Warn("Odtwarzanie duplikacji: " + ex.Message); }
+        catch (Exception ex) { Log.Warn("Restoring duplication: " + ex.Message); }
     }
 
     private static int BytesPerPixel(Format f) => f == Format.R16G16B16A16_Float ? 8 : 4;
@@ -302,7 +302,7 @@ public sealed unsafe class DesktopCapture : IDisposable
         return true;
     }
 
-    // ======================= wątek Intel → RTX =======================
+    // ======================= Intel -> RTX thread =======================
 
     private void CrossLoop()
     {
@@ -343,8 +343,8 @@ public sealed unsafe class DesktopCapture : IDisposable
                     _dup?.ReleaseFrame();
                 }
 
-                // Desktop Duplication nie wysyła kolejnej klatki, jeśli pulpit jest nieruchomy.
-                // Publikuj bieżącą klatkę tutaj, na wątku przechwytującym, bez czekania na następną.
+                // Desktop Duplication does not emit another frame while the desktop is static.
+                // Publish the current frame right here on the capture thread without waiting for the next one.
                 var s = staging!;
                 var sfmt = s.Description.Format;
                 int sw = (int)s.Description.Width, sh = (int)s.Description.Height, rowBytes = sw * BytesPerPixel(sfmt);
@@ -369,7 +369,7 @@ public sealed unsafe class DesktopCapture : IDisposable
                 }
             }
         }
-        catch (Exception ex) { Log.Error("Wątek Desktop Duplication", ex); }
+        catch (Exception ex) { Log.Error("Desktop Duplication thread", ex); }
         finally { staging?.Dispose(); }
     }
 
@@ -380,7 +380,7 @@ public sealed unsafe class DesktopCapture : IDisposable
         _thread = null;
     }
 
-    // ======================= kursor =======================
+    // ======================= cursor =======================
 
     private void UpdatePointer(IDXGIOutputDuplication dup, OutduplFrameInfo info)
     {
@@ -408,11 +408,11 @@ public sealed unsafe class DesktopCapture : IDisposable
         }
     }
 
-    /// <summary>Kształt kursora → BGRA z premultiplikacją (obsługa 3 typów z DXGI).</summary>
+    /// <summary>Cursor shape -> premultiplied BGRA (supports all 3 DXGI cursor types).</summary>
     private static (byte[] pix, int w, int h) ConvertPointer(byte[] buf, OutduplPointerShapeInfo si)
     {
         int w = (int)si.Width, pitch = (int)si.Pitch;
-        if (si.Type == 1) // MONOCHROME: maska AND nad maską XOR, 1 bit/piksel
+        if (si.Type == 1) // MONOCHROME: AND mask above XOR mask, 1 bit/pixel
         {
             int h = (int)si.Height / 2;
             var px = new byte[w * h * 4];
@@ -423,8 +423,8 @@ public sealed unsafe class DesktopCapture : IDisposable
                 bool and = (buf[y * pitch + x / 8] & bit) != 0;
                 bool xor = (buf[(y + h) * pitch + x / 8] & bit) != 0;
                 int o = (y * w + x) * 4;
-                if (and && !xor) continue;                                  // przezroczysty
-                byte v = (!and && xor) ? (byte)255 : (byte)0;               // biały / czarny (inwersja → czarny)
+                if (and && !xor) continue;                                  // transparent
+                byte v = (!and && xor) ? (byte)255 : (byte)0;               // white / black (invert -> black)
                 px[o] = px[o + 1] = px[o + 2] = v; px[o + 3] = 255;
             }
             return (px, w, h);
@@ -438,12 +438,12 @@ public sealed unsafe class DesktopCapture : IDisposable
             {
                 int s = y * pitch + x * 4, o = (y * w + x) * 4;
                 byte b = buf[s], g = buf[s + 1], r = buf[s + 2], a = buf[s + 3];
-                if (si.Type == 4) // MASKED_COLOR: a=0 → kolor, a=0xFF → XOR z tłem
+                if (si.Type == 4) // MASKED_COLOR: a=0 -> color, a=0xFF -> XOR with background
                 {
                     if (a == 0) { px[o] = b; px[o + 1] = g; px[o + 2] = r; px[o + 3] = 255; }
                     else if ((b | g | r) != 0) { px[o] = px[o + 1] = px[o + 2] = 0; px[o + 3] = 255; }
                 }
-                else // COLOR: BGRA z alfą
+                else // COLOR: BGRA with alpha
                 {
                     px[o] = (byte)(b * a / 255); px[o + 1] = (byte)(g * a / 255); px[o + 2] = (byte)(r * a / 255); px[o + 3] = a;
                 }
@@ -475,7 +475,7 @@ public sealed unsafe class DesktopCapture : IDisposable
             _curSrv = _gpu.Device.CreateShaderResourceView(_curTex);
             _curUploaded = ver;
         }
-        // pozycja kursora względem monitora → względem wyciętego fragmentu
+        // cursor position relative to display -> relative to cropped region
         var crop = _isWindow ? CropRect() : new RawRect(0, 0, Width, Height);
         if (crop == null) return null;
         int cx = x - crop.Value.Left, cy = y - crop.Value.Top;
@@ -492,7 +492,7 @@ public sealed unsafe class DesktopCapture : IDisposable
         Rtv?.Dispose(); View?.Dispose(); _copy?.Dispose();
     }
 
-    // ======================= wyliczanie źródeł =======================
+    // ======================= source enumeration =======================
 
     public static List<CaptureSource> EnumerateSources(IDXGIFactory2 factory)
     {
@@ -513,7 +513,7 @@ public sealed unsafe class DesktopCapture : IDisposable
                         var r = d.DesktopCoordinates;
                         bool primary = r.Left == 0 && r.Top == 0;
                         list.Add(new CaptureSource("Monitor", d.DeviceName,
-                            $"Monitor {n++} • {r.Right - r.Left}×{r.Bottom - r.Top}{(primary ? " • główny" : "")} • {gpu}", d.Monitor, primary));
+                            $"Display {n++} • {r.Right - r.Left}×{r.Bottom - r.Top}{(primary ? " • primary" : "")} • {gpu}", d.Monitor, primary));
                     }
                 }
             }
@@ -537,7 +537,7 @@ public sealed unsafe class DesktopCapture : IDisposable
             string proc = "";
             try { using var process = Process.GetProcessById((int)pid); proc = process.ProcessName; } catch { }
             if (proc == "explorer" && title == "Program Manager") return true;
-            var minimized = Native.IsIconic(h) ? " • zminimalizowane" : "";
+            var minimized = Native.IsIconic(h) ? " • minimized" : "";
             list.Add(new CaptureSource("Window", proc + "|" + title, $"{title} [{proc}]{minimized}", h));
             return true;
         }, IntPtr.Zero);

@@ -6,9 +6,9 @@ using TikStream.Core;
 namespace TikStream.Encode;
 
 /// <summary>
-/// Jedno wyjście (RTMP do TikToka albo plik) z własnym wątkiem i kolejką.
-/// Sieć nigdy nie blokuje renderowania: przy zatorze wyrzucamy klatki do najbliższej klatki kluczowej,
-/// a po zerwaniu połączenia łączymy się ponownie i startujemy od świeżego keyframe'a.
+/// Single output (RTMP stream or local file) with its own thread and packet queue.
+/// Network I/O never blocks rendering: on congestion, packets are dropped until the next keyframe;
+/// on disconnect, it reconnects automatically and resumes from a fresh keyframe.
 /// </summary>
 public sealed record OutputOptions(bool Reconnect, int DelaySec, int MaxRetries);
 
@@ -21,7 +21,7 @@ public sealed unsafe class StreamOutput : IDisposable
     private readonly bool _isNetwork;
     private readonly bool _reconnect;
     private readonly OutputOptions _opt;
-    private int _attempts; // kolejne nieudane próby od ostatniego udanego połączenia
+    private int _attempts; // consecutive failed attempts since last successful connection
     private readonly AVCodecParameters* _vpar;
     private readonly AVCodecParameters* _apar;
     private readonly AVRational _vtb, _atb;
@@ -31,14 +31,14 @@ public sealed unsafe class StreamOutput : IDisposable
     private readonly BlockingCollection<IntPtr> _queue = new(new ConcurrentQueue<IntPtr>());
     private readonly Thread _thread;
     private volatile bool _running = true;
-    private volatile bool _abort; // twarde przerwanie I/O — tylko gdy zamykanie trwa za długo
+    private volatile bool _abort; // hard I/O abort — only when shutdown takes too long
     private int _queuedVideo;
 
     private AVFormatContext* _oc;
     private AVIOInterruptCB_callback? _interrupt;
 
     public string Name => _name;
-    public string Status { get; private set; } = "Łączenie…";
+    public string Status { get; private set; } = "Connecting…";
     public bool Connected { get; private set; }
     public bool Failed { get; private set; }
     public long BytesWritten { get; private set; }
@@ -65,7 +65,7 @@ public sealed unsafe class StreamOutput : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Kolejkuje kopię (referencję) pakietu. Wołający zachowuje własność oryginału.</summary>
+    /// <summary>Queues a reference-counted copy of a packet. Caller retains ownership of the original.</summary>
     public void Enqueue(AVPacket* pkt)
     {
         if (!_running) return;
@@ -73,7 +73,7 @@ public sealed unsafe class StreamOutput : IDisposable
         if (clone == null) return;
         if (clone->stream_index == VideoIndex) Interlocked.Increment(ref _queuedVideo);
         try { _queue.Add((IntPtr)clone); }
-        catch (InvalidOperationException) { ffmpeg.av_packet_free(&clone); } // wyjście już zamykane
+        catch (InvalidOperationException) { ffmpeg.av_packet_free(&clone); } // output already closing
     }
 
     private bool Open()
@@ -81,9 +81,9 @@ public sealed unsafe class StreamOutput : IDisposable
         AVFormatContext* oc = null;
         string? fmtName = _isNetwork ? (_url.StartsWith("srt", StringComparison.OrdinalIgnoreCase) ? "mpegts" : "flv") : null;
         int r = ffmpeg.avformat_alloc_output_context2(&oc, null, fmtName, _url);
-        if (r < 0 || oc == null) { Status = "Błąd formatu: " + FF.Err(r); return false; }
+        if (r < 0 || oc == null) { Status = "Format error: " + FF.Err(r); return false; }
 
-        _interrupt = _ => _abort ? 1 : 0; // przerwij zawieszone łączenie/zapis
+        _interrupt = _ => _abort ? 1 : 0; // abort stalled connect/write
         oc->interrupt_callback.callback = _interrupt;
 
         var vs = ffmpeg.avformat_new_stream(oc, null);
@@ -101,14 +101,14 @@ public sealed unsafe class StreamOutput : IDisposable
             AVDictionary* o = null;
             if (_isNetwork)
             {
-                ffmpeg.av_dict_set(&o, "rw_timeout", "15000000", 0); // 15 s bez postępu = zerwane
+                ffmpeg.av_dict_set(&o, "rw_timeout", "15000000", 0); // 15 s without progress = disconnected
                 ffmpeg.av_dict_set(&o, "tcp_nodelay", "1", 0);
             }
             r = ffmpeg.avio_open2(&oc->pb, _url, ffmpeg.AVIO_FLAG_WRITE, &oc->interrupt_callback, &o);
             ffmpeg.av_dict_free(&o);
             if (r < 0)
             {
-                Status = "Nie można połączyć: " + FF.Err(r);
+                Status = "Cannot connect: " + FF.Err(r);
                 ffmpeg.avformat_free_context(oc);
                 return false;
             }
@@ -116,21 +116,21 @@ public sealed unsafe class StreamOutput : IDisposable
 
         AVDictionary* mo = null;
         if (!_isNetwork) ffmpeg.av_dict_set(&mo, "flush_packets", "1", 0);
-        // MP4 pofragmentowane: plik jest odtwarzalny nawet po awarii programu
+        // Fragmented MP4: remains playable even if the app crashes
         if (_url.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)) ffmpeg.av_dict_set(&mo, "movflags", "+frag_keyframe+empty_moov+default_base_moof", 0);
         r = ffmpeg.avformat_write_header(oc, &mo);
         ffmpeg.av_dict_free(&mo);
         if (r < 0)
         {
-            Status = "Błąd nagłówka: " + FF.Err(r);
+            Status = "Header error: " + FF.Err(r);
             ffmpeg.avio_closep(&oc->pb);
             ffmpeg.avformat_free_context(oc);
             return false;
         }
         _oc = oc;
         Connected = true;
-        Status = _isNetwork ? "Na żywo" : "Nagrywanie";
-        Log.Info($"Wyjście '{_name}' otwarte ({(_isNetwork ? "sieć" : _url)})");
+        Status = _isNetwork ? "Live" : "Recording";
+        Log.Info($"Output '{_name}' opened ({(_isNetwork ? "network" : _url)})");
         return true;
     }
 
@@ -166,14 +166,14 @@ public sealed unsafe class StreamOutput : IDisposable
                     }
                     else
                     {
-                        Log.Warn($"Wyjście '{_name}': {Status}");
+                        Log.Warn($"Output '{_name}': {Status}");
                         if (!_reconnect || (_opt.MaxRetries > 0 && _attempts >= _opt.MaxRetries)) { Failed = true; break; }
                         Reconnects++; _attempts++;
                         nextAttempt = DateTime.UtcNow.AddSeconds(Math.Max(1, _opt.DelaySec));
-                        Status += $" — próba {_attempts}/{_opt.MaxRetries}";
+                        Status += $" — attempt {_attempts}/{_opt.MaxRetries}";
                     }
                 }
-                // bez połączenia: zrzucaj kolejkę, żeby nie rosła
+                // disconnected: drain queue so memory does not grow
                 while (_queue.TryTake(out var junk)) FreePacket(junk, countDrop: true);
                 Thread.Sleep(100);
                 continue;
@@ -184,10 +184,10 @@ public sealed unsafe class StreamOutput : IDisposable
             bool isVideo = pkt->stream_index == VideoIndex;
             if (isVideo) Interlocked.Decrement(ref _queuedVideo);
 
-            // Zator sieci: >3 s wideo w kolejce → wyrzuć wszystko i zacznij od nowego keyframe'a
+            // Network congestion: >3 s of video queued -> drop backlog and wait for fresh keyframe
             if (_isNetwork && Volatile.Read(ref _queuedVideo) > _fps * 3)
             {
-                Log.Warn($"Wyjście '{_name}': zator sieci, odrzucam zaległe klatki");
+                Log.Warn($"Output '{_name}': network congestion, dropping queued frames");
                 FreePacket(p, true);
                 while (_queue.TryTake(out var junk)) FreePacket(junk, true);
                 waitKey = true;
@@ -218,8 +218,8 @@ public sealed unsafe class StreamOutput : IDisposable
             ffmpeg.av_packet_free(&pkt);
             if (r < 0)
             {
-                Log.Warn($"Wyjście '{_name}': błąd zapisu {FF.Err(r)}");
-                Status = "Rozłączono: " + FF.Err(r);
+                Log.Warn($"Output '{_name}': write error {FF.Err(r)}");
+                Status = "Disconnected: " + FF.Err(r);
                 Close(false);
                 if (!_running) break;
                 if (!_reconnect) { Failed = true; break; }
@@ -232,8 +232,8 @@ public sealed unsafe class StreamOutput : IDisposable
 
         Close(true);
         while (_queue.TryTake(out var rest)) FreePacket(rest, false);
-        if (!Failed) Status = "Zatrzymano";
-        Log.Info($"Wyjście '{_name}' zamknięte. Wysłano {BytesWritten / 1024 / 1024} MB, odrzucono {DroppedPackets} pakietów.");
+        if (!Failed) Status = "Stopped";
+        Log.Info($"Output '{_name}' closed. Sent {BytesWritten / 1024 / 1024} MB, dropped {DroppedPackets} packets.");
     }
 
     private void FreePacket(IntPtr p, bool countDrop)
@@ -250,7 +250,7 @@ public sealed unsafe class StreamOutput : IDisposable
         if (!_thread.Join(_isNetwork ? 4000 : 15000))
         {
             _abort = true;
-            if (!_thread.Join(4000)) Log.Warn($"Wyjście '{_name}' nie zamknęło się w czasie.");
+            if (!_thread.Join(4000)) Log.Warn($"Output '{_name}' did not close in time.");
         }
         var v = _vpar; ffmpeg.avcodec_parameters_free(&v);
         var a = _apar; ffmpeg.avcodec_parameters_free(&a);

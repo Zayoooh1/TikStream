@@ -28,26 +28,26 @@ bool EngineHost::load(const QString &engineDir, QString *error)
         return false;
     };
 
-    // 1. nethost.dll (obok exe) wskazuje zainstalowany hostfxr
+    // 1. nethost.dll (next to exe) locates installed hostfxr
     HMODULE nethost = LoadLibraryW(toW(QCoreApplication::applicationDirPath() + "/nethost.dll").c_str());
     if (!nethost) nethost = LoadLibraryW(L"nethost.dll");
-    if (!nethost) return fail("Brak nethost.dll obok programu.");
+    if (!nethost) return fail("Missing nethost.dll next to the executable.");
     auto getPath = reinterpret_cast<get_hostfxr_path_fn>(GetProcAddress(nethost, "get_hostfxr_path"));
-    if (!getPath) return fail("nethost.dll bez get_hostfxr_path.");
+    if (!getPath) return fail("nethost.dll is missing get_hostfxr_path.");
 
     wchar_t buf[MAX_PATH * 2];
     size_t size = sizeof(buf) / sizeof(wchar_t);
     if (getPath(buf, &size, nullptr) != 0)
-        return fail("Nie znaleziono środowiska .NET 10. Zainstaluj .NET 10 Desktop Runtime.");
+        return fail(".NET 10 runtime not found. Please install .NET 10 Desktop Runtime.");
 
     HMODULE fxr = LoadLibraryW(buf);
-    if (!fxr) return fail("Nie można załadować hostfxr.dll.");
+    if (!fxr) return fail("Failed to load hostfxr.dll.");
     auto init = reinterpret_cast<hostfxr_initialize_for_runtime_config_fn>(GetProcAddress(fxr, "hostfxr_initialize_for_runtime_config"));
     auto getDelegate = reinterpret_cast<hostfxr_get_runtime_delegate_fn>(GetProcAddress(fxr, "hostfxr_get_runtime_delegate"));
     auto closeFxr = reinterpret_cast<hostfxr_close_fn>(GetProcAddress(fxr, "hostfxr_close"));
-    if (!init || !getDelegate || !closeFxr) return fail("hostfxr.dll bez wymaganych funkcji.");
+    if (!init || !getDelegate || !closeFxr) return fail("hostfxr.dll is missing required exports.");
 
-    // 2. uruchom CoreCLR wg runtimeconfig biblioteki silnika
+    // 2. Initialize CoreCLR using the engine library's runtimeconfig
     const std::wstring config = toW(engineDir + "/TikStream.Engine.runtimeconfig.json");
     const std::wstring assembly = toW(engineDir + "/TikStream.Engine.dll");
     hostfxr_handle ctx = nullptr;
@@ -59,7 +59,7 @@ bool EngineHost::load(const QString &engineDir, QString *error)
     closeFxr(ctx);
     if (rc != 0 || !loadFn) return fail(QString("hostfxr_get_runtime_delegate: 0x%1").arg(uint(rc), 8, 16, QChar('0')));
 
-    // 3. eksporty [UnmanagedCallersOnly] z TikStream.NativeApi
+    // 3. Resolve [UnmanagedCallersOnly] exports from TikStream.NativeApi
     auto get = [&](const wchar_t *method, void **out) {
         return loadFn(assembly.c_str(), L"TikStream.NativeApi, TikStream.Engine", method, UNMANAGEDCALLERSONLY_METHOD, nullptr, out);
     };
@@ -67,7 +67,7 @@ bool EngineHost::load(const QString &engineDir, QString *error)
         get(L"FreeString", reinterpret_cast<void **>(&m_free)) != 0 ||
         get(L"SetSourcePixels", reinterpret_cast<void **>(&m_pixels)) != 0) {
         m_call = nullptr;
-        return fail("Nie można załadować TikStream.Engine.dll.");
+        return fail("Failed to load TikStream.Engine.dll.");
     }
     return true;
 }

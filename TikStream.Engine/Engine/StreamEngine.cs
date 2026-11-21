@@ -49,9 +49,9 @@ public sealed class EngineStats
 }
 
 /// <summary>
-/// Serce programu. Jeden wątek renderujący posiada cały kontekst D3D11:
-/// źródła (Desktop Duplication, kamerki, pliki, obrazy) → aktywna scena → NV12 → NVENC.
-/// Audio na osobnym wątku MMCSS. Transmisja i nagrywanie startują niezależnie (jak w OBS).
+/// Core of the application. A single render thread owns the entire D3D11 context:
+/// sources (Desktop Duplication, cameras, media, images) -> active scene -> NV12 -> NVENC.
+/// Audio runs on a dedicated MMCSS thread. Streaming and recording start/stop independently (like OBS).
 /// </summary>
 public sealed unsafe class StreamEngine : IDisposable
 {
@@ -66,7 +66,7 @@ public sealed unsafe class StreamEngine : IDisposable
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private volatile bool _run = true;
 
-    private AppSettings _scene;   // stan używany przez wątek renderujący
+    private AppSettings _scene;   // state used by the render thread
     private int _fps;
 
     private readonly Dictionary<string, RtSource> _sources = new();
@@ -80,7 +80,7 @@ public sealed unsafe class StreamEngine : IDisposable
     private volatile bool _previewEnabled = true;
     public NRect? Selection { get; set; }
 
-    // wyjścia
+    // outputs
     private VideoEncoder? _venc;
     private AudioEncoder? _aenc;
     private readonly object _audioEncLock = new();
@@ -95,8 +95,8 @@ public sealed unsafe class StreamEngine : IDisposable
     private string _lastError = "";
     private readonly System.Runtime.GCLatencyMode _prevGcMode;
 
-    public bool IsStreaming => _outputs.Any(o => o.Name != "Plik");
-    public bool IsRecording => _outputs.Any(o => o.Name == "Plik");
+    public bool IsStreaming => _outputs.Any(o => o.Name != "File");
+    public bool IsRecording => _outputs.Any(o => o.Name == "File");
 
     public StreamEngine(AppSettings settings)
     {
@@ -121,7 +121,7 @@ public sealed unsafe class StreamEngine : IDisposable
     public int CanvasWidth => _comp.Width;
     public int CanvasHeight => _comp.Height;
 
-    // ===================== ustawienia =====================
+    // ===================== settings =====================
 
     private static string Sig(IEnumerable<SourceDef> list) => System.Text.Json.JsonSerializer.Serialize(list, AppSettings.JsonOpts);
 
@@ -186,13 +186,13 @@ public sealed unsafe class StreamEngine : IDisposable
 
     private void RecreateCompositor(int w, int h)
     {
-        Log.Info($"Zmiana rozdzielczości płótna na {w}×{h}");
+        Log.Info($"Canvas resolution changed to {w}×{h}");
         _comp.Dispose();
         _comp = new Compositor(Gpu, w, h);
         _previewDirty = true;
     }
 
-    /// <summary>Tworzy/usuwa/odtwarza źródła runtime zgodnie z definicjami (wątek renderujący).</summary>
+    /// <summary>Creates, removes, or recreates runtime sources according to definitions (render thread).</summary>
     private void SyncSources()
     {
         var defs = _scene.Sources.Where(d => d.IsVisual).ToDictionary(d => d.Id);
@@ -226,14 +226,14 @@ public sealed unsafe class StreamEngine : IDisposable
                 if (created is PixelsRt px && _pendingPixels.Remove(d.Id, out var pp)) px.Set(Gpu, _comp, pp.W, pp.H, pp.Data);
                 _sources[d.Id] = created;
             }
-            catch (Exception ex) { Log.Error($"Źródło '{d.Name}'", ex); }
+            catch (Exception ex) { Log.Error($"Source '{d.Name}'", ex); }
         }
     }
 
     public void SetPreviewWindow(IntPtr hwnd, int w, int h)
-        => _cmds.Enqueue(() => { Log.Info($"Podgląd: okno 0x{hwnd.ToInt64():X} {w}x{h}"); _previewHwnd = hwnd; _previewW = w; _previewH = h; _previewDirty = true; });
+        => _cmds.Enqueue(() => { Log.Info($"Preview: window 0x{hwnd.ToInt64():X} {w}x{h}"); _previewHwnd = hwnd; _previewW = w; _previewH = h; _previewDirty = true; });
 
-    /// <summary>Piksele obrazu/tekstu (BGRA z premultiplikacją) rasteryzuje UI w Qt.</summary>
+    /// <summary>Image/text pixels (premultiplied BGRA) are rasterized by the Qt UI.</summary>
     public void SetSourcePixels(string id, int w, int h, byte[] bgra)
     {
         _cmds.Enqueue(() =>
@@ -246,24 +246,24 @@ public sealed unsafe class StreamEngine : IDisposable
     public void RequestKeyframe() => _forceKey = true;
     public void ClearError() => _lastError = "";
 
-    // ===================== transmisja / nagrywanie =====================
+    // ===================== streaming / recording =====================
 
     public Task<string?> StartStreamAsync() => RunOnRender(() =>
     {
         if (IsStreaming) return;
         var url = _scene.BuildRtmpUrl();
         if (url.Length == 0 || string.IsNullOrWhiteSpace(_scene.StreamKey))
-            throw new InvalidOperationException("Brak adresu serwera lub klucza streamu (Ustawienia → Transmisja).");
+            throw new InvalidOperationException("Missing server URL or stream key (Settings → Stream).");
         EnsureEncoders();
         var opts = new OutputOptions(_scene.AutoReconnect, _scene.ReconnectDelaySec, _scene.ReconnectMaxRetries);
-        AddOutput(new StreamOutput("Transmisja", url, _venc!, _aenc!, _fps, opts, RequestKeyframe));
+        AddOutput(new StreamOutput("Stream", url, _venc!, _aenc!, _fps, opts, RequestKeyframe));
         if (_scene.SecondStreamEnabled)
         {
             var url2 = _scene.BuildSecondRtmpUrl();
             if (url2.Length > 0 && !string.IsNullOrWhiteSpace(_scene.SecondStreamKey))
             {
-                var name2 = string.IsNullOrWhiteSpace(_scene.SecondStreamName) ? "Drugi kanał" : _scene.SecondStreamName.Trim();
-                if (name2 == "Transmisja" || name2 == "Plik") name2 = "Transmisja 2";
+                var name2 = string.IsNullOrWhiteSpace(_scene.SecondStreamName) ? "Second Channel" : _scene.SecondStreamName.Trim();
+                if (name2 == "Stream" || name2 == "File") name2 = "Stream 2";
                 AddOutput(new StreamOutput(name2, url2, _venc!, _aenc!, _fps, opts, RequestKeyframe));
             }
         }
@@ -273,11 +273,11 @@ public sealed unsafe class StreamEngine : IDisposable
 
     public Task<string?> StopStreamAsync() => RunOnRender(() =>
     {
-        foreach (var name in _outputs.Where(x => x.Name != "Plik").Select(x => x.Name).ToArray())
-            RemoveOutput(name, "zatrzymano");
+        foreach (var name in _outputs.Where(x => x.Name != "File").Select(x => x.Name).ToArray())
+            RemoveOutput(name, "stopped");
     });
     public Task<string?> StartRecordAsync() => RunOnRender(() => { if (!IsRecording) StartRecordInternal(); });
-    public Task<string?> StopRecordAsync() => RunOnRender(() => RemoveOutput("Plik", "zatrzymano"));
+    public Task<string?> StopRecordAsync() => RunOnRender(() => RemoveOutput("File", "stopped"));
 
     private void StartRecordInternal()
     {
@@ -286,7 +286,7 @@ public sealed unsafe class StreamEngine : IDisposable
         Directory.CreateDirectory(folder);
         var ext = _scene.RecordFormat == "mp4" ? "mp4" : "mkv";
         var path = Path.Combine(folder, $"TikStream {DateTime.Now:yyyy-MM-dd HH-mm-ss}.{ext}");
-        AddOutput(new StreamOutput("Plik", path, _venc!, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe));
+        AddOutput(new StreamOutput("File", path, _venc!, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe));
         _recordStart = _clock.ElapsedTicks;
     }
 
@@ -298,7 +298,7 @@ public sealed unsafe class StreamEngine : IDisposable
             try { a(); tcs.SetResult(null); }
             catch (Exception ex)
             {
-                Log.Error("Polecenie wyjścia", ex);
+                Log.Error("Output command", ex);
                 _lastError = ex.Message;
                 if (_outputs.Length == 0) TeardownEncoders();
                 tcs.SetResult(ex.Message);
@@ -326,7 +326,7 @@ public sealed unsafe class StreamEngine : IDisposable
             _aenc = aenc;
             _encRun = true;
         }
-        Log.Info("Enkodery uruchomione.");
+        Log.Info("Encoders started.");
     }
 
     private void AddOutput(StreamOutput o)
@@ -362,7 +362,7 @@ public sealed unsafe class StreamEngine : IDisposable
                 _venc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, flushTo));
                 aenc.Flush(p => DeliverTo(p, StreamOutput.AudioIndex, flushTo));
             }
-            catch (Exception ex) { Log.Warn("Flush enkoderów: " + ex.Message); }
+            catch (Exception ex) { Log.Warn("Encoder flush: " + ex.Message); }
         }
         _venc?.Dispose(); _venc = null;
         aenc?.Dispose();
@@ -384,7 +384,7 @@ public sealed unsafe class StreamEngine : IDisposable
         ffmpeg.av_packet_free(&pkt);
     }
 
-    /// <summary>Pompa audio: działa stale (wskaźniki w mikserze), koduje tylko gdy działa wyjście.</summary>
+    /// <summary>Audio pump: runs continuously (for mixer meters), encodes only while an output is active.</summary>
     private void AudioLoop()
     {
         uint idx = 0;
@@ -416,11 +416,11 @@ public sealed unsafe class StreamEngine : IDisposable
                 Thread.Sleep(5);
             }
         }
-        catch (Exception ex) { Log.Error("Wątek audio", ex); }
+        catch (Exception ex) { Log.Error("Audio thread", ex); }
         finally { if (mm != IntPtr.Zero) Native.AvRevertMmThreadCharacteristics(mm); }
     }
 
-    // ===================== pętla renderująca =====================
+    // ===================== render loop =====================
 
     private void RenderLoop()
     {
@@ -453,7 +453,7 @@ public sealed unsafe class StreamEngine : IDisposable
 
             while (_cmds.TryDequeue(out var cmd))
             {
-                try { cmd(); } catch (Exception ex) { Log.Error("Polecenie silnika", ex); }
+                try { cmd(); } catch (Exception ex) { Log.Error("Engine command", ex); }
             }
             if (!_run) break;
 
@@ -461,9 +461,9 @@ public sealed unsafe class StreamEngine : IDisposable
             try { RenderFrame(frameTime, interval, frames); }
             catch (Exception ex)
             {
-                Log.Error("Klatka", ex);
-                _lastError = "Błąd renderowania: " + ex.Message;
-                foreach (var o in _outputs.ToArray()) RemoveOutput(o.Name, "błąd renderowania");
+                Log.Error("Frame", ex);
+                _lastError = "Render error: " + ex.Message;
+                foreach (var o in _outputs.ToArray()) RemoveOutput(o.Name, "render error");
                 Thread.Sleep(100);
             }
             renderAcc += (_clock.ElapsedTicks - t0) * 1000.0 / freq;
@@ -526,7 +526,7 @@ public sealed unsafe class StreamEngine : IDisposable
             }
         }
 
-        foreach (var o in _outputs.ToArray()) RemoveOutput(o.Name, "zamknięcie programu");
+        foreach (var o in _outputs.ToArray()) RemoveOutput(o.Name, "application shutdown");
         if (mm != IntPtr.Zero) Native.AvRevertMmThreadCharacteristics(mm);
     }
 
@@ -538,11 +538,11 @@ public sealed unsafe class StreamEngine : IDisposable
         var s = _scene;
         float W = _comp.Width, H = _comp.Height;
 
-        // 1. odśwież wszystkie źródła (także z nieaktywnych scen — przełączenie sceny jest natychmiastowe)
+        // 1. update all sources (including inactive scenes so scene switching is instant)
         foreach (var rt in _sources.Values) rt.Update(Gpu, _comp);
         _monitors.EndFrame();
 
-        // 2. elementy aktywnej sceny, od spodu do wierzchu
+        // 2. active scene items, bottom to top
         _drawList.Clear();
         int blurSlot = 0;
         var scene = s.ActiveScene;
@@ -569,7 +569,7 @@ public sealed unsafe class StreamEngine : IDisposable
                             _comp.RenderBlurBackground(slot, rt.Srv!, rt.Yuv ? rt.Srv2 : null, CoverCrop(sw, sh, W, H, 1, 0, 0), rt.IsHdr);
                             _drawList.Add(new DrawCmd { Srv = _comp.BgSrv(slot), SrcUv = full, Dst = new NRect(0, 0, 1, 1), Opacity = cmd.Opacity, Opaque = true, Darken = 0.55f });
                         }
-                        // dopasuj w całości (contain) i wyśrodkuj
+                        // fit completely (contain) and center
                         float sc = Math.Min(W / sw, H / sh);
                         float dw = sw * sc / W, dh = sh * sc / H;
                         cmd.SrcUv = CoverCrop(sw, sh, sw, sh, zoom, item.PanX, item.PanY);
@@ -613,10 +613,10 @@ public sealed unsafe class StreamEngine : IDisposable
 
         _comp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
 
-        // 3. enkodowanie — prosto do tekstury NVENC
+        // 3. encode — straight into NVENC texture
         if (_venc != null)
         {
-            // PTS wynika z terminu klatki, więc opóźnione wybudzenie nie powiela znacznika.
+            // PTS is derived from the scheduled frame time so late wakeups never duplicate timestamps.
             long elapsed = frameTime - _encStartTicks + interval / 2;
             long pts = elapsed < 0 ? -1 : elapsed / interval;
             if (pts > _lastPts)
@@ -632,12 +632,12 @@ public sealed unsafe class StreamEngine : IDisposable
             }
         }
 
-        // 4. podgląd (przy 60 fps co druga klatka)
+        // 4. preview
         if (_previewDirty)
         {
             _previewDirty = false;
             try { _comp.SetPreviewTarget(_previewEnabled ? _previewHwnd : IntPtr.Zero, _previewW, _previewH); }
-            catch (Exception ex) { Log.Warn("Podgląd: " + ex.Message); }
+            catch (Exception ex) { Log.Warn("Preview: " + ex.Message); }
         }
         if (_previewEnabled && _previewHwnd != IntPtr.Zero)
             _comp.PresentPreview(_selection);

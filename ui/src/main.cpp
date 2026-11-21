@@ -59,12 +59,12 @@ int main(int argc, char *argv[])
     QString err;
     auto &host = EngineHost::instance();
     if (!host.load(QCoreApplication::applicationDirPath() + "/engine", &err)) {
-        QMessageBox::critical(nullptr, "TikStream", "Nie udało się uruchomić silnika:\n\n" + err);
+        QMessageBox::critical(nullptr, "TikStream", "Failed to start engine:\n\n" + err);
         return 1;
     }
     const QJsonObject init = host.callObj("init");
     if (init.contains("error")) {
-        QMessageBox::critical(nullptr, "TikStream", "Błąd silnika:\n\n" + init["error"].toString());
+        QMessageBox::critical(nullptr, "TikStream", "Engine error:\n\n" + init["error"].toString());
         return 1;
     }
 
@@ -73,7 +73,7 @@ int main(int argc, char *argv[])
     if (args.contains("--minimized")) w.showMinimized();
     else w.show();
 
-    // --screenshot <plik.png> : zrzut okna po starcie (do weryfikacji wyglądu)
+    // --screenshot <file.png> : capture window screenshot after startup (for UI verification)
     const int si = args.indexOf("--screenshot");
     if (si >= 0 && si + 1 < args.size()) {
         const QString out = args[si + 1];
@@ -85,7 +85,7 @@ int main(int argc, char *argv[])
         });
     }
 
-    // --test <folder> : zapis listy kamerek, 5 s nagrania przez pełną ścieżkę, zrzut okna, wyjście
+    // --test <folder> : save camera list, record 5 s through the full pipeline, capture screenshot, exit
     const int ti = args.indexOf("--test");
     if (ti >= 0 && ti + 1 < args.size()) {
         const QString dir = args[ti + 1];
@@ -108,7 +108,7 @@ int main(int argc, char *argv[])
                 const QRect g = w.frameGeometry();
                 scr->grabWindow(0, g.x() - scr->geometry().x(), g.y() - scr->geometry().y(), g.width(), g.height()).save(dir + "/shot.png");
                 log.write("stopRecord: " + host.call("stopRecord").toJson(QJsonDocument::Compact) + "\n");
-                // zrzuty okien dialogowych (renderowane przez Qt)
+                // dialog screenshots (rendered by Qt)
                 {
                     AddSourceDialog add(host.callObj("getSettings")["sources"].toArray(), &w);
                     add.show();

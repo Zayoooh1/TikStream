@@ -7,9 +7,9 @@ using TikStream.Core;
 namespace TikStream.Capture;
 
 /// <summary>
-/// Miks wszystkich źródeł dźwięku do 48 kHz stereo float.
-/// Konsument (pompa audio) czyta w tempie zegara silnika; bufory zwracają ciszę, gdy brak danych,
-/// więc dźwięk nie „znika”, gdy pulpit milczy (znany problem loopbacku WASAPI).
+/// Mixes all audio sources to 48 kHz stereo float.
+/// The consumer (audio pump) reads at engine clock pace; buffers return silence when idle,
+/// so audio never stalls when the desktop is silent (classic WASAPI loopback quirk).
 /// </summary>
 public sealed class AudioEngine : IDisposable
 {
@@ -21,13 +21,13 @@ public sealed class AudioEngine : IDisposable
     private readonly Dictionary<string, Input> _inputs = new();
     private readonly object _lock = new();
 
-    /// <summary>Szczytowe poziomy (0..1) per źródło — do wskaźników w mikserze.</summary>
+    /// <summary>Peak levels (0..1) per source — used for mixer meters.</summary>
     public IReadOnlyDictionary<string, float> Levels
     {
         get { lock (_lock) return _inputs.ToDictionary(k => k.Key, v => v.Value.Peak); }
     }
 
-    /// <summary>True, gdy któreś urządzenie zatrzymało się lub czeka na ponowną próbę (hot-plug / recovery).</summary>
+    /// <summary>True when any device has stopped or is waiting for retry (hot-plug / recovery).</summary>
     public bool NeedsSync
     {
         get
@@ -41,7 +41,7 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    /// <summary>Synchronizuje urządzenia (wejścia/wyjścia) z listą źródeł. Źródła multimediów rejestrują się osobno.</summary>
+    /// <summary>Synchronizes devices (inputs/outputs) with the source list. Media sources register separately.</summary>
     private readonly Dictionary<string, (string Key, DateTime Retry)> _failed = new();
 
     public void SyncDevices(AppSettings settings)
@@ -67,7 +67,7 @@ public sealed class AudioEngine : IDisposable
                     _inputs.Remove(d.Id);
                     cur = null;
                 }
-                // niedostępne urządzenie (np. odłączony headset) — ponawiaj najwyżej co 5 s, nie przy każdej zmianie
+                // unavailable device (e.g. unplugged headset) — retry at most every 5 s, not on every settings change
                 if (cur == null && (!_failed.TryGetValue(d.Id, out var f) || f.Key != key || DateTime.UtcNow >= f.Retry))
                 {
                     try
@@ -78,7 +78,7 @@ public sealed class AudioEngine : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        if (!_failed.ContainsKey(d.Id)) Log.Warn($"Audio '{d.Name}': urządzenie niedostępne ({ex.Message.Trim()})");
+                        if (!_failed.ContainsKey(d.Id)) Log.Warn($"Audio '{d.Name}': device unavailable ({ex.Message.Trim()})");
                         _failed[d.Id] = (key, DateTime.UtcNow.AddSeconds(5));
                     }
                 }
@@ -110,7 +110,7 @@ public sealed class AudioEngine : IDisposable
         return type == SourceType.AudioOutput ? new WasapiLoopbackCapture(device) : new WasapiCapture(device, true, 20);
     }
 
-    /// <summary>Wejście zasilane z kodu (dźwięk pliku multimediów): 48 kHz stereo float z przeplotem.</summary>
+    /// <summary>Programmatically fed input (media file audio): 48 kHz interleaved stereo float.</summary>
     public Action<float[], int> RegisterPushInput(string id, string name)
     {
         lock (_lock)
@@ -141,7 +141,7 @@ public sealed class AudioEngine : IDisposable
         lock (_lock) if (_inputs.Remove(id, out var i)) i.Dispose(_mixer);
     }
 
-    /// <summary>Czyta dokładnie <paramref name="frames"/> ramek stereo (przeplot) do bufora.</summary>
+    /// <summary>Reads exactly <paramref name="frames"/> interleaved stereo frames into the buffer.</summary>
     public void Read(float[] buffer, int frames)
     {
         lock (_lock)
@@ -176,7 +176,7 @@ public sealed class AudioEngine : IDisposable
             foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)) ins.Add((d.ID, d.FriendlyName));
             foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)) outs.Add((d.ID, d.FriendlyName));
         }
-        catch (Exception ex) { Log.Warn("Lista urządzeń audio: " + ex.Message); }
+        catch (Exception ex) { Log.Warn("Audio device list: " + ex.Message); }
         return (ins, outs);
     }
 
@@ -225,7 +225,7 @@ public sealed class AudioEngine : IDisposable
                 capture.DataAvailable += (_, e) => _buffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
                 capture.RecordingStopped += (_, e) => {
                     Stopped = true;
-                    if (e.Exception != null) Log.Error($"Audio '{name}' zatrzymane", e.Exception);
+                    if (e.Exception != null) Log.Error($"Audio '{name}' stopped", e.Exception);
                 };
                 try { capture.StartRecording(); }
                 catch
@@ -265,11 +265,11 @@ public sealed class AudioEngine : IDisposable
             _buffer.AddSamples(bytes, 0, bytes.Length);
         }
 
-        /// <summary>Zegar urządzenia dryfuje względem naszego — nie pozwól, by opóźnienie narastało.</summary>
+        /// <summary>Device clock drifts relative to ours — keep latency from growing.</summary>
         public void TrimLatency()
         {
             if (!_trim) return;
-            var max = _buffer.WaveFormat.AverageBytesPerSecond / 25; // 40 ms (mniejszy lag względem wideo)
+            var max = _buffer.WaveFormat.AverageBytesPerSecond / 25; // 40 ms (lower latency vs video)
             int excess = _buffer.BufferedBytes - max;
             if (excess <= 0) return;
             excess -= excess % _buffer.WaveFormat.BlockAlign;
@@ -287,7 +287,7 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    /// <summary>Bramka szumów (histereza 4 dB) + kompresor (RMS/peak envelope) na 48 kHz stereo float, 0 alokacji.</summary>
+    /// <summary>Noise gate (4 dB hysteresis) + compressor (RMS/peak envelope) on 48 kHz stereo float, zero allocations.</summary>
     private sealed class DynamicsProvider(ISampleProvider source) : ISampleProvider
     {
         private volatile bool _gateOn, _compOn;
@@ -356,7 +356,7 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    /// <summary>Szybki limiter (brickwall) po suwaku głośności — chroni przed przesterem.</summary>
+    /// <summary>Fast brickwall limiter after volume fader — prevents clipping.</summary>
     private sealed class LimiterProvider(ISampleProvider source) : ISampleProvider
     {
         private volatile bool _enabled;
@@ -390,7 +390,7 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    /// <summary>Stałe opóźnienie synchronizacji A/V (0..500 ms) w buforze kołowym, 0 alokacji w Read.</summary>
+    /// <summary>Fixed A/V sync delay (0..500 ms) using a ring buffer, zero allocations in Read.</summary>
     private sealed class DelayProvider(ISampleProvider source) : ISampleProvider
     {
         private const int MaxMs = 500;

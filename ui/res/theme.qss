@@ -1,6 +1,6 @@
 /* =====================================================================
-   TikStream — ciemny motyw (Qt Widgets / QSS)
-   tło #16171d · panele #1e1f27 · krawędzie #2c2e3a · akcent #fe2c55 (TikTok) · zaznaczenie #3d5afe
+   TikStream — dark theme (Qt Widgets / QSS)
+   background #16171d · panels #1e1f27 · borders #2c2e3a · accent #fe2c55 (TikTok) · selection #3d5afe
    ===================================================================== */
 
 * {
@@ -62,7 +62,7 @@ QMenu::separator {
     margin: 5px 8px;
 }
 
-/* ---------- docki ---------- */
+/* ---------- docks ---------- */
 QDockWidget {
     titlebar-close-icon: none;
     titlebar-normal-icon: url(:/icons/float.svg);
@@ -108,7 +108,7 @@ QDockWidget::float-button:hover {
     border-bottom: 1px solid #2a2c37;
 }
 
-/* ---------- podgląd ---------- */
+/* ---------- preview ---------- */
 #previewArea {
     background: #101116;
 }
@@ -121,7 +121,7 @@ QDockWidget::float-button:hover {
     font-size: 8pt;
 }
 
-/* ---------- listy ---------- */
+/* ---------- lists ---------- */
 QListWidget, QListView, QTreeView {
     background: transparent;
     border: none;
@@ -173,7 +173,7 @@ QListWidget::item:selected {
     margin: 2px 0;
 }
 
-/* ---------- przyciski ---------- */
+/* ---------- buttons ---------- */
 QPushButton {
     background: #2a2c37;
     border: 1px solid #343747;
@@ -248,7 +248,7 @@ QToolButton::menu-indicator {
     image: none;
 }
 
-/* ---------- pola ---------- */
+/* ---------- inputs ---------- */
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
     background: #14151b;
     border: 1px solid #2f3240;
@@ -330,7 +330,7 @@ QComboBox QAbstractItemView::item {
     border-radius: 5px;
 }
 
-/* ---------- checkboxy ---------- */
+/* ---------- checkboxes ---------- */
 QCheckBox {
     spacing: 9px;
 }
@@ -353,7 +353,7 @@ QCheckBox:disabled {
     color: #5d6070;
 }
 
-/* ---------- suwaki ---------- */
+/* ---------- sliders ---------- */
 QSlider::groove:horizontal {
     height: 4px;
     background: #2f3240;
@@ -396,7 +396,7 @@ QSlider#volume::sub-page:horizontal {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3d5afe, stop:1 #25f4ee);
 }
 
-/* ---------- paski przewijania ---------- */
+/* ---------- scrollbars ---------- */
 QScrollArea {
     background: transparent;
 }
@@ -432,7 +432,7 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
     height: 0;
 }
 
-/* ---------- mikser ---------- */
+/* ---------- mixer ---------- */
 #channel {
     background: #191a21;
     border: 1px solid #262833;
@@ -455,7 +455,7 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
     font-size: 8.5pt;
 }
 
-/* ---------- karty / etykiety ---------- */
+/* ---------- cards / labels ---------- */
 #card {
     background: #1e1f27;
     border: 1px solid #2a2c37;
@@ -487,7 +487,7 @@ QFormLayout QLabel, QLabel {
     background: transparent;
 }
 
-/* ---------- pasek stanu ---------- */
+/* ---------- status bar ---------- */
 QStatusBar {
     background: #16171d;
     border-top: 1px solid #23252f;
@@ -520,7 +520,7 @@ QStatusBar QLabel {
     color: #8b8fa3;
 }
 
-/* ---------- inne ---------- */
+/* ---------- misc ---------- */
 QToolTip {
     background: #2a2c37;
     color: #e6e7ee;
@@ -535,7 +535,7 @@ QMessageBox {
     background: #1e1f27;
 }
 
-/* ---------- okna dialogowe: dodaj źródło / właściwości ---------- */
+/* ---------- dialogs: add source / properties ---------- */
 #dialogTitle {
     font-size: 13pt;
     font-weight: 700;

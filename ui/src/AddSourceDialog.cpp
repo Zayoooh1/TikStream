@@ -16,14 +16,14 @@
 
 AddSourceDialog::AddSourceDialog(const QJsonArray &sources, QWidget *parent) : QDialog(parent), m_sources(sources)
 {
-    setWindowTitle("Dodaj źródło");
+    setWindowTitle("Add Source");
     resize(860, 560);
 
     auto *root = new QHBoxLayout(this);
     root->setContentsMargins(12, 12, 12, 12);
     root->setSpacing(12);
 
-    // ---------- lewa strona: typy ----------
+    // ---------- left side: types ----------
     m_types = new QListWidget(this);
     m_types->setObjectName("settingsNav");
     m_types->setFixedWidth(280);
@@ -38,17 +38,17 @@ AddSourceDialog::AddSourceDialog(const QJsonArray &sources, QWidget *parent) : Q
         it->setFont(f);
         it->setForeground(QColor(0x6e, 0x72, 0x85));
     };
-    header("Obraz");
+    header("Video");
     bool audioHeader = false;
     for (const auto &t : sourceTypes()) {
-        if (t.audio && !audioHeader) { header("Dźwięk"); audioHeader = true; }
+        if (t.audio && !audioHeader) { header("Audio"); audioHeader = true; }
         auto *it = new QListWidgetItem(themedIcon(t.icon), t.name, m_types);
         it->setData(Qt::UserRole, t.type);
         it->setSizeHint(QSize(0, 38));
     }
     root->addWidget(m_types);
 
-    // ---------- prawa strona ----------
+    // ---------- right side ----------
     auto *right = new QFrame(this);
     right->setObjectName("card");
     auto *rv = new QVBoxLayout(right);
@@ -79,11 +79,11 @@ AddSourceDialog::AddSourceDialog(const QJsonArray &sources, QWidget *parent) : Q
     line->setFixedHeight(1);
     rv->addWidget(line);
 
-    m_new = new QRadioButton("Utwórz nowe źródło");
+    m_new = new QRadioButton("Create new source");
     m_new->setChecked(true);
     rv->addWidget(m_new);
     m_name = new QLineEdit;
-    m_name->setPlaceholderText("Nazwa źródła");
+    m_name->setPlaceholderText("Source name");
     auto *nameRow = new QHBoxLayout();
     nameRow->setContentsMargins(26, 0, 0, 0);
     nameRow->addWidget(m_name);
@@ -92,7 +92,7 @@ AddSourceDialog::AddSourceDialog(const QJsonArray &sources, QWidget *parent) : Q
     m_existingBox = new QWidget;
     auto *ev = new QVBoxLayout(m_existingBox);
     ev->setContentsMargins(0, 6, 0, 0);
-    m_existing = new QRadioButton("Dodaj istniejące źródło (to samo urządzenie/plik w kolejnej scenie)");
+    m_existing = new QRadioButton("Add existing source (reuse the same device/file in another scene)");
     auto *modeGroup = new QButtonGroup(this);
     modeGroup->addButton(m_new);
     modeGroup->addButton(m_existing);
@@ -107,14 +107,14 @@ AddSourceDialog::AddSourceDialog(const QJsonArray &sources, QWidget *parent) : Q
     rv->addWidget(m_existingBox, 1);
     rv->addStretch();
 
-    m_visible = new QCheckBox("Źródło widoczne od razu");
+    m_visible = new QCheckBox("Make source visible");
     m_visible->setChecked(true);
     rv->addWidget(m_visible);
 
     auto *buttons = new QHBoxLayout();
     buttons->addStretch();
-    auto *cancel = new QPushButton("Anuluj");
-    m_ok = new QPushButton("Dodaj źródło");
+    auto *cancel = new QPushButton("Cancel");
+    m_ok = new QPushButton("Add Source");
     m_ok->setObjectName("primary");
     m_ok->setDefault(true);
     buttons->addWidget(cancel);
@@ -163,7 +163,7 @@ void AddSourceDialog::onTypeChanged()
         e->setData(Qt::UserRole, s["id"].toString());
     }
     m_existingBox->setVisible(m_existingList->count() > 0);
-    m_visible->setText(info.audio ? "Źródło widoczne od razu (dźwięk włączony)" : "Źródło widoczne od razu");
+    m_visible->setText(info.audio ? "Make source active (audio enabled)" : "Make source visible");
     m_name->setFocus();
     m_name->selectAll();
 }

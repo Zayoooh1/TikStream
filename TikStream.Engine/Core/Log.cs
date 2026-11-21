@@ -3,7 +3,7 @@ using System.Text;
 
 namespace TikStream.Core;
 
-/// <summary>Prosty, wątkowo-bezpieczny log do pliku + zdarzenie dla UI. Zapis na osobnym wątku, żeby nie blokować renderowania.</summary>
+/// <summary>Simple thread-safe file logger + UI event. Writes on a dedicated thread so it never blocks rendering.</summary>
 public static class Log
 {
     private static readonly BlockingCollection<string> Queue = new(new ConcurrentQueue<string>(), 10_000);

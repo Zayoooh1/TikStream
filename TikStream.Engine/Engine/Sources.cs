@@ -9,7 +9,7 @@ using ID3D11Texture2D = Vortice.Direct3D11.ID3D11Texture2D;
 
 namespace TikStream.Engine;
 
-/// <summary>Źródło obrazu w trakcie działania (posiada urządzenie/plik i teksturę GPU).</summary>
+/// <summary>Runtime video source (owns capture device/file and GPU texture).</summary>
 internal abstract class RtSource : IDisposable
 {
     public SourceDef Def { get; set; } = null!;
@@ -19,10 +19,10 @@ internal abstract class RtSource : IDisposable
     public bool Yuv { get; protected set; }
     public int Width { get; protected set; }
     public int Height { get; protected set; }
-    public virtual string Status => Srv != null ? $"{Width}×{Height}" : "brak obrazu";
+    public virtual string Status => Srv != null ? $"{Width}×{Height}" : "no video";
     public double Fps { get; set; }
     public long Frames { get; protected set; }
-    /// <summary>Czy kadrować (cover) do prostokąta elementu. Tekst/obraz/kolor są rozciągane.</summary>
+    /// <summary>Whether to cover-crop into the item rectangle. Text/image/color are stretched.</summary>
     public virtual bool Croppable => true;
     public virtual bool PreserveAlpha => false;
     public virtual bool IsHdr => false;
@@ -42,7 +42,7 @@ internal abstract class RtSource : IDisposable
     };
 }
 
-/// <summary>Dwie tekstury dynamiczne (Y + UV) dla klatek NV12 z kamerki i plików.</summary>
+/// <summary>Two dynamic textures (Y + UV) for NV12 frames from cameras and media files.</summary>
 internal sealed unsafe class Nv12Texture : IDisposable
 {
     private ID3D11Texture2D? _y, _uv;
@@ -88,13 +88,13 @@ internal sealed unsafe class Nv12Texture : IDisposable
     }
 }
 
-// ============================ ekran / okno ============================
+// ============================ display / window ============================
 
 internal sealed class CaptureRt : RtSource
 {
     private DesktopCapture? _cap;
     private long _nextResolve;
-    private string _status = "Szukanie źródła…";
+    private string _status = "Searching for source…";
     private readonly GpuDevice _gpu;
     private readonly MonitorCapturePool _monitors;
     private MonitorCapturePool.Entry? _monitor;
@@ -107,14 +107,14 @@ internal sealed class CaptureRt : RtSource
         TryOpen();
     }
 
-    public override string Status => _cap == null ? _status : _cap.Closed ? "Okno zamknięte" : $"{Width}×{Height} • {_cap.Mode}{(_cap.IsHdr ? " • HDR" : "")}";
+    public override string Status => _cap == null ? _status : _cap.Closed ? "Window closed" : $"{Width}×{Height} • {_cap.Mode}{(_cap.IsHdr ? " • HDR" : "")}";
     public override bool IsHdr => _cap?.IsHdr ?? false;
 
     private Task<CaptureSource?>? _resolving;
 
     /// <summary>
-    /// Szukanie monitora/okna (EnumWindows + nazwy procesów) trwa kilka–kilkanaście ms, więc robimy je w tle.
-    /// Wcześniej działo się to w wątku renderującym co 2 s, gdy okno gry było zamknięte → przycięcie co 2 s.
+    /// Searching for displays/windows (EnumWindows + process names) takes several milliseconds, so run it in the background.
+    /// Running it on the render thread every 2 s when the target window was closed caused periodic stutter.
     /// </summary>
     private void TryOpen()
     {
@@ -133,7 +133,7 @@ internal sealed class CaptureRt : RtSource
         });
     }
 
-    /// <summary>Otwiera przechwytywanie, gdy wyszukiwanie w tle się zakończyło (wątek renderujący).</summary>
+    /// <summary>Opens capture once background resolution completes (render thread).</summary>
     private void FinishOpen()
     {
         if (_resolving == null || !_resolving.IsCompleted) return;
@@ -142,7 +142,7 @@ internal sealed class CaptureRt : RtSource
         try
         {
             var src = task.Result;
-            if (src == null) { _status = Def.Type == SourceType.Screen ? "Wybrany monitor jest niedostępny" : "Okno nie jest otwarte — czekam"; return; }
+            if (src == null) { _status = Def.Type == SourceType.Screen ? "Selected display is unavailable" : "Window is not open — waiting"; return; }
             if (Def.Type == SourceType.Screen)
             {
                 _monitor = _monitors.Acquire(_gpu, src);
@@ -153,8 +153,8 @@ internal sealed class CaptureRt : RtSource
         catch (Exception ex)
         {
             var e = ex is AggregateException ae ? ae.InnerException ?? ex : ex;
-            _status = "Błąd: " + e.Message;
-            Log.Warn($"Źródło '{Def.Name}': {e.Message}");
+            _status = "Error: " + e.Message;
+            Log.Warn($"Source '{Def.Name}': {e.Message}");
         }
     }
 
@@ -162,7 +162,7 @@ internal sealed class CaptureRt : RtSource
     {
         if (_cap == null || _cap.Closed)
         {
-            // okno gry może zostać otwarte później — szukaj co 2 s
+            // game window may open later — retry every 2 s
             if (_resolving == null && Stopwatch.GetTimestamp() >= _nextResolve)
             {
                 Dispose();
@@ -205,7 +205,7 @@ internal sealed class CaptureRt : RtSource
     }
 }
 
-// ============================ kamerka ============================
+// ============================ camera ============================
 
 internal sealed class CameraRt : RtSource
 {
@@ -222,7 +222,7 @@ internal sealed class CameraRt : RtSource
     }
 
     public double? CaptureFps => _cam?.MeasuredFps;
-    public override string Status => _cam == null ? "Nie wybrano urządzenia" : $"{_cam.Status} • {_cam.MeasuredFps:F0} fps";
+    public override string Status => _cam == null ? "No device selected" : $"{_cam.Status} • {_cam.MeasuredFps:F0} fps";
 
     public override void Update(GpuDevice gpu, Compositor comp)
     {
@@ -234,12 +234,12 @@ internal sealed class CameraRt : RtSource
     public override void Dispose()
     {
         var cam = _cam;
-        if (cam != null) Task.Run(cam.Dispose); // zamykanie dshow potrafi trwać
+        if (cam != null) Task.Run(cam.Dispose); // closing DirectShow can take time
         _tex.Dispose();
     }
 }
 
-// ============================ multimedia ============================
+// ============================ media ============================
 
 internal sealed class MediaRt : RtSource
 {
@@ -265,7 +265,7 @@ internal sealed class MediaRt : RtSource
         }
     }
 
-    public override string Status => _player?.Status ?? "Nie wybrano pliku";
+    public override string Status => _player?.Status ?? "No file selected";
 
     public override void Update(GpuDevice gpu, Compositor comp)
     {
@@ -323,14 +323,14 @@ internal sealed class MediaRt : RtSource
     }
 }
 
-// ============================ obraz / tekst (piksele z UI) ============================
+// ============================ image / text (pixels from UI) ============================
 
 internal sealed unsafe class PixelsRt : RtSource
 {
     private ID3D11Texture2D? _tex;
     public override bool Croppable => false;
     public override bool PreserveAlpha => true;
-    public override string Status => Srv != null ? $"{Width}×{Height} px" : (Def.Type == SourceType.Image ? "Nie wybrano pliku" : "—");
+    public override string Status => Srv != null ? $"{Width}×{Height} px" : (Def.Type == SourceType.Image ? "No file selected" : "—");
 
     public PixelsRt(SourceDef def) { Def = def; }
 
@@ -360,13 +360,13 @@ internal sealed unsafe class PixelsRt : RtSource
     public override void Dispose() { Srv?.Dispose(); _tex?.Dispose(); }
 }
 
-// ============================ kolor ============================
+// ============================ color ============================
 
 internal sealed class ColorRt : RtSource
 {
     private readonly ID3D11Texture2D _tex;
     public override bool Croppable => false;
-    public override string Status => "Jednolity kolor";
+    public override string Status => "Solid color";
 
     public ColorRt(SourceDef def, Compositor comp, GpuDevice gpu)
     {

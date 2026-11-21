@@ -2,7 +2,7 @@
 #include <QImage>
 #include <QJsonObject>
 
-// Rasteryzuje źródło „Tekst” albo „Obraz” do QImage ARGB32_Premultiplied — w pamięci to BGRA z premultiplikacją,
-// czyli dokładnie format tekstury, której oczekuje silnik.
+// Rasterizes a "Text" or "Image" source into a premultiplied ARGB32 QImage — premultiplied BGRA in memory,
+// matching the exact texture format expected by the engine.
 QImage rasterizeSource(const QJsonObject &source);
 QString rasterKey(const QJsonObject &source);

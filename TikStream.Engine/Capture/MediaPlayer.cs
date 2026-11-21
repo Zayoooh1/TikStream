@@ -8,9 +8,9 @@ using TikStream.Core;
 namespace TikStream.Capture;
 
 /// <summary>
-/// Odtwarzacz plików (MP4/MKV/MOV/WEBM/GIF…) dla źródła „Multimedia”.
-/// Obraz → NV12 lub BGRA z alfą, dźwięk → 48 kHz stereo do miksera.
-/// Tempo wyznacza zegar odtwarzania; po końcu pliku opcjonalnie od początku.
+/// Media file player (MP4/MKV/MOV/WEBM/GIF...) for Media sources.
+/// Video -> NV12 or premultiplied BGRA with alpha; audio -> 48 kHz stereo into the mixer.
+/// Paced by a playback clock; optionally loops from the beginning at EOF.
 /// </summary>
 public sealed unsafe class MediaPlayer : IDisposable
 {
@@ -29,13 +29,13 @@ public sealed unsafe class MediaPlayer : IDisposable
     private HashSet<long>? _emptyVideoPts;
     private Dictionary<long, CachedBand>? _bandCache;
     private long _bandCacheBytes;
-    private const long MaxBandCacheBytes = 96L * 1024 * 1024; // maks. 96 MB skompresowanego cache dla zapętlonych nakładek ProRes
+    private const long MaxBandCacheBytes = 96L * 1024 * 1024; // max 96 MB compressed cache for looped ProRes overlays
     private bool _emptyMapComplete;
     private DateTime _cachedMtime;
 
     private readonly record struct CachedBand(int W, int H, int YMin, int BandH, byte[] CompressedBgra);
 
-    public string Status { get; private set; } = "Otwieranie…";
+    public string Status { get; private set; } = "Opening…";
     public int Width => _w;
     public int Height => _h;
 
@@ -77,14 +77,14 @@ public sealed unsafe class MediaPlayer : IDisposable
         {
             bool ok = PlayOnce();
             if (!_run) return;
-            if (!ok) { Status = "Nie można odtworzyć pliku"; Thread.Sleep(2000); continue; }
-            if (!_loop) { Status = "Zakończono"; return; }
+            if (!ok) { Status = "Cannot play file"; Thread.Sleep(2000); continue; }
+            if (!_loop) { Status = "Finished"; return; }
         }
     }
 
     private bool PlayOnce()
     {
-        if (!File.Exists(_path)) { Status = "Brak pliku"; return false; }
+        if (!File.Exists(_path)) { Status = "File not found"; return false; }
         AVFormatContext* fmt = null;
         AVCodecContext* vdec = null, adec = null;
         SwsContext* sws = null;
@@ -108,7 +108,7 @@ public sealed unsafe class MediaPlayer : IDisposable
                     &adec->ch_layout, adec->sample_fmt, adec->sample_rate, 0, null), "swr_alloc_set_opts2");
                 FF.Check(ffmpeg.swr_init(swr), "swr_init");
             }
-            Status = $"Odtwarzanie • {Path.GetFileName(_path)}";
+            Status = $"Playing • {Path.GetFileName(_path)}";
 
             var clock = Stopwatch.StartNew();
             double vtb = vi >= 0 ? ffmpeg.av_q2d(fmt->streams[vi]->time_base) : 0;
@@ -134,7 +134,7 @@ public sealed unsafe class MediaPlayer : IDisposable
             while (_run)
             {
                 int r = ffmpeg.av_read_frame(fmt, pkt);
-                if (r < 0) break; // koniec pliku
+                if (r < 0) break; // end of file
                 AVCodecContext* dec = pkt->stream_index == vi ? vdec : pkt->stream_index == ai ? adec : null;
                 if (dec == null) { ffmpeg.av_packet_unref(pkt); continue; }
                 bool isVideo = dec == vdec;
@@ -169,7 +169,7 @@ public sealed unsafe class MediaPlayer : IDisposable
                     double t = ts == ffmpeg.AV_NOPTS_VALUE ? clock.Elapsed.TotalSeconds : ts * (isVideo ? vtb : atb);
                     if (double.IsNaN(startPts)) startPts = t;
                     double due = t - startPts;
-                    // dźwięk wysyłamy ~60 ms przed czasem (bufor miksera), obraz dokładnie na czas
+                    // push audio ~60 ms early (mixer buffer), video right on time
                     double wait = due - clock.Elapsed.TotalSeconds - (isVideo ? 0 : 0.06);
                     if (wait > 0.002) Thread.Sleep(TimeSpan.FromSeconds(Math.Min(wait, 0.5)));
                     if (isVideo)
@@ -185,7 +185,7 @@ public sealed unsafe class MediaPlayer : IDisposable
             if (_run && intraOnly && !_emptyMapComplete) _emptyMapComplete = true;
             return true;
         }
-        catch (Exception ex) { Log.Warn($"Multimedia '{_path}': {ex.Message}"); return false; }
+        catch (Exception ex) { Log.Warn($"Media '{_path}': {ex.Message}"); return false; }
         finally
         {
             if (sws != null) ffmpeg.sws_freeContext(sws);
@@ -201,8 +201,8 @@ public sealed unsafe class MediaPlayer : IDisposable
     private static AVCodecContext* OpenDecoder(AVStream* st, int threads)
     {
         bool hasAlphaMeta = ffmpeg.av_dict_get(st->metadata, "alpha_mode", null, 0) != null;
-        // Dla zwykłych plików wideo (bez alfy) próbujemy najpierw sprzętowego dekodera NVIDIA CUVID (NVDEC),
-        // co zdejmuje dekodowanie H.264/HEVC/VP9/AV1 z CPU. Przy błędzie fallback na CPU.
+        // For regular video files (without alpha), try NVIDIA CUVID (NVDEC) hardware decoding first
+        // to offload H.264/HEVC/VP9/AV1 decoding from CPU, falling back to CPU on failure.
         if (st->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_VIDEO && !hasAlphaMeta)
         {
             string? cuvidName = st->codecpar->codec_id switch
@@ -229,7 +229,7 @@ public sealed unsafe class MediaPlayer : IDisposable
         var codec = ffmpeg.avcodec_find_decoder(st->codecpar->codec_id);
         if (hasAlphaMeta)
         {
-            // Matroska/WebM niesie alfę jako dodatkowy blok VP8/VP9.
+            // Matroska/WebM carries alpha as a separate VP8/VP9 side block.
             var alphaDecoder = st->codecpar->codec_id switch
             {
                 AVCodecID.AV_CODEC_ID_VP8 => ffmpeg.avcodec_find_decoder_by_name("libvpx"),
@@ -301,7 +301,7 @@ public sealed unsafe class MediaPlayer : IDisposable
 
     private bool StoreVideo(AVFrame* f, AVAlphaMode streamAlpha, ref SwsContext* sws, long cachePts)
     {
-        // pliki większe niż 1080p skalujemy w dół — na pionowym płótnie i tak nie będzie widać różnicy
+        // downscale files larger than 1080p — indistinguishable on the streaming canvas
         int sw = f->width, sh = f->height;
         double s = Math.Min(1.0, 1920.0 / Math.Max(sw, sh));
         int w = (int)(sw * s) & ~1, h = (int)(sh * s) & ~1;
@@ -330,7 +330,7 @@ public sealed unsafe class MediaPlayer : IDisposable
             if (yMax < h - 1) Array.Clear(_back, (yMax + 1) * stride, (h - 1 - yMax) * stride);
             sws = ffmpeg.sws_getCachedContext(sws, sw, bandH, format, w, bandH, AVPixelFormat.AV_PIX_FMT_BGRA,
                 (int)SwsFlags.SWS_BILINEAR, null, null, null);
-            if (sws == null) throw new InvalidOperationException("Nie można przekonwertować formatu obrazu.");
+            if (sws == null) throw new InvalidOperationException("Cannot convert video pixel format.");
             var sd = new byte_ptrArray4
             {
                 [0] = f->data[0] + (nint)yMin * f->linesize[0],
@@ -352,7 +352,7 @@ public sealed unsafe class MediaPlayer : IDisposable
         {
             sws = ffmpeg.sws_getCachedContext(sws, sw, sh, format, w, h, alpha ? AVPixelFormat.AV_PIX_FMT_BGRA : AVPixelFormat.AV_PIX_FMT_NV12,
                 (int)SwsFlags.SWS_BILINEAR, null, null, null);
-            if (sws == null) throw new InvalidOperationException("Nie można przekonwertować formatu obrazu.");
+            if (sws == null) throw new InvalidOperationException("Cannot convert video pixel format.");
             fixed (byte* dst = _back)
             {
                 var dd = new byte_ptrArray4 { [0] = dst, [1] = alpha ? null : dst + w * h };
@@ -372,8 +372,8 @@ public sealed unsafe class MediaPlayer : IDisposable
 
     private static bool AlphaBounds12Bit(AVFrame* frame, out int yMin, out int yMax)
     {
-        // Na całkowicie przezroczystej klatce premultiplikacja i tak zeruje BGRA.
-        // Dla niepustych klatek wyznaczamy najwęższe pasmo wierszy z niezerową alfą.
+        // On a fully transparent frame, premultiplication zeroes BGRA anyway.
+        // For non-empty frames, find the tightest row band with non-zero alpha.
         int h = frame->height, w = frame->width;
         yMin = h; yMax = -1;
         for (int y = 0; y < h; y++)
@@ -396,7 +396,7 @@ public sealed unsafe class MediaPlayer : IDisposable
 
     private static void Premultiply(byte* pixels, int size)
     {
-        // Kompozytor miesza tekstury BGRA z premultiplikowanym RGB.
+        // Compositor blends BGRA textures with premultiplied RGB.
         int i = 0;
         if (Avx2.IsSupported)
         {
@@ -425,7 +425,7 @@ public sealed unsafe class MediaPlayer : IDisposable
 
     private static Vector256<ushort> ScaleByAlpha(Vector256<ushort> color, Vector256<ushort> alpha)
     {
-        // Dzielenie z zaokrągleniem przez 255 w zakresie iloczynu dwóch bajtów.
+        // Rounded division by 255 for the product of two bytes.
         var biased = Avx2.Add(Avx2.MultiplyLow(color, alpha), Vector256.Create((ushort)128));
         return Avx2.ShiftRightLogical(Avx2.Add(biased, Avx2.ShiftRightLogical(biased, 8)), 8);
     }

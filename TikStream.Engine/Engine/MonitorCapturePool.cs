@@ -6,8 +6,8 @@ using Vortice.Direct3D11;
 
 namespace TikStream.Engine;
 
-// DXGI pozwala procesowi otworzyć tylko jedną duplikację danego wyjścia.
-// Warstwy dzielą klatkę monitora, zachowując własne kadrowanie i opcję kursora.
+// DXGI only allows one output duplication per display per process.
+// Layers share the display frame while keeping independent cropping and cursor options.
 internal sealed class MonitorCapturePool
 {
     private readonly Dictionary<IntPtr, Entry> _entries = new();

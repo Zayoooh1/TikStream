@@ -44,11 +44,11 @@ Hotkeys::~Hotkeys()
 QList<QPair<QString, QString>> Hotkeys::actions()
 {
     return {
-        {"toggleStream", "Rozpocznij / zatrzymaj transmisję"},
-        {"toggleRecord", "Rozpocznij / zatrzymaj nagrywanie"},
-        {"toggleMic", "Wycisz / włącz mikrofon"},
-        {"nextScene", "Następna scena"},
-        {"prevScene", "Poprzednia scena"},
+        {"toggleStream", "Start / stop streaming"},
+        {"toggleRecord", "Start / stop recording"},
+        {"toggleMic", "Mute / unmute microphone"},
+        {"nextScene", "Next scene"},
+        {"prevScene", "Previous scene"},
     };
 }
 

@@ -5,7 +5,7 @@ namespace TikStream.Core;
 
 internal static partial class Native
 {
-    // ---------- Precyzyjne czekanie (high-resolution waitable timer, Win10 1803+) ----------
+    // ---------- High-resolution waitable timer (Win10 1803+) ----------
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
     private const uint TIMER_ALL_ACCESS = 0x1F0003;
 
@@ -31,20 +31,20 @@ internal static partial class Native
     [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint p);
     [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint p);
 
-    // ---------- MMCSS (priorytet wątków multimedialnych) ----------
+    // ---------- MMCSS (multimedia thread priority) ----------
     [DllImport("avrt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr AvSetMmThreadCharacteristicsW(string task, ref uint index);
 
     [DllImport("avrt.dll", SetLastError = true)]
     public static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 
-    // ---------- Priorytet GPU procesu (działa w pełni jako administrator) ----------
+    // ---------- Process GPU scheduling priority (full effect when elevated) ----------
     [DllImport("gdi32.dll")]
     public static extern int D3DKMTSetProcessSchedulingPriorityClass(IntPtr process, int priorityClass);
     public const int D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH = 4;
     public const int D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME = 5;
 
-    /// <summary>Sprawdza w rejestrze, czy Hardware-Accelerated GPU Scheduling (HAGS) jest włączony (HwSchMode == 2).</summary>
+    /// <summary>Checks the registry to see whether Hardware-Accelerated GPU Scheduling (HAGS) is enabled (HwSchMode == 2).</summary>
     public static bool IsHagsEnabled()
     {
         try
@@ -57,7 +57,7 @@ internal static partial class Native
 
     [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
 
-    // ---------- Okna ----------
+    // ---------- Windows ----------
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
@@ -96,7 +96,7 @@ internal static partial class Native
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
 }
 
-/// <summary>Precyzyjne czekanie do zadanego momentu: timer wysokiej rozdzielczości + krótkie dokręcenie spinem.</summary>
+/// <summary>Precise wait until a target timestamp: high-resolution timer + short spin finish.</summary>
 internal sealed class PreciseWaiter : IDisposable
 {
     private readonly IntPtr _timer = Native.CreateHighResTimer();

@@ -3,7 +3,7 @@ using TikStream.Capture;
 
 namespace TikStream.Encode;
 
-/// <summary>AAC-LC 48 kHz stereo (wymaganie TikTok/RTMP).</summary>
+/// <summary>AAC-LC 48 kHz stereo (TikTok/RTMP requirement).</summary>
 public sealed unsafe class AudioEncoder : IDisposable
 {
     private AVCodecContext* _ctx;
@@ -15,7 +15,7 @@ public sealed unsafe class AudioEncoder : IDisposable
     public AudioEncoder(int kbps, bool globalHeader)
     {
         var codec = ffmpeg.avcodec_find_encoder(AVCodecID.AV_CODEC_ID_AAC);
-        if (codec == null) throw new InvalidOperationException("Brak enkodera AAC.");
+        if (codec == null) throw new InvalidOperationException("AAC encoder not found.");
         _ctx = ffmpeg.avcodec_alloc_context3(codec);
         _ctx->sample_fmt = AVSampleFormat.AV_SAMPLE_FMT_FLTP;
         _ctx->sample_rate = AudioEngine.SampleRate;
@@ -36,7 +36,7 @@ public sealed unsafe class AudioEncoder : IDisposable
         FF.Check(ffmpeg.av_frame_get_buffer(_frame, 0), "av_frame_get_buffer(audio)");
     }
 
-    /// <summary>Koduje dokładnie <see cref="FrameSize"/> ramek z bufora z przeplotem.</summary>
+    /// <summary>Encodes exactly <see cref="FrameSize"/> frames from an interleaved buffer.</summary>
     public void Encode(float[] interleaved, long pts, Action<IntPtr> onPacket)
     {
         FF.Check(ffmpeg.av_frame_make_writable(_frame), "av_frame_make_writable");

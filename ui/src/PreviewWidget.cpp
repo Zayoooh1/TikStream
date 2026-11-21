@@ -26,7 +26,7 @@ void PreviewWidget::showEvent(QShowEvent *) { emitSize(); }
 
 QPointF PreviewWidget::toCanvas(const QPointF &pos) const
 {
-    // ta sama matematyka co w silniku (Compositor.PreviewViewport): dopasowanie z zachowaniem proporcji
+    // Same math as in the engine (Compositor.PreviewViewport): aspect-preserving fit
     const qreal s = std::min(width() / qreal(m_canvasW), height() / qreal(m_canvasH));
     const qreal w = m_canvasW * s, h = m_canvasH * s;
     const qreal x0 = (width() - w) / 2, y0 = (height() - h) / 2;

@@ -4,7 +4,7 @@
 #include <QJsonObject>
 #include <QString>
 
-// Most do silnika C#: ładuje środowisko .NET w tym procesie (hostfxr) i woła eksporty NativeApi.
+// Bridge to the C# engine: loads the .NET runtime in-process (hostfxr) and invokes NativeApi exports.
 class EngineHost
 {
 public:

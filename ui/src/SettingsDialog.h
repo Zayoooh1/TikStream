@@ -43,24 +43,24 @@ private:
     QStackedWidget *m_pages = nullptr;
     QPushButton *m_apply = nullptr;
 
-    // ogólne
+    // general
     QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr;
-    // transmisja
+    // stream
     QLineEdit *m_server = nullptr, *m_key = nullptr;
     QCheckBox *m_secondEnabled = nullptr;
     QLineEdit *m_secondName = nullptr, *m_secondServer = nullptr, *m_secondKey = nullptr;
-    // wyjście
+    // output
     QSpinBox *m_bitrate = nullptr, *m_keyframe = nullptr, *m_bframes = nullptr;
     QComboBox *m_preset = nullptr, *m_profile = nullptr, *m_audioBitrate = nullptr, *m_recFormat = nullptr;
     QCheckBox *m_aq = nullptr, *m_lookahead = nullptr, *m_zeroFpsImpact = nullptr;
     QLineEdit *m_folder = nullptr;
-    // obraz
+    // video
     QSpinBox *m_videoWidth = nullptr, *m_videoHeight = nullptr, *m_fps = nullptr;
-    // dźwięk
+    // audio
     QComboBox *m_desktopDev = nullptr, *m_micDev = nullptr;
-    // skróty
+    // hotkeys
     QHash<QString, QKeySequenceEdit *> m_hotkeys;
-    // zaawansowane
+    // advanced
     QComboBox *m_priority = nullptr;
     QCheckBox *m_preview = nullptr, *m_reconnect = nullptr;
     QSpinBox *m_retryDelay = nullptr, *m_retryMax = nullptr;

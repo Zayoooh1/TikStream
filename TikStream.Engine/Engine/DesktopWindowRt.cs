@@ -15,7 +15,7 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
     private ID3D11Texture2D? _texture;
     private long _nextResolve;
     private Task<IntPtr>? _resolving;
-    private string _status = "Oczekiwanie na okno…";
+    private string _status = "Waiting for window…";
     public override string Status => _status;
     public override bool IsHdr => _entry?.Capture.IsHdr ?? false;
 
@@ -26,8 +26,8 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
         {
             Dispose();
             _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
-            _status = "Nie można przechwycić obrazu monitora";
-            Log.Warn($"Przechwytywanie '{Def.Name}': {ex.Message}");
+            _status = "Cannot capture display image";
+            Log.Warn($"Capture '{Def.Name}': {ex.Message}");
         }
     }
 
@@ -49,7 +49,7 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
             }
             else if (_resolving == null && !string.IsNullOrEmpty(Def.CaptureId))
             {
-                // Enumeracja okien i procesów potrafi zablokować się na setki ms.
+                // Window and process enumeration can block for hundreds of ms.
                 var def = Def;
                 _resolving = Task.Run(() => WindowCaptureRt.ResolveTarget(def));
             }
@@ -57,12 +57,12 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
 
         if (_target == IntPtr.Zero || !Native.IsWindow(_target))
         {
-            _status = "Oczekiwanie na wybrane okno…";
+            _status = "Waiting for selected window…";
             return;
         }
         if (Native.IsIconic(_target) || WindowCaptureRt.GetForegroundWindow() != _target)
         {
-            _status = Ready ? "Okno w tle • ostatnia klatka" : "Przełącz się na wybrane okno";
+            _status = Ready ? "Window in background • last frame" : "Switch to selected window";
             return;
         }
         if (Native.DwmGetWindowAttribute(_target, Native.DWMWA_EXTENDED_FRAME_BOUNDS,
@@ -110,7 +110,7 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
         using var image = resource.QueryInterface<ID3D11Texture2D>();
         gpu.Context.CopySubresourceRegion(_texture, 0, 0, 0, 0, image, 0, new Box(left, top, 0, right, bottom, 1));
         Frames++;
-        _status = $"{Width}×{Height} • DXGI bez ramki";
+        _status = $"{Width}×{Height} • DXGI borderless";
     }
 
     private void SetTarget(IntPtr target)

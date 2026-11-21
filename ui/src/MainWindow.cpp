@@ -122,9 +122,9 @@ QComboBox *captureMethodChoice(QWidget *parent = nullptr)
 {
     auto *combo = new QComboBox(parent);
     widenChoice(combo);
-    combo->addItems({"Windows Graphics Capture", "DXGI — bez żółtej ramki"});
-    combo->setItemData(0, "Przechwytuje samo okno. Windows może wyświetlić ramkę.", Qt::ToolTipRole);
-    combo->setItemData(1, "Wycina obraz monitora. Okno musi być na wierzchu, a nakładki mogą być widoczne.", Qt::ToolTipRole);
+    combo->addItems({"Windows Graphics Capture", "DXGI — no yellow border"});
+    combo->setItemData(0, "Captures the window directly. Windows may display a capture border.", Qt::ToolTipRole);
+    combo->setItemData(1, "Crops from the display image. The window must stay on top, and overlays may be visible.", Qt::ToolTipRole);
     return combo;
 }
 
@@ -132,11 +132,11 @@ void populateApps(QComboBox *combo, const QString &id = {})
 {
     const QSignalBlocker blocked(combo);
     combo->clear();
-    combo->addItem("— wybierz aplikację —", "");
+    combo->addItem("— select application —", "");
     for (const auto &app : EngineHost::instance().callArr("listAudioApplications"))
         combo->addItem(app.toString(), app.toString());
     if (!id.isEmpty() && combo->findData(id) < 0)
-        combo->addItem(id + " • oczekiwanie na uruchomienie", id);
+        combo->addItem(id + " • waiting to launch", id);
     combo->setCurrentIndex(std::max(0, combo->findData(id)));
     combo->setToolTip(combo->currentText());
 }
@@ -153,43 +153,43 @@ bool newCaptureOptions(QWidget *parent, const QString &type, const QJsonArray &t
     const bool game = type == "Game";
     const bool audio = type == "AudioApplication";
     auto *mode = new QComboBox(&dialog);
-    mode->addItems({"Dowolna aplikacja pełnoekranowa", "Konkretne okno"});
-    if (game) form->addRow("Tryb", mode);
+    mode->addItems({"Any fullscreen application", "Specific window"});
+    if (game) form->addRow("Mode", mode);
     else mode->hide();
     auto *target = new QComboBox;
     widenChoice(target);
     if (audio) populateApps(target);
     else {
-        target->addItem("— wybierz okno —", "");
+        target->addItem("— select window —", "");
         for (const auto &entry : targets) {
             const auto window = entry.toObject();
             if (window["kind"].toString() == "Window")
                 target->addItem(window["label"].toString(), window["id"].toString());
         }
     }
-    form->addRow(audio ? "Aplikacja" : "Okno", target);
+    form->addRow(audio ? "Application" : "Window", target);
     auto *priority = new QComboBox(&dialog);
-    priority->addItems({"Dopasuj po nazwie aplikacji", "Wymagaj dokładnego tytułu"});
-    auto *cursor = new QCheckBox("Przechwytuj kursor", &dialog);
+    priority->addItems({"Match by application name", "Require exact window title"});
+    auto *cursor = new QCheckBox("Capture cursor", &dialog);
     auto *method = captureMethodChoice(&dialog);
-    auto *gameAudio = new QCheckBox("Dodaj dźwięk gry do miksera", &dialog);
+    auto *gameAudio = new QCheckBox("Add game audio to mixer", &dialog);
     cursor->setChecked(true);
     if (!audio) {
-        form->addRow("Metoda", method);
-        form->addRow("Dopasowanie okna", priority);
+        form->addRow("Method", method);
+        form->addRow("Window Match", priority);
         form->addRow(cursor);
         if (game) form->addRow(gameAudio);
-        layout->addWidget(hintLabel("Zminimalizowane okno pozostaje na liście. Jeśli aplikacja wstrzyma renderowanie, podgląd zachowa ostatnią klatkę."));
+        layout->addWidget(hintLabel("Minimized windows stay in the list. If an app pauses rendering, the preview keeps the last frame."));
     } else {
         method->hide();
         priority->hide();
         cursor->hide();
-        layout->addWidget(hintLabel("Przechwytuje dźwięk wybranej aplikacji i jej podprocesów. Kanał pojawi się w mikserze."));
+        layout->addWidget(hintLabel("Captures audio from the selected application and its child processes. The channel will appear in the mixer."));
     }
     if (!game) gameAudio->hide();
     auto *buttons = new QDialogButtonBox;
-    auto *add = buttons->addButton("Dodaj źródło", QDialogButtonBox::AcceptRole);
-    buttons->addButton("Anuluj", QDialogButtonBox::RejectRole);
+    auto *add = buttons->addButton("Add Source", QDialogButtonBox::AcceptRole);
+    buttons->addButton("Cancel", QDialogButtonBox::RejectRole);
     layout->addWidget(buttons);
     auto update = [=] {
         const bool autoGame = game && mode->currentIndex() == 0;
@@ -289,43 +289,43 @@ void MainWindow::showEvent(QShowEvent *e)
     DwmSetWindowAttribute(HWND(winId()), 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 }
 
-// =============================== budowa ===============================
+// =============================== construction ===============================
 
 void MainWindow::buildMenu()
 {
-    auto *file = menuBar()->addMenu("Plik");
-    file->addAction(themedIcon("folder"), "Pokaż nagrania", this, [this] {
+    auto *file = menuBar()->addMenu("File");
+    file->addAction(themedIcon("folder"), "Show Recordings", this, [this] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_s["recordFolder"].toString()));
     });
-    file->addAction(themedIcon("gear"), "Ustawienia", QKeySequence("Ctrl+,"), this, &MainWindow::openSettings);
+    file->addAction(themedIcon("gear"), "Settings", QKeySequence("Ctrl+,"), this, &MainWindow::openSettings);
     file->addSeparator();
-    file->addAction(themedIcon("exit"), "Wyjście", this, &QWidget::close);
+    file->addAction(themedIcon("exit"), "Exit", this, &QWidget::close);
 
-    auto *edit = menuBar()->addMenu("Edycja");
-    edit->addAction("Cofnij", QKeySequence::Undo, this, &MainWindow::undo);
-    edit->addAction("Ponów", QKeySequence::Redo, this, &MainWindow::redo);
+    auto *edit = menuBar()->addMenu("Edit");
+    edit->addAction("Undo", QKeySequence::Undo, this, &MainWindow::undo);
+    edit->addAction("Redo", QKeySequence::Redo, this, &MainWindow::redo);
     edit->addSeparator();
-    edit->addAction("Kopiuj źródło", QKeySequence::Copy, this, &MainWindow::copySelectedItem);
-    edit->addAction("Wklej źródło", QKeySequence::Paste, this, &MainWindow::pasteItem);
-    edit->addAction("Duplikuj źródło", QKeySequence("Ctrl+D"), this, &MainWindow::duplicateSelectedItem);
+    edit->addAction("Copy Source", QKeySequence::Copy, this, &MainWindow::copySelectedItem);
+    edit->addAction("Paste Source", QKeySequence::Paste, this, &MainWindow::pasteItem);
+    edit->addAction("Duplicate Source", QKeySequence("Ctrl+D"), this, &MainWindow::duplicateSelectedItem);
     edit->addSeparator();
-    edit->addAction(themedIcon("plus"), "Dodaj źródło…", QKeySequence("Ctrl+N"), this, &MainWindow::addSourceDialog);
-    edit->addAction(themedIcon("trash"), "Usuń zaznaczone źródło", QKeySequence::Delete, this, &MainWindow::removeSelectedItem);
+    edit->addAction(themedIcon("plus"), "Add Source…", QKeySequence("Ctrl+N"), this, &MainWindow::addSourceDialog);
+    edit->addAction(themedIcon("trash"), "Remove Selected Source", QKeySequence::Delete, this, &MainWindow::removeSelectedItem);
     edit->addSeparator();
-    edit->addAction("Wyśrodkuj zaznaczone", QKeySequence("Ctrl+R"), this, [this] {
+    edit->addAction("Center Selected", QKeySequence("Ctrl+R"), this, [this] {
         pushUndo();
         editItem([this](QJsonObject &i) { i = makeFree(i); QRectF r = itemRect(i); r.moveCenter({0.5, 0.5}); i["x"] = r.x(); i["y"] = r.y(); });
     });
-    edit->addAction("Rozciągnij na cały ekran", QKeySequence("Ctrl+F"), this, [this] { pushUndo(); editItem([](QJsonObject &i) { i["fit"] = "Fill"; }); loadProperties(); });
+    edit->addAction("Fill Screen", QKeySequence("Ctrl+F"), this, [this] { pushUndo(); editItem([](QJsonObject &i) { i["fit"] = "Fill"; }); loadProperties(); });
 
-    auto *view = menuBar()->addMenu("Widok");
-    view->addAction(themedIcon("refresh"), "Odśwież okna, monitory i kamerki", this, [this] { refreshCaptureList(); refreshCameras(); });
+    auto *view = menuBar()->addMenu("View");
+    view->addAction(themedIcon("refresh"), "Refresh Windows, Displays, and Cameras", this, [this] { refreshCaptureList(); refreshCameras(); });
     view->addSeparator();
-    auto *panels = view->addMenu("Układ paneli");
+    auto *panels = view->addMenu("Dock Layout");
     panels->setObjectName("panelsMenu");
-    panels->addAction("Panele po bokach", this, [this] { arrangeDocks(false); });
-    panels->addAction("Panele w poziomie pod podglądem", this, [this] { arrangeDocks(true); });
-    auto *verticalMixer = view->addAction("Pionowe słupki miksera");
+    panels->addAction("Side Docks", this, [this] { arrangeDocks(false); });
+    panels->addAction("Horizontal Docks Below Preview", this, [this] { arrangeDocks(true); });
+    auto *verticalMixer = view->addAction("Vertical Mixer Bars");
     verticalMixer->setCheckable(true);
     verticalMixer->setChecked(m_mixerVertical);
     connect(verticalMixer, &QAction::toggled, this, [this](bool vertical) {
@@ -334,7 +334,7 @@ void MainWindow::buildMenu()
         m_mixerSignature.clear();
         rebuildMixer();
     });
-    auto *scale = view->addMenu("Skala interfejsu");
+    auto *scale = view->addMenu("UI Scale");
     auto *scaleGroup = new QActionGroup(scale);
     for (int percent : {70, 85, 100}) {
         auto *action = scale->addAction(QString("%1%").arg(percent));
@@ -343,18 +343,18 @@ void MainWindow::buildMenu()
         scaleGroup->addAction(action);
         connect(action, &QAction::triggered, this, [this, percent] {
             QSettings("TikStream", "UI2").setValue("interfaceScale", percent);
-            QMessageBox::information(this, "Skala interfejsu", "Nowa skala zacznie obowiązywać po ponownym uruchomieniu TikStream.");
+            QMessageBox::information(this, "UI Scale", "The new UI scale will take effect after restarting TikStream.");
         });
     }
 
-    auto *help = menuBar()->addMenu("Pomoc");
-    help->addAction("Otwórz plik logu", this, [] {
+    auto *help = menuBar()->addMenu("Help");
+    help->addAction("Open Log File", this, [] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(EngineHost::instance().callObj("logPath")["path"].toString()));
     });
-    help->addAction("O programie", this, [this] {
+    help->addAction("About", this, [this] {
         QMessageBox::about(this, "TikStream",
-                           "<b>TikStream</b><br>Transmisje RTMP i nagrywanie w pionie lub poziomie.<br><br>"
-                           "Desktop Duplication → D3D11 → NVENC (zero-copy)<br>Karta: " + m_gpu);
+                           "<b>TikStream</b><br>Vertical and horizontal RTMP streaming and recording.<br><br>"
+                           "Desktop Duplication → D3D11 → NVENC (zero-copy)<br>GPU: " + m_gpu);
     });
 }
 
@@ -369,17 +369,17 @@ void MainWindow::buildCentral()
     m_preview = new PreviewWidget;
     m_preview->setCanvasSize(m_canvasW, m_canvasH);
     m_previewStack->addWidget(m_preview);
-    // gdy podgląd wyłączony (oszczędzanie GPU) — czytelna informacja zamiast pustego pola
+    // When preview is disabled (to save GPU) — show a clear message instead of a blank box
     auto *off = new QWidget;
     auto *ov = new QVBoxLayout(off);
     ov->addStretch();
     auto *offIcon = new QLabel;
     offIcon->setPixmap(themedIcon("eye-off").pixmap(40, 40));
     offIcon->setAlignment(Qt::AlignCenter);
-    auto *offText = new QLabel("Podgląd jest wyłączony\n(transmisja i nagrywanie działają normalnie)");
+    auto *offText = new QLabel("Preview is disabled\n(streaming and recording continue normally)");
     offText->setAlignment(Qt::AlignCenter);
     offText->setObjectName("hint");
-    auto *offBtn = new QPushButton("Włącz podgląd");
+    auto *offBtn = new QPushButton("Enable Preview");
     offBtn->setObjectName("primary");
     offBtn->setCursor(Qt::PointingHandCursor);
     auto *btnRow = new QHBoxLayout();
@@ -403,7 +403,7 @@ void MainWindow::buildCentral()
     bar->setObjectName("previewBar");
     auto *bl = new QHBoxLayout(bar);
     bl->setContentsMargins(12, 4, 12, 4);
-    auto *info = new QLabel("Przeciągnij element, aby go przesunąć  •  róg = rozmiar (Shift = bez proporcji)  •  kółko myszy = skala  •  Delete = usuń");
+    auto *info = new QLabel("Drag item to move  •  corner = resize (Shift = free aspect)  •  mouse wheel = scale  •  Delete = remove");
     info->setObjectName("previewInfo");
     bl->addWidget(info);
     bl->addStretch();
@@ -439,10 +439,10 @@ void MainWindow::buildDocks()
         connect(d, &QWidget::customContextMenuRequested, this, [this, d](const QPoint &pos) {
             QMenu menu(d);
             auto move = [this, d](Qt::DockWidgetArea side) { d->setFloating(false); addDockWidget(side, d); };
-            menu.addAction("U góry · poziomo", d, [move] { move(Qt::TopDockWidgetArea); });
-            menu.addAction("Na dole · poziomo", d, [move] { move(Qt::BottomDockWidgetArea); });
-            menu.addAction("Po lewej · pionowo", d, [move] { move(Qt::LeftDockWidgetArea); });
-            menu.addAction("Po prawej · pionowo", d, [move] { move(Qt::RightDockWidgetArea); });
+            menu.addAction("Top · horizontal", d, [move] { move(Qt::TopDockWidgetArea); });
+            menu.addAction("Bottom · horizontal", d, [move] { move(Qt::BottomDockWidgetArea); });
+            menu.addAction("Left · vertical", d, [move] { move(Qt::LeftDockWidgetArea); });
+            menu.addAction("Right · vertical", d, [move] { move(Qt::RightDockWidgetArea); });
             menu.exec(d->mapToGlobal(pos));
         });
         addDockWidget(area, d);
@@ -473,19 +473,19 @@ void MainWindow::buildDocks()
         m_s["tikTokUsername"] = nick;
         pushSettings();
     });
-    auto *chat = makeDock("Czat TikTok LIVE", "dockLiveChat", m_liveChat, Qt::RightDockWidgetArea);
+    auto *chat = makeDock("TikTok LIVE Chat", "dockLiveChat", m_liveChat, Qt::RightDockWidgetArea);
     chat->setFeatures(chat->features() | QDockWidget::DockWidgetClosable);
     findChild<QMenu *>("panelsMenu")->addAction(chat->toggleViewAction());
     chat->hide();
 
-    // ---------- Sceny ----------
+    // ---------- Scenes ----------
     m_sceneList = new QListWidget;
     m_sceneList->setObjectName("sceneList");
     m_sceneList->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
-    auto *sAdd = toolBtn("plus", "Dodaj scenę");
-    auto *sDel = toolBtn("trash", "Usuń scenę");
-    auto *sUp = toolBtn("up", "W górę");
-    auto *sDown = toolBtn("down", "W dół");
+    auto *sAdd = toolBtn("plus", "Add Scene");
+    auto *sDel = toolBtn("trash", "Remove Scene");
+    auto *sUp = toolBtn("up", "Move Up");
+    auto *sDown = toolBtn("down", "Move Down");
     connect(sAdd, &QToolButton::clicked, this, &MainWindow::addScene);
     connect(sDel, &QToolButton::clicked, this, &MainWindow::removeScene);
     connect(sUp, &QToolButton::clicked, this, [this] { moveScene(-1); });
@@ -510,18 +510,18 @@ void MainWindow::buildDocks()
         m_s["scenes"] = arr;
         applySoon();
     });
-    auto *dScenes = makeDock("Sceny", "dockScenes", withToolbar(m_sceneList, {sAdd, sDel, sUp, sDown}, {}), Qt::LeftDockWidgetArea);
+    auto *dScenes = makeDock("Scenes", "dockScenes", withToolbar(m_sceneList, {sAdd, sDel, sUp, sDown}, {}), Qt::LeftDockWidgetArea);
 
-    // ---------- Źródła ----------
+    // ---------- Sources ----------
     m_sourceList = new QListWidget;
     m_sourceList->setObjectName("sourceList");
     m_sourceList->setIconSize(QSize(18, 18));
     m_sourceList->setContextMenuPolicy(Qt::CustomContextMenu);
-    auto *add = toolBtn("plus", "Dodaj źródło (Ctrl+N)");
-    m_btnRemove = toolBtn("trash", "Usuń źródło ze sceny");
-    m_btnUp = toolBtn("up", "Wyżej (na wierzch)");
-    m_btnDown = toolBtn("down", "Niżej");
-    auto *refresh = toolBtn("refresh", "Odśwież okna, monitory i kamerki");
+    auto *add = toolBtn("plus", "Add Source (Ctrl+N)");
+    m_btnRemove = toolBtn("trash", "Remove Source from Scene");
+    m_btnUp = toolBtn("up", "Move Up (to front)");
+    m_btnDown = toolBtn("down", "Move Down");
+    auto *refresh = toolBtn("refresh", "Refresh Windows, Displays, and Cameras");
     connect(add, &QToolButton::clicked, this, &MainWindow::addSourceDialog);
     connect(m_btnRemove, &QToolButton::clicked, this, &MainWindow::removeSelectedItem);
     connect(m_btnUp, &QToolButton::clicked, this, [this] { moveSelectedItem(+1); });
@@ -545,36 +545,36 @@ void MainWindow::buildDocks()
     });
     connect(m_sourceList, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         QMenu m(this);
-        m.addAction(themedIcon("plus"), "Dodaj źródło…", this, &MainWindow::addSourceDialog);
+        m.addAction(themedIcon("plus"), "Add Source…", this, &MainWindow::addSourceDialog);
         if (!m_selItem.isEmpty()) {
             m.addSeparator();
-            m.addAction("Filtry…", this, [this] {
+            m.addAction("Filters…", this, [this] {
                 const auto src = selectedSource();
                 if (sourceTypeInfo(src["type"].toString()).audio) openAudioFiltersDialog(src["id"].toString());
                 else openVideoFiltersDialog(m_selItem);
             });
-            m.addAction("Zmień nazwę", this, [this] { m_srcName->setFocus(); m_srcName->selectAll(); });
+            m.addAction("Rename", this, [this] { m_srcName->setFocus(); m_srcName->selectAll(); });
             if (!sourceTypeInfo(selectedSource()["type"].toString()).audio) {
-                m.addAction("Wyśrodkuj", this, [this] {
+                m.addAction("Center", this, [this] {
                     editItem([this](QJsonObject &i) { i = makeFree(i); QRectF r = itemRect(i); r.moveCenter({0.5, 0.5}); i["x"] = r.x(); i["y"] = r.y(); });
                 });
-                m.addAction("Rozciągnij na cały ekran", this, [this] { editItem([](QJsonObject &i) { i["fit"] = "Fill"; }); loadProperties(); });
+                m.addAction("Fill Screen", this, [this] { editItem([](QJsonObject &i) { i["fit"] = "Fill"; }); loadProperties(); });
             }
             m.addSeparator();
-            m.addAction(themedIcon("trash"), "Usuń", this, &MainWindow::removeSelectedItem);
+            m.addAction(themedIcon("trash"), "Remove", this, &MainWindow::removeSelectedItem);
         }
         m.exec(m_sourceList->viewport()->mapToGlobal(pos));
     });
-    auto *dSources = makeDock("Źródła", "dockSources", withToolbar(m_sourceList, {add, m_btnRemove, m_btnUp, m_btnDown}, {refresh}), Qt::LeftDockWidgetArea);
+    auto *dSources = makeDock("Sources", "dockSources", withToolbar(m_sourceList, {add, m_btnRemove, m_btnUp, m_btnDown}, {refresh}), Qt::LeftDockWidgetArea);
     splitDockWidget(dScenes, dSources, Qt::Vertical);
 
-    // ---------- Właściwości ----------
+    // ---------- Properties ----------
     auto *props = new QWidget;
     buildProperties(props);
     props->setMinimumWidth(300);
-    auto *dProps = makeDock("Właściwości", "dockProps", props, Qt::RightDockWidgetArea);
+    auto *dProps = makeDock("Properties", "dockProps", props, Qt::RightDockWidgetArea);
 
-    // ---------- Mikser ----------
+    // ---------- Mixer ----------
     auto *mix = new QWidget;
     m_mixerLayout = new QBoxLayout(QBoxLayout::TopToBottom, mix);
     m_mixerLayout->setContentsMargins(6, 6, 6, 6);
@@ -584,18 +584,18 @@ void MainWindow::buildDocks()
     mixScroll->setWidgetResizable(true);
     mixScroll->setFrameShape(QFrame::NoFrame);
     mixScroll->setWidget(mix);
-    auto *dMix = makeDock("Mikser dźwięku", "dockMixer", mixScroll, Qt::RightDockWidgetArea);
+    auto *dMix = makeDock("Audio Mixer", "dockMixer", mixScroll, Qt::RightDockWidgetArea);
 
-    // ---------- Panel sterujący ----------
+    // ---------- Controls ----------
     auto *ctl = new QWidget;
     auto *cv = new QVBoxLayout(ctl);
     cv->setContentsMargins(8, 8, 8, 8);
     cv->setSpacing(6);
-    m_btnStream = new QPushButton(themedIcon("broadcast"), "  Rozpocznij transmisję");
+    m_btnStream = new QPushButton(themedIcon("broadcast"), "  Start Streaming");
     m_btnStream->setObjectName("streamButton");
-    m_btnRecord = new QPushButton(themedIcon("record"), "  Rozpocznij nagrywanie");
+    m_btnRecord = new QPushButton(themedIcon("record"), "  Start Recording");
     m_btnRecord->setObjectName("recordButton");
-    auto *btnSettings = new QPushButton(themedIcon("gear"), "  Ustawienia");
+    auto *btnSettings = new QPushButton(themedIcon("gear"), "  Settings");
     for (auto *b : {m_btnStream, m_btnRecord, btnSettings}) {
         b->setMinimumHeight(b == m_btnStream ? 38 : 30);
         b->setIconSize(QSize(18, 18));
@@ -606,7 +606,7 @@ void MainWindow::buildDocks()
     connect(m_btnStream, &QPushButton::clicked, this, &MainWindow::toggleStream);
     connect(m_btnRecord, &QPushButton::clicked, this, &MainWindow::toggleRecord);
     connect(btnSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
-    auto *dCtl = makeDock("Panel sterujący", "dockControls", ctl, Qt::RightDockWidgetArea);
+    auto *dCtl = makeDock("Controls", "dockControls", ctl, Qt::RightDockWidgetArea);
 
     splitDockWidget(dProps, dMix, Qt::Vertical);
     splitDockWidget(dMix, dCtl, Qt::Vertical);
@@ -664,7 +664,7 @@ void MainWindow::buildStatusBar()
     m_stRec->setText("●  REC  00:00:00");
 }
 
-// ---------- właściwości ----------
+// ---------- properties ----------
 
 void MainWindow::buildProperties(QWidget *host)
 {
@@ -676,7 +676,7 @@ void MainWindow::buildProperties(QWidget *host)
 
     m_propsEmpty = new QWidget;
     auto *ev = new QVBoxLayout(m_propsEmpty);
-    auto *el = new QLabel("Zaznacz źródło na liście albo w podglądzie,\naby zobaczyć jego ustawienia.\n\nNowe źródło dodasz przyciskiem +");
+    auto *el = new QLabel("Select a source in the list or preview\nto view its settings.\n\nClick + to add a new source");
     el->setAlignment(Qt::AlignCenter);
     el->setObjectName("hint");
     ev->addWidget(el);
@@ -709,7 +709,7 @@ void MainWindow::buildProperties(QWidget *host)
     auto *cv = new QVBoxLayout(content);
     cv->setContentsMargins(14, 10, 14, 14);
     cv->setSpacing(10);
-    cv->addWidget(new SectionLabel("Źródło"));
+    cv->addWidget(new SectionLabel("Source"));
     m_pages = new QStackedWidget;
     m_pages->addWidget(pageScreen());
     m_pages->addWidget(pageWindow());
@@ -744,9 +744,9 @@ QWidget *MainWindow::pageScreen()
     m_screenCombo = new QComboBox;
     m_screenCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_screenCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    f->addRow(new QLabel("Monitor"));
+    f->addRow(new QLabel("Display"));
     f->addRow(m_screenCombo);
-    m_screenCursor = new QCheckBox("Pokazuj kursor myszy");
+    m_screenCursor = new QCheckBox("Show mouse cursor");
     f->addRow(m_screenCursor);
     connect(m_screenCombo, &QComboBox::activated, this, [this] {
         if (m_loading || m_screenCombo->currentIndex() < 0) return;
@@ -788,12 +788,12 @@ QWidget *MainWindow::pageWindow()
     auto *f = form(w);
     m_gameMode = new QComboBox;
     widenChoice(m_gameMode);
-    m_gameMode->addItem("Dowolna aplikacja pełnoekranowa", "Fullscreen");
-    m_gameMode->addItem("Konkretne okno", "Window");
+    m_gameMode->addItem("Any fullscreen application", "Fullscreen");
+    m_gameMode->addItem("Specific window", "Window");
     f->addRow(m_gameMode);
     m_captureMethod = captureMethodChoice();
     f->addRow(m_captureMethod);
-    auto *desktopNote = hintLabel("DXGI wycina fragment monitora. Trzymaj grę na wierzchu. Nakładki mogą wejść do obrazu.");
+    auto *desktopNote = hintLabel("DXGI crops a region of the display. Keep the game on top. Overlays may appear in the capture.");
     f->addRow(desktopNote);
     connect(m_captureMethod, &QComboBox::currentIndexChanged, desktopNote, [desktopNote](int index) {
         desktopNote->setVisible(index == 1);
@@ -808,15 +808,15 @@ QWidget *MainWindow::pageWindow()
     row->setContentsMargins(0, 0, 0, 0);
     m_windowCombo = new QComboBox;
     widenChoice(m_windowCombo);
-    auto *r = toolBtn("refresh", "Odśwież listę okien");
+    auto *r = toolBtn("refresh", "Refresh window list");
     row->addWidget(m_windowCombo, 1);
     row->addWidget(r);
     f->addRow(m_windowTarget);
     m_windowPriority = new QComboBox;
     widenChoice(m_windowPriority);
-    m_windowPriority->addItems({"Dopasuj po nazwie aplikacji", "Wymagaj dokładnego tytułu"});
+    m_windowPriority->addItems({"Match by application name", "Require exact window title"});
     f->addRow(m_windowPriority);
-    m_windowCursor = new QCheckBox("Przechwytuj kursor");
+    m_windowCursor = new QCheckBox("Capture cursor");
     f->addRow(m_windowCursor);
 
     connect(m_gameMode, &QComboBox::activated, this, [this](int index) {
@@ -845,9 +845,9 @@ QWidget *MainWindow::pageApplicationAudio()
     m_applicationCombo = new QComboBox;
     widenChoice(m_applicationCombo);
     row->addWidget(m_applicationCombo, 1);
-    auto *refresh = toolBtn("refresh", "Odśwież aplikacje");
+    auto *refresh = toolBtn("refresh", "Refresh applications");
     row->addWidget(refresh);
-    f->addRow(new QLabel("Aplikacja"));
+    f->addRow(new QLabel("Application"));
     f->addRow(row);
     connect(refresh, &QToolButton::clicked, this, [this] {
         populateApps(m_applicationCombo, selectedSource()["deviceId"].toString());
@@ -867,9 +867,9 @@ QWidget *MainWindow::pageAudioDevice()
     m_audioDeviceCombo = new QComboBox;
     widenChoice(m_audioDeviceCombo);
     row->addWidget(m_audioDeviceCombo, 1);
-    auto *refresh = toolBtn("refresh", "Odśwież urządzenia dźwiękowe");
+    auto *refresh = toolBtn("refresh", "Refresh audio devices");
     row->addWidget(refresh);
-    f->addRow(new QLabel("Urządzenie"));
+    f->addRow(new QLabel("Device"));
     f->addRow(row);
     connect(refresh, &QToolButton::clicked, this, [this] { refreshAudioDevices(true); });
     connect(m_audioDeviceCombo, &QComboBox::activated, this, [this] {
@@ -891,16 +891,16 @@ void MainWindow::populateAudioDeviceChoice()
     const auto defaultId = m_audioDevices[input ? "defaultInput" : "defaultOutput"].toString();
     QSignalBlocker blocked(m_audioDeviceCombo);
     m_audioDeviceCombo->clear();
-    m_audioDeviceCombo->addItem("Domyślne urządzenie systemu", "");
+    m_audioDeviceCombo->addItem("System default device", "");
     for (const auto &entry : devices) {
         const auto device = entry.toObject();
         const auto id = device["id"].toString();
         const auto name = device["name"].toString();
-        if (id == defaultId) m_audioDeviceCombo->setItemText(0, "Domyślne — " + name);
+        if (id == defaultId) m_audioDeviceCombo->setItemText(0, "Default — " + name);
         m_audioDeviceCombo->addItem(name, id);
     }
     if (!current.isEmpty() && m_audioDeviceCombo->findData(current) < 0)
-        m_audioDeviceCombo->addItem("Wybrane urządzenie jest odłączone", current);
+        m_audioDeviceCombo->addItem("Selected device is disconnected", current);
     m_audioDeviceCombo->setCurrentIndex(std::max(0, m_audioDeviceCombo->findData(current)));
     m_audioDeviceCombo->setToolTip(m_audioDeviceCombo->currentText());
 }
@@ -911,7 +911,7 @@ void MainWindow::refreshAudioDevices(bool force)
     if (m_audioDeviceScanPending) return;
     m_audioDeviceScanPending = true;
 
-    // Odczyt właściwości urządzeń WASAPI i resynchronizacja audio mogą blokować — wykonujemy w tle.
+    // Reading WASAPI device properties and audio resync can block — run on a background thread.
     const QJsonObject previous = m_audioDevices;
     const bool forced = std::exchange(m_forceAudioDeviceRefresh, false);
     auto result = std::make_shared<QJsonObject>();
@@ -943,14 +943,14 @@ QWidget *MainWindow::pageCamera()
     auto *f = form(w);
     m_camDevice = new QComboBox;
     widenChoice(m_camDevice);
-    f->addRow(new QLabel("Urządzenie"));
+    f->addRow(new QLabel("Device"));
     f->addRow(m_camDevice);
     m_camMode = new QComboBox;
     widenChoice(m_camMode);
     m_camMode->setMaxVisibleItems(18);
-    f->addRow(new QLabel("Tryb"));
+    f->addRow(new QLabel("Mode"));
     f->addRow(m_camMode);
-    f->addRow(hintLabel("Przy transmisji 60 FPS wybierz 60 FPS w NV12, jeśli kamera udostępnia ten tryb. NV12 omija dekodowanie MJPEG."));
+    f->addRow(hintLabel("For 60 FPS streaming, select 60 FPS in NV12 if your camera supports it. NV12 bypasses MJPEG decoding."));
     connect(m_camDevice, &QComboBox::currentIndexChanged, this, [this] {
         if (m_loading) return;
         const QString name = m_camDevice->currentData().toString();
@@ -990,13 +990,13 @@ QWidget *MainWindow::pageImage()
     auto *row = new QHBoxLayout();
     m_imagePath = new QLineEdit;
     m_imagePath->setReadOnly(true);
-    auto *browse = new QPushButton("Wybierz…");
+    auto *browse = new QPushButton("Browse…");
     row->addWidget(m_imagePath, 1);
     row->addWidget(browse);
-    f->addRow("Plik", row);
-    f->addRow("", hintLabel("PNG z przezroczystością działa najlepiej."));
+    f->addRow("File", row);
+    f->addRow("", hintLabel("PNG with transparency works best."));
     connect(browse, &QPushButton::clicked, this, [this] {
-        const QString p = QFileDialog::getOpenFileName(this, "Wybierz obraz", {}, "Obrazy (*.png *.jpg *.jpeg *.bmp *.gif *.webp)");
+        const QString p = QFileDialog::getOpenFileName(this, "Select Image", {}, "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)");
         if (p.isEmpty()) return;
         m_imagePath->setText(QDir::toNativeSeparators(p));
         editSource([p](QJsonObject &s) { s["filePath"] = QDir::toNativeSeparators(p); });
@@ -1010,29 +1010,29 @@ QWidget *MainWindow::pageText()
     auto *f = form(w);
     m_text = new QPlainTextEdit;
     m_text->setFixedHeight(72);
-    f->addRow("Tekst", m_text);
+    f->addRow("Text", m_text);
     m_font = new QFontComboBox;
-    f->addRow("Czcionka", m_font);
+    f->addRow("Font", m_font);
     auto *row = new QHBoxLayout();
     m_fontSize = new PaddedSpinBox;
     m_fontSize->setRange(8, 400);
     m_fontSize->setSuffix(" px");
-    m_bold = new QCheckBox("Pogrubienie");
+    m_bold = new QCheckBox("Bold");
     row->addWidget(m_fontSize, 1);
     row->addWidget(m_bold);
-    f->addRow("Rozmiar", row);
-    m_textColor = new ColorButton("Kolor tekstu");
-    f->addRow("Kolor", m_textColor);
+    f->addRow("Size", row);
+    m_textColor = new ColorButton("Text Color");
+    f->addRow("Color", m_textColor);
     auto *orow = new QHBoxLayout();
-    m_outlineColor = new ColorButton("Obrys");
+    m_outlineColor = new ColorButton("Outline");
     m_outlineW = new PaddedSpinBox;
     m_outlineW->setRange(0, 40);
     m_outlineW->setSuffix(" px");
     orow->addWidget(m_outlineColor, 1);
     orow->addWidget(m_outlineW);
-    f->addRow("Obrys", orow);
-    m_bgColor = new ColorButton("Tło");
-    f->addRow("Tło", m_bgColor);
+    f->addRow("Outline", orow);
+    m_bgColor = new ColorButton("Background");
+    f->addRow("Background", m_bgColor);
 
     connect(m_text, &QPlainTextEdit::textChanged, this, [this] { if (!m_loading) editSource([this](QJsonObject &s) { s["text"] = m_text->toPlainText(); }); });
     connect(m_font, &QFontComboBox::currentFontChanged, this, [this](const QFont &fn) { if (!m_loading) editSource([fn](QJsonObject &s) { s["fontName"] = fn.family(); }); });
@@ -1049,9 +1049,9 @@ QWidget *MainWindow::pageColor()
 {
     auto *w = new QWidget;
     auto *f = form(w);
-    m_fillColor = new ColorButton("Kolor wypełnienia");
-    f->addRow("Kolor", m_fillColor);
-    f->addRow("", hintLabel("Rozmiar i położenie ustawisz w podglądzie. Kanał alfa koloru = przezroczystość."));
+    m_fillColor = new ColorButton("Fill Color");
+    f->addRow("Color", m_fillColor);
+    f->addRow("", hintLabel("Adjust size and position in the preview. The color's alpha channel controls transparency."));
     connect(m_fillColor, &ColorButton::colorChanged, this, [this](const QColor &c) { editSource([c](QJsonObject &s) { s["colorArgb"] = argbVal(c); }); });
     return w;
 }
@@ -1063,15 +1063,15 @@ QWidget *MainWindow::pageMedia()
     auto *row = new QHBoxLayout();
     m_mediaPath = new QLineEdit;
     m_mediaPath->setReadOnly(true);
-    auto *browse = new QPushButton("Wybierz…");
+    auto *browse = new QPushButton("Browse…");
     row->addWidget(m_mediaPath, 1);
     row->addWidget(browse);
-    f->addRow("Plik", row);
-    m_mediaLoop = new QCheckBox("Odtwarzaj w pętli");
+    f->addRow("File", row);
+    m_mediaLoop = new QCheckBox("Loop playback");
     f->addRow("", m_mediaLoop);
-    f->addRow("", hintLabel("Dźwięk pliku pojawi się w mikserze. Obsługiwane: MP4, MKV, MOV, WEBM, GIF i inne."));
+    f->addRow("", hintLabel("Media audio will appear in the mixer. Supports MP4, MKV, MOV, WEBM, GIF, and more."));
     connect(browse, &QPushButton::clicked, this, [this] {
-        const QString p = QFileDialog::getOpenFileName(this, "Wybierz plik wideo", {}, "Wideo (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;Wszystkie pliki (*.*)");
+        const QString p = QFileDialog::getOpenFileName(this, "Select Video File", {}, "Video (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;All Files (*.*)");
         if (p.isEmpty()) return;
         m_mediaPath->setText(QDir::toNativeSeparators(p));
         editSource([p](QJsonObject &s) { s["filePath"] = QDir::toNativeSeparators(p); });
@@ -1084,16 +1084,16 @@ QWidget *MainWindow::pageChatOverlay()
 {
     auto *w = new QWidget;
     auto *f = form(w);
-    m_chatShowMessages = new QCheckBox("Pokazuj wiadomości czatu");
-    m_chatShowGifts = new QCheckBox("Pokazuj prezenty");
-    m_chatShowTaps = new QCheckBox("Pokazuj licznik tapów");
-    m_chatDemoBtn = new QPushButton("Podgląd testowy");
+    m_chatShowMessages = new QCheckBox("Show chat messages");
+    m_chatShowGifts = new QCheckBox("Show gifts");
+    m_chatShowTaps = new QCheckBox("Show likes counter");
+    m_chatDemoBtn = new QPushButton("Test Preview");
     m_chatDemoBtn->setCheckable(true);
     f->addRow("", m_chatShowMessages);
     f->addRow("", m_chatShowGifts);
     f->addRow("", m_chatShowTaps);
     f->addRow("", m_chatDemoBtn);
-    f->addRow("", hintLabel("Overlay korzysta z tego samego połączenia co panel Czat TikTok LIVE, bez przechwytywania okna operatora."));
+    f->addRow("", hintLabel("The overlay shares the TikTok LIVE Chat panel connection without capturing any browser window."));
     connect(m_chatShowMessages, &QCheckBox::toggled, this, [this](bool on) { if (!m_loading) editSource([on](QJsonObject &s) { s["showChat"] = on; }); });
     connect(m_chatShowGifts, &QCheckBox::toggled, this, [this](bool on) { if (!m_loading) editSource([on](QJsonObject &s) { s["showGifts"] = on; }); });
     connect(m_chatShowTaps, &QCheckBox::toggled, this, [this](bool on) { if (!m_loading) editSource([on](QJsonObject &s) { s["showTaps"] = on; }); });
@@ -1109,20 +1109,20 @@ QFrame *MainWindow::buildTransform()
     auto *v = new QVBoxLayout(box);
     v->setContentsMargins(0, 4, 0, 0);
     v->setSpacing(9);
-    v->addWidget(new SectionLabel("Pozycja i wygląd"));
+    v->addWidget(new SectionLabel("Transform & Appearance"));
     auto *w = new QWidget;
     auto *f = form(w);
     m_fit = new QComboBox;
-    m_fit->addItem("Dowolnie (przeciągnij w podglądzie)", "Free");
-    m_fit->addItem("Wypełnij cały ekran (przytnij)", "Fill");
-    m_fit->addItem("Cały obraz + rozmyte tło", "FitBlur");
-    f->addRow("Dopasowanie", m_fit);
+    m_fit->addItem("Free (drag in preview)", "Free");
+    m_fit->addItem("Fill screen (crop)", "Fill");
+    m_fit->addItem("Fit + blurred background", "FitBlur");
+    f->addRow("Fit Mode", m_fit);
 
     auto *btns = new QHBoxLayout();
-    auto *center = new QPushButton("Wyśrodkuj");
-    auto *full = new QPushButton("Cały ekran");
-    auto *aspect = new QPushButton("Proporcje 1:1");
-    aspect->setToolTip("Przywróć oryginalne proporcje źródła");
+    auto *center = new QPushButton("Center");
+    auto *full = new QPushButton("Full Screen");
+    auto *aspect = new QPushButton("1:1 Aspect");
+    aspect->setToolTip("Restore original source aspect ratio");
     for (auto *b : {center, full, aspect}) btns->addWidget(b);
     f->addRow("", btns);
 
@@ -1131,17 +1131,17 @@ QFrame *MainWindow::buildTransform()
     m_zoom = hslider(100, 400);
     m_panX = hslider(-100, 100);
     m_panY = hslider(-100, 100);
-    cf->addRow("Powiększenie", m_zoom);
-    cf->addRow("Kadr w poziomie", m_panX);
-    cf->addRow("Kadr w pionie", m_panY);
+    cf->addRow("Zoom", m_zoom);
+    cf->addRow("Pan X", m_panX);
+    cf->addRow("Pan Y", m_panY);
     f->addRow(m_cropRows);
 
-    m_mirror = new QCheckBox("Odbicie lustrzane");
+    m_mirror = new QCheckBox("Mirror horizontally");
     f->addRow("", m_mirror);
     m_corner = hslider(0, 50);
-    f->addRow("Zaokrąglenie", m_corner);
+    f->addRow("Corner Radius", m_corner);
     m_opacity = hslider(0, 100);
-    f->addRow("Krycie", m_opacity);
+    f->addRow("Opacity", m_opacity);
     v->addWidget(w);
 
     connect(m_fit, &QComboBox::currentIndexChanged, this, [this] {
@@ -1188,7 +1188,7 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
     const QJsonObject src = sourceById(item["sourceId"].toString());
 
     QDialog dlg(this);
-    dlg.setWindowTitle("Filtry wideo — " + src["name"].toString());
+    dlg.setWindowTitle("Video Filters — " + src["name"].toString());
     dlg.resize(660, 360);
 
     auto *root = new QVBoxLayout(&dlg);
@@ -1200,7 +1200,7 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
 
     auto *leftCol = new QVBoxLayout;
     leftCol->setSpacing(6);
-    auto *title = new QLabel("Filtry wideo (GPU)");
+    auto *title = new QLabel("Video Filters (GPU)");
     title->setObjectName("cardTitle");
     leftCol->addWidget(title);
 
@@ -1216,8 +1216,8 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
         it->setSizeHint(QSize(0, 34));
         return it;
     };
-    addEntry("Kadrowanie krawędzi", false);
-    addEntry("Korekcja kolorów", false);
+    addEntry("Edge Cropping", false);
+    addEntry("Color Correction", false);
     auto *chromaItem = addEntry("Green Screen (Chroma Key)", true, item["chromaKeyEnabled"].toBool());
     leftCol->addWidget(list, 1);
     body->addLayout(leftCol);
@@ -1231,7 +1231,7 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
         applySoon();
     };
 
-    // 0: Kadrowanie krawędzi
+    // 0: Edge Cropping
     auto *cropL = hslider(0, 45); cropL->setValue(qRound(item["cropLeft"].toDouble() * 100));
     auto *cropR = hslider(0, 45); cropR->setValue(qRound(item["cropRight"].toDouble() * 100));
     auto *cropT = hslider(0, 45); cropT->setValue(qRound(item["cropTop"].toDouble() * 100));
@@ -1248,14 +1248,14 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
                 updateItem([key, val](QJsonObject &i) { i[key] = val / 100.0; });
             });
         };
-        addRowPct("Przytnij lewo", cropL, "cropLeft");
-        addRowPct("Przytnij prawo", cropR, "cropRight");
-        addRowPct("Przytnij góra", cropT, "cropTop");
-        addRowPct("Przytnij dół", cropB, "cropBottom");
+        addRowPct("Crop Left", cropL, "cropLeft");
+        addRowPct("Crop Right", cropR, "cropRight");
+        addRowPct("Crop Top", cropT, "cropTop");
+        addRowPct("Crop Bottom", cropB, "cropBottom");
         pages->addWidget(p);
     }
 
-    // 1: Korekcja kolorów
+    // 1: Color Correction
     auto *bright = hslider(-50, 50); bright->setValue(qRound(item["brightness"].toDouble() * 100));
     auto *contrast = hslider(50, 200); contrast->setValue(qRound(item["contrast"].toDouble(1) * 100));
     auto *sat = hslider(0, 200); sat->setValue(qRound(item["saturation"].toDouble(1) * 100));
@@ -1271,28 +1271,28 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
                 updateItem([key, val](QJsonObject &i) { i[key] = val / 100.0; });
             });
         };
-        addRowColor("Jasność", bright, "brightness");
-        addRowColor("Kontrast", contrast, "contrast");
-        addRowColor("Nasycenie", sat, "saturation");
+        addRowColor("Brightness", bright, "brightness");
+        addRowColor("Contrast", contrast, "contrast");
+        addRowColor("Saturation", sat, "saturation");
         pages->addWidget(p);
     }
 
     // 2: Green Screen (Chroma Key)
-    auto *chromaColor = new ColorButton("Kolor tła");
+    auto *chromaColor = new ColorButton("Key Color");
     chromaColor->setColor(argbOf(item["chromaKeyArgb"], QColor(0, 255, 0)));
     auto *chromaSim = hslider(1, 60); chromaSim->setValue(qRound(item["chromaKeySimilarity"].toDouble(0.25) * 100));
     auto *chromaSmooth = hslider(1, 30); chromaSmooth->setValue(qRound(item["chromaKeySmoothness"].toDouble(0.08) * 100));
     {
         auto *p = new QWidget;
         auto *f = form(p);
-        f->addRow("Kolor tła", chromaColor);
+        f->addRow("Key Color", chromaColor);
         auto *simLbl = hintLabel(QString("%1%").arg(chromaSim->value()));
         auto *smLbl = hintLabel(QString("%1%").arg(chromaSmooth->value()));
         auto *r1 = new QHBoxLayout; r1->addWidget(chromaSim, 1); r1->addWidget(simLbl);
         auto *r2 = new QHBoxLayout; r2->addWidget(chromaSmooth, 1); r2->addWidget(smLbl);
-        f->addRow("Podobieństwo", r1);
-        f->addRow("Wygładzanie", r2);
-        f->addRow("", hintLabel("Przetwarzane w całości na karcie graficznej (D3D11, 0% CPU). Zaznacz pole na liście po lewej, aby włączyć."));
+        f->addRow("Similarity", r1);
+        f->addRow("Smoothness", r2);
+        f->addRow("", hintLabel("Processed entirely on the GPU (D3D11, 0% CPU). Toggle the eye icon on the left to enable."));
         connect(chromaColor, &ColorButton::colorChanged, &dlg, [=](const QColor &c) {
             updateItem([c](QJsonObject &i) { i["chromaKeyArgb"] = int(c.rgba()); });
         });
@@ -1319,8 +1319,8 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
     root->addLayout(body, 1);
 
     auto *btns = new QHBoxLayout;
-    auto *resetBtn = new QPushButton("Resetuj filtry");
-    auto *closeBtn = new QPushButton("Zamknij");
+    auto *resetBtn = new QPushButton("Reset Filters");
+    auto *closeBtn = new QPushButton("Close");
     closeBtn->setDefault(true);
     connect(resetBtn, &QPushButton::clicked, &dlg, [=] {
         cropL->setValue(0); cropR->setValue(0); cropT->setValue(0); cropB->setValue(0);
@@ -1351,7 +1351,7 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     const bool isInput = src["type"].toString() == "AudioInput";
 
     QDialog dlg(this);
-    dlg.setWindowTitle("Filtry audio — " + src["name"].toString());
+    dlg.setWindowTitle("Audio Filters — " + src["name"].toString());
     dlg.resize(680, 350);
 
     auto *root = new QVBoxLayout(&dlg);
@@ -1361,10 +1361,10 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     auto *body = new QHBoxLayout;
     body->setSpacing(14);
 
-    // Lewa strona: lista filtrów z ikonami oka (dla wejść: 4 filtry; dla wyjść/aplikacji/mediów: Kompresor + Limiter)
+    // Left side: filter list with eye icons (for inputs: 4 filters; for outputs/apps/media: Compressor + Limiter)
     auto *leftCol = new QVBoxLayout;
     leftCol->setSpacing(6);
-    auto *title = new QLabel("Filtry audio");
+    auto *title = new QLabel("Audio Filters");
     title->setObjectName("cardTitle");
     leftCol->addWidget(title);
 
@@ -1381,13 +1381,13 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         return it;
     };
     if (isInput) {
-        addFilterItem("Tłumienie hałasu", "noiseSuppressEnabled", src["noiseSuppressEnabled"].toBool(false));
-        addFilterItem("Bramka szumów", "noiseGateEnabled", src["noiseGateEnabled"].toBool(false));
+        addFilterItem("Noise Suppression", "noiseSuppressEnabled", src["noiseSuppressEnabled"].toBool(false));
+        addFilterItem("Noise Gate", "noiseGateEnabled", src["noiseGateEnabled"].toBool(false));
     }
-    addFilterItem("Kompresor", "compressorEnabled", src["compressorEnabled"].toBool(false));
+    addFilterItem("Compressor", "compressorEnabled", src["compressorEnabled"].toBool(false));
     addFilterItem("Limiter", "limiterEnabled", src["limiterEnabled"].toBool(false));
     {
-        auto *syncIt = new QListWidgetItem("Synchronizacja (opóźnienie)", list);
+        auto *syncIt = new QListWidgetItem("Sync Offset (Delay)", list);
         syncIt->setSizeHint(QSize(0, 34));
         filterKeys.append("");
     }
@@ -1403,7 +1403,7 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         applySoon();
     };
 
-    // Helper: suwak + edytowalne pole QSpinBox dB (Enter lub klik poza pole zapisuje bez zamykania okna)
+    // Helper: slider + editable dB QSpinBox (Enter or clicking outside saves without closing dialog)
     auto makeDbRow = [&](int minDb, int maxDb, int initialDb, const QString &key, bool asInt) -> QWidget * {
         auto *wrap = new QWidget;
         auto *row = new QHBoxLayout(wrap);
@@ -1432,18 +1432,18 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     };
 
     if (isInput) {
-        // Tłumienie hałasu (Speex / RNNoise)
+        // Noise Suppression (Speex / RNNoise)
         auto *p = new QWidget;
         auto *f = form(p);
         auto *method = new QComboBox;
-        method->addItem("Speex (niskie zużycie procesora, niska jakość)", "speex");
-        method->addItem("RNNoise (większe zużycie procesora, dobra jakość)", "rnnoise");
+        method->addItem("Speex (low CPU usage, basic quality)", "speex");
+        method->addItem("RNNoise (higher CPU usage, good quality)", "rnnoise");
         const QString curMethod = src["noiseSuppressMethod"].toString("rnnoise");
         method->setCurrentIndex(curMethod == "speex" ? 0 : 1);
-        f->addRow("Metoda", method);
+        f->addRow("Method", method);
 
         auto *lvlWrap = makeDbRow(-60, 0, src["noiseSuppressLevelDb"].toInt(-30), "noiseSuppressLevelDb", true);
-        auto *lvlTitle = new QLabel("Poziom tłumienia");
+        auto *lvlTitle = new QLabel("Suppression Level");
         f->addRow(lvlTitle, lvlWrap);
 
         auto *info = hintLabel("");
@@ -1454,8 +1454,8 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
             lvlTitle->setVisible(isSpeex);
             lvlWrap->setVisible(isSpeex);
             info->setText(isSpeex
-                ? "SpeexDSP tłumi stały szum tła przy bardzo niskim zużyciu procesora."
-                : "RNNoise (sieć neuronowa 48 kHz) automatycznie usuwa szum tła, klawiaturę i wentylatory bez ręcznej kalibracji.");
+                ? "SpeexDSP suppresses steady background noise with very low CPU usage."
+                : "RNNoise (48 kHz neural network) automatically removes background noise, keyboard clicks, and fan hum without manual calibration.");
         };
         syncMethodUi();
         connect(method, &QComboBox::currentIndexChanged, &dlg, [=] {
@@ -1465,19 +1465,19 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         });
         pages->addWidget(p);
 
-        // Bramka szumów
+        // Noise Gate
         auto *pGate = new QWidget;
         auto *fGate = form(pGate);
-        fGate->addRow("Próg otwarcia", makeDbRow(-100, 0, qRound(src["noiseGateThresholdDb"].toDouble(-40)), "noiseGateThresholdDb", false));
-        fGate->addRow("", hintLabel("Dźwięki cichsze od progu są płynnie wyciszane (histereza 4 dB, hold 80 ms)."));
+        fGate->addRow("Open Threshold", makeDbRow(-100, 0, qRound(src["noiseGateThresholdDb"].toDouble(-40)), "noiseGateThresholdDb", false));
+        fGate->addRow("", hintLabel("Audio quieter than the threshold is smoothly muted (4 dB hysteresis, 80 ms hold)."));
         pages->addWidget(pGate);
     }
 
-    // Kompresor
+    // Compressor
     {
         auto *p = new QWidget;
         auto *f = form(p);
-        f->addRow("Próg kompresji", makeDbRow(-100, 0, qRound(src["compressorThresholdDb"].toDouble(-18)), "compressorThresholdDb", false));
+        f->addRow("Threshold", makeDbRow(-100, 0, qRound(src["compressorThresholdDb"].toDouble(-18)), "compressorThresholdDb", false));
 
         auto *ratioWrap = new QWidget;
         auto *r2 = new QHBoxLayout(ratioWrap);
@@ -1495,8 +1495,8 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         ratioSpin->setKeyboardTracking(false);
         r2->addWidget(compRatio, 1);
         r2->addWidget(ratioSpin);
-        f->addRow("Stopień (Ratio)", ratioWrap);
-        f->addRow("", hintLabel("Wyrównuje dynamikę głosu i przycisza najgłośniejsze skoki głośności."));
+        f->addRow("Ratio", ratioWrap);
+        f->addRow("", hintLabel("Evens out voice dynamics and tames loud volume spikes."));
         connect(compRatio, &QSlider::valueChanged, &dlg, [=](int val) {
             const double r = val / 10.0;
             if (std::abs(ratioSpin->value() - r) > 0.05) { QSignalBlocker b(ratioSpin); ratioSpin->setValue(r); }
@@ -1515,12 +1515,12 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     {
         auto *p = new QWidget;
         auto *f = form(p);
-        f->addRow("Sufit (Ceiling)", makeDbRow(-100, 0, qRound(src["limiterCeilingDb"].toDouble(-1)), "limiterCeilingDb", false));
-        f->addRow("", hintLabel("Ogranicza maksymalny poziom sygnału w dB (0 dB = maksimum, wartości ujemne ściszają szczyty)."));
+        f->addRow("Ceiling", makeDbRow(-100, 0, qRound(src["limiterCeilingDb"].toDouble(-1)), "limiterCeilingDb", false));
+        f->addRow("", hintLabel("Caps maximum signal level in dB (0 dB = full scale, negative values attenuate peaks)."));
         pages->addWidget(p);
     }
 
-    // Synchronizacja A/V (opóźnienie w ms — np. zgranie mikrofonu z kamerką USB 1080p60)
+    // A/V Sync Offset (delay in ms — e.g. aligning microphone with a 1080p60 USB webcam)
     {
         auto *p = new QWidget;
         auto *f = form(p);
@@ -1539,8 +1539,8 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         sp->setKeyboardTracking(false);
         row->addWidget(sl, 1);
         row->addWidget(sp);
-        f->addRow("Opóźnienie (Sync Offset)", wrap);
-        f->addRow("", hintLabel("Opóźnia dźwięk względem obrazu. Dla kamerki USB 1080p60 (np. Facecam MK.2) zwykle idealnie zgrywa głos z ustami wartość 40–80 ms."));
+        f->addRow("Sync Offset", wrap);
+        f->addRow("", hintLabel("Delays audio relative to video. For 1080p60 USB webcams (e.g. Facecam MK.2), 40–80 ms typically aligns voice and lips."));
         connect(sl, &QSlider::valueChanged, &dlg, [=](int val) {
             if (sp->value() != val) { QSignalBlocker b(sp); sp->setValue(val); }
             updateSrc([val](QJsonObject &s) { s["syncOffsetMs"] = val; });
@@ -1569,7 +1569,7 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
 
     auto *btns = new QHBoxLayout;
     btns->addStretch();
-    auto *closeBtn = new QPushButton("Zamknij");
+    auto *closeBtn = new QPushButton("Close");
     closeBtn->setDefault(false);
     closeBtn->setAutoDefault(false);
     connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
@@ -1664,10 +1664,10 @@ void MainWindow::pushSettings()
 {
     m_applyTimer->stop();
     const auto r = EngineHost::instance().callObj("setSettings", m_s);
-    if (r.contains("error")) m_stMsg->setText("Błąd ustawień: " + r["error"].toString());
+    if (r.contains("error")) m_stMsg->setText("Settings error: " + r["error"].toString());
 }
 
-// =============================== widoki ===============================
+// =============================== views ===============================
 
 void MainWindow::rebuildScenes()
 {
@@ -1688,7 +1688,7 @@ void MainWindow::rebuildSourceList()
     m_sourceList->clear();
     const QJsonArray items = activeScene()["items"].toArray();
     QListWidgetItem *sel = nullptr;
-    // na liście: wierzch na górze (jak w OBS)
+    // list order: top layer first (like OBS)
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto item = items[i].toObject();
         const auto src = sourceById(item["sourceId"].toString());
@@ -1696,7 +1696,7 @@ void MainWindow::rebuildSourceList()
         it->setData(Qt::UserRole, item["id"].toString());
         it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
         it->setCheckState(item["visible"].toBool(true) ? Qt::Checked : Qt::Unchecked);
-        if (sourceTypeInfo(src["type"].toString()).audio) it->setToolTip("Oko włącza lub wycisza dźwięk w tej scenie.");
+        if (sourceTypeInfo(src["type"].toString()).audio) it->setToolTip("Eye icon enables or mutes this audio source in the scene.");
         it->setSizeHint(QSize(0, 34));
         if (item["id"].toString() == m_selItem) sel = it;
     }
@@ -1738,13 +1738,13 @@ void MainWindow::loadProperties()
     const auto info = sourceTypeInfo(type);
     m_propsIcon->setPixmap(themedIcon(info.icon).pixmap(20, 20));
     m_srcName->setText(src["name"].toString());
-    m_srcName->setToolTip(info.name + " — kliknij, aby zmienić nazwę");
+    m_srcName->setToolTip(info.name + " — click to rename");
 
     static const QHash<QString, int> pageOf{{"Screen", PgScreen}, {"Window", PgWindow}, {"Camera", PgCamera}, {"Image", PgImage},
                                             {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
                                             {"AudioApplication", PgApplicationAudio}, {"AudioInput", PgAudioDevice}, {"AudioOutput", PgAudioDevice}};
     m_pages->setCurrentIndex(pageOf.value(type, PgNone));
-    // stos stron ma wysokość bieżącej strony, a nie największej (bez pustej przestrzeni)
+    // Match stacked widget height to the active page instead of the tallest one (avoids blank space)
     for (int i = 0; i < m_pages->count(); ++i)
         m_pages->widget(i)->setSizePolicy(QSizePolicy::Preferred, i == m_pages->currentIndex() ? QSizePolicy::Preferred : QSizePolicy::Ignored);
     m_pages->adjustSize();
@@ -1763,15 +1763,15 @@ void MainWindow::loadProperties()
         int index = captureId.isEmpty() ? primary : m_screenCombo->findData(captureId);
         if (!captureId.isEmpty() && index < 0) {
             index = m_screenCombo->count();
-            m_screenCombo->addItem("Monitor niedostępny (" + captureId + ")", captureId);
+            m_screenCombo->addItem("Display unavailable (" + captureId + ")", captureId);
         }
-        m_screenCombo->setPlaceholderText("Brak dostępnych monitorów");
+        m_screenCombo->setPlaceholderText("No displays available");
         m_screenCombo->setCurrentIndex(m_screenCombo->count() > 0 ? index : -1);
         m_screenCombo->setToolTip(m_screenCombo->currentText());
         m_screenCursor->setChecked(src["captureCursor"].toBool(true));
     } else if (type == "Window" || type == "Game") {
         m_windowCombo->clear();
-        m_windowCombo->addItem(themedIcon("window"), "— wybierz okno —", "");
+        m_windowCombo->addItem(themedIcon("window"), "— select window —", "");
         int sel = 0;
         const QString cur = src["captureId"].toString();
         for (const auto &v : m_captureList) {
@@ -1781,7 +1781,7 @@ void MainWindow::loadProperties()
             if (c["id"].toString() == cur) sel = m_windowCombo->count() - 1;
         }
         if (sel == 0 && !cur.isEmpty()) {
-            m_windowCombo->addItem(themedIcon("window"), cur.section('|', 1) + " (zamknięte)", cur);
+            m_windowCombo->addItem(themedIcon("window"), cur.section('|', 1) + " (closed)", cur);
             sel = m_windowCombo->count() - 1;
         }
         m_windowCombo->setCurrentIndex(sel);
@@ -1799,7 +1799,7 @@ void MainWindow::loadProperties()
         populateAudioDeviceChoice();
     } else if (type == "Camera") {
         m_camDevice->clear();
-        m_camDevice->addItem("— wybierz kamerkę —", "");
+        m_camDevice->addItem("— select camera —", "");
         int sel = 0;
         for (const auto &v : m_cameras) {
             const QString n = v.toObject()["name"].toString();
@@ -1906,17 +1906,17 @@ void MainWindow::rebuildMixer()
         }
         auto *db = new QLabel("-inf dB");
         db->setObjectName("channelDb");
-        auto *gear = toolBtn("dots", "Opcje");
+        auto *gear = toolBtn("dots", "Options");
         gear->setPopupMode(QToolButton::InstantPopup);
         auto *menu = new QMenu(gear);
-        menu->addAction("Filtry…", this, [this, id] { openAudioFiltersDialog(id); });
+        menu->addAction("Filters…", this, [this, id] { openAudioFiltersDialog(id); });
         menu->addSeparator();
         w->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(w, &QWidget::customContextMenuRequested, this, [w, menu](const QPoint &pos) {
             menu->popup(w->mapToGlobal(pos));
         });
         if (type == "AudioInput" || type == "AudioOutput") {
-            auto *devMenu = menu->addMenu(themedIcon(type == "AudioInput" ? "mic" : "speaker"), "Urządzenie");
+            auto *devMenu = menu->addMenu(themedIcon(type == "AudioInput" ? "mic" : "speaker"), "Device");
             auto *group = new QActionGroup(devMenu);
             const QJsonArray devs = m_audioDevices[type == "AudioInput" ? "inputs" : "outputs"].toArray();
             auto addDev = [&](const QString &label, const QString &devId) {
@@ -1932,13 +1932,13 @@ void MainWindow::rebuildMixer()
                     QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
                 });
             };
-            addDev("Domyślne urządzenie systemu", "");
+            addDev("System default device", "");
             for (const auto &d : devs) addDev(d.toObject()["name"].toString(), d.toObject()["id"].toString());
         }
-        menu->addAction("Zmień nazwę…", this, [this, id] {
+        menu->addAction("Rename…", this, [this, id] {
             QJsonObject src = sourceById(id);
             bool ok = false;
-            const QString n = QInputDialog::getText(this, "Zmień nazwę", "Nazwa:", QLineEdit::Normal, src["name"].toString(), &ok).trimmed();
+            const QString n = QInputDialog::getText(this, "Rename", "Name:", QLineEdit::Normal, src["name"].toString(), &ok).trimmed();
             if (!ok || n.isEmpty()) return;
             src["name"] = n;
             setSource(src);
@@ -1948,7 +1948,7 @@ void MainWindow::rebuildMixer()
         });
         if (s["globalAudio"].toBool()) {
             menu->addSeparator();
-            menu->addAction(themedIcon("trash"), "Usuń źródło dźwięku", this, [this, id] {
+            menu->addAction(themedIcon("trash"), "Remove Audio Source", this, [this, id] {
                 QJsonArray arr = sources();
                 for (int i = 0; i < arr.size(); ++i)
                     if (arr[i].toObject()["id"].toString() == id) { arr.removeAt(i); break; }
@@ -1972,7 +1972,7 @@ void MainWindow::rebuildMixer()
         }
 
         auto *row = new QHBoxLayout();
-        auto *mute = toolBtn(s["muted"].toBool() ? "speaker-off" : "speaker", "Wycisz");
+        auto *mute = toolBtn(s["muted"].toBool() ? "speaker-off" : "speaker", "Mute");
         mute->setCheckable(true);
         mute->setChecked(s["muted"].toBool());
         const bool hiddenInScene = sourceTypeInfo(type).audio && !s["globalAudio"].toBool() && !sceneAudio.value(id);
@@ -2018,7 +2018,7 @@ void MainWindow::rebuildMixer()
         m_strips[id] = Strip{meter, db, mute, slider};
     }
     if (audio.isEmpty()) {
-        auto *l = hintLabel("Brak źródeł dźwięku. Dodaj mikrofon lub dźwięk pulpitu przez „Dodaj źródło” albo w Ustawienia → Dźwięk.");
+        auto *l = hintLabel("No audio sources. Add a microphone or desktop audio via \"Add Source\" or in Settings → Audio.");
         l->setAlignment(Qt::AlignCenter);
         m_mixerLayout->insertWidget(0, l);
     }
@@ -2057,12 +2057,12 @@ void MainWindow::fillCameraModes(const QString &cameraName)
                 m_camMode->setCurrentIndex(m_camMode->count() - 1);
         }
     }
-    if (m_camMode->count() == 0) m_camMode->addItem(m_cameras.isEmpty() ? "Wyszukiwanie kamerek…" : "—");
+    if (m_camMode->count() == 0) m_camMode->addItem(m_cameras.isEmpty() ? "Scanning cameras…" : "—");
     m_camMode->setEnabled(!m_camMode->itemData(0).isNull());
     m_loading = was;
 }
 
-// =============================== operacje ===============================
+// =============================== actions ===============================
 
 void MainWindow::addSourceDialog()
 {
@@ -2078,7 +2078,7 @@ void MainWindow::addSourceDialog()
     const auto gameAudioProcess = options.take("gameAudioProcess").toString();
     const QString itemId = addSource(r.type, r.name, r.existingId, r.visible, options);
     if (!gameAudioProcess.isEmpty())
-        addSource("AudioApplication", r.name + " — dźwięk", {}, r.visible, {{"deviceId", gameAudioProcess}});
+        addSource("AudioApplication", r.name + " — audio", {}, r.visible, {{"deviceId", gameAudioProcess}});
     rebuildSourceList();
     rebuildMixer();
     if (!itemId.isEmpty()) selectItem(itemId);
@@ -2105,15 +2105,15 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             }
         }
         if (type == "Text") {
-            src["text"] = name.startsWith("Tekst") ? "Mój stream!" : name;
+            src["text"] = name.startsWith("Text") ? "My Stream!" : name;
             src["fontName"] = "Segoe UI"; src["fontSize"] = 72; src["bold"] = true;
             src["colorArgb"] = argbVal(Qt::white); src["outlineArgb"] = argbVal(Qt::black); src["outlineWidth"] = 6; src["backgroundArgb"] = 0;
         }
         if (type == "Color") src["colorArgb"] = argbVal(QColor(0, 0, 0, 160));
         if (type == "Image" || type == "Media") {
-            const QString filter = type == "Image" ? "Obrazy (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
-                                                   : "Wideo (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;Wszystkie pliki (*.*)";
-            const QString p = QFileDialog::getOpenFileName(this, type == "Image" ? "Wybierz obraz" : "Wybierz plik wideo", {}, filter);
+            const QString filter = type == "Image" ? "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
+                                                   : "Video (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;All Files (*.*)";
+            const QString p = QFileDialog::getOpenFileName(this, type == "Image" ? "Select Image" : "Select Video File", {}, filter);
             if (!p.isEmpty()) src["filePath"] = QDir::toNativeSeparators(p);
         }
         for (auto it = options.constBegin(); it != options.constEnd(); ++it) src[it.key()] = it.value();
@@ -2146,7 +2146,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double w = sz.width() * scale / cw, h = sz.height() * scale / ch;
         item["x"] = (1 - w) / 2; item["y"] = 0.42; item["w"] = w; item["h"] = h;
     } else {
-        // obraz/tekst: rozmiar ustalany po rasteryzacji (w = 0 → automatycznie)
+        // image/text: size determined after rasterization (w = 0 -> automatic)
         item["x"] = 0.1; item["y"] = 0.42; item["w"] = 0.0; item["h"] = 0.0;
     }
     QJsonObject sc = activeScene();
@@ -2172,7 +2172,7 @@ void MainWindow::removeSelectedItem()
     sc["items"] = items;
     setActiveScene(sc);
 
-    // źródło nieużywane w żadnej scenie → usuń całkowicie
+    // source unused in any scene -> remove completely
     bool used = false;
     for (const auto &s : scenes())
         for (const auto &it : s.toObject()["items"].toArray())
@@ -2214,7 +2214,7 @@ void MainWindow::moveSelectedItem(int dir)
 void MainWindow::addScene()
 {
     QJsonArray arr = scenes();
-    QJsonObject sc{{"id", newId()}, {"name", QString("Scena %1").arg(arr.size() + 1)}, {"items", QJsonArray{}}};
+    QJsonObject sc{{"id", newId()}, {"name", QString("Scene %1").arg(arr.size() + 1)}, {"items", QJsonArray{}}};
     arr.append(sc);
     m_s["scenes"] = arr;
     m_s["activeSceneId"] = sc["id"];
@@ -2229,9 +2229,9 @@ void MainWindow::addScene()
 void MainWindow::removeScene()
 {
     QJsonArray arr = scenes();
-    if (arr.size() <= 1) { QMessageBox::information(this, "Sceny", "Musi zostać przynajmniej jedna scena."); return; }
+    if (arr.size() <= 1) { QMessageBox::information(this, "Scenes", "At least one scene must remain."); return; }
     const int i = activeSceneIndex();
-    if (QMessageBox::question(this, "Usuń scenę", QString("Usunąć scenę „%1”?").arg(arr[i].toObject()["name"].toString())) != QMessageBox::Yes) return;
+    if (QMessageBox::question(this, "Remove Scene", QString("Remove scene \"%1\"?").arg(arr[i].toObject()["name"].toString())) != QMessageBox::Yes) return;
     arr.removeAt(i);
     m_s["scenes"] = arr;
     QSet<QString> used;
@@ -2296,7 +2296,7 @@ void MainWindow::uploadRaster(const QJsonObject &src)
     } else {
         key = rasterKey(src);
     }
-    if (m_rasterKeys.value(id) == key && m_rasterSizes.contains(id)) { /* bez zmian w treści */ }
+    if (m_rasterKeys.value(id) == key && m_rasterSizes.contains(id)) { /* content unchanged */ }
     else {
         m_rasterKeys[id] = key;
         const QImage img = (type == "ChatOverlay" && m_liveChat)
@@ -2316,7 +2316,7 @@ void MainWindow::uploadRaster(const QJsonObject &src)
     const QSize sz = m_rasterSizes.value(id);
     const QSize oldSize = m_rasterSizes.take(id + "#old");
 
-    // dopasuj rozmiar elementów tego źródła we wszystkich scenach (zachowaj skalę w pikselach)
+    // adjust size of this source's items across all scenes (preserve pixel scale)
     QJsonArray arr = scenes();
     bool changed = false;
     for (int s = 0; s < arr.size(); ++s) {
@@ -2356,7 +2356,7 @@ void MainWindow::applyHotkeys()
     const QJsonObject hk = m_s["hotkeys"].toObject();
     for (auto it = hk.begin(); it != hk.end(); ++it) map[it.key()] = it.value().toString();
     const QStringList failed = m_hotkeys->apply(map);
-    if (!failed.isEmpty()) m_stMsg->setText("Nie udało się zarejestrować skrótów: " + failed.join(", ") + " (zajęte przez inny program?)");
+    if (!failed.isEmpty()) m_stMsg->setText("Failed to register hotkeys: " + failed.join(", ") + " (in use by another app?)");
 }
 
 void MainWindow::triggerAction(const QString &action)
@@ -2378,11 +2378,11 @@ void MainWindow::triggerAction(const QString &action)
         m_mixerSignature.clear();
         rebuildMixer();
         applySoon();
-        m_stMsg->setText(anyUnmuted ? "Mikrofon wyciszony" : "Mikrofon włączony");
+        m_stMsg->setText(anyUnmuted ? "Microphone muted" : "Microphone unmuted");
     }
 }
 
-// =============================== podgląd ===============================
+// =============================== preview ===============================
 
 bool MainWindow::croppable(const QString &type) const
 {
@@ -2426,7 +2426,7 @@ void MainWindow::updateSourceStatus()
     QString status = st.isEmpty() ? QString{} : "● " + st["status"].toString();
     const double captureFps = st["captureFps"].toDouble();
     if (src["type"].toString() == "Camera" && captureFps > 0 && captureFps < 0.8 * src["cameraFps"].toInt(60))
-        status += "\nKamera dostarcza mniej klatek niż ustawiono. Sprawdź oświetlenie i czas ekspozycji.";
+        status += "\nCamera is delivering fewer frames than configured. Check lighting and exposure time.";
     m_srcStatus->setWordWrap(true);
     m_srcStatus->setText(status);
 }
@@ -2451,11 +2451,11 @@ void MainWindow::onCanvasPressed(QPointF p)
 {
     m_drag = Drag::None;
     if (m_applyTimer->isActive()) pushSettings();
-    // 10 px tolerancji w pikselach podglądu → jednostki płótna
+    // 10 px tolerance in preview pixels -> canvas units
     const double s = std::min(m_preview->width() / double(m_canvasW), m_preview->height() / double(m_canvasH));
     const double tolX = 10.0 / (m_canvasW * s), tolY = 10.0 / (m_canvasH * s);
 
-    // 1. uchwyt w rogu zaznaczonego elementu
+    // 1. corner handle of the selected item
     const QJsonObject sel = selectedItem();
     if (!sel.isEmpty() && sel["visible"].toBool(true) && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
         const QRectF r = displayRect(sel);
@@ -2471,7 +2471,7 @@ void MainWindow::onCanvasPressed(QPointF p)
             }
         }
     }
-    // 2. element pod kursorem (od wierzchu)
+    // 2. item under cursor (top to bottom)
     const QJsonArray items = activeScene()["items"].toArray();
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto it = items[i].toObject();
@@ -2596,7 +2596,7 @@ void MainWindow::pasteItem()
     pushUndo();
     QJsonObject src = m_clipboardSource;
     const QString origId = src["id"].toString();
-    // Jeśli źródła nie ma już w definicjach (np. usunięto je), odtwórz je z nowym ID
+    // If the source no longer exists in definitions (e.g. deleted), recreate it with a new ID
     QString sourceId = origId;
     if (sourceById(origId).isEmpty()) {
         src["id"] = newId();
@@ -2686,20 +2686,20 @@ void MainWindow::onCanvasWheel(int delta)
     if (m_fit->currentData().toString() != "Free") { m_loading = true; m_fit->setCurrentIndex(0); m_loading = false; }
 }
 
-// =============================== na żywo ===============================
+// =============================== live ===============================
 
 void MainWindow::toggleStream()
 {
     if (!m_streaming) {
         if (!prepareStream()) return;
     } else if (m_s["confirmStreamStop"].toBool(true) &&
-               QMessageBox::question(this, "Transmisja", "Zatrzymać transmisję?") != QMessageBox::Yes) {
+               QMessageBox::question(this, "Streaming", "Stop streaming?") != QMessageBox::Yes) {
         return;
     }
     pushSettings();
     m_btnStream->setEnabled(false);
     const auto r = EngineHost::instance().callObj(m_streaming ? "stopStream" : "startStream");
-    if (r.contains("error")) QMessageBox::warning(this, "Transmisja", r["error"].toString());
+    if (r.contains("error")) QMessageBox::warning(this, "Streaming", r["error"].toString());
     m_btnStream->setEnabled(true);
     pollStats();
 }
@@ -2708,7 +2708,7 @@ bool MainWindow::prepareStream()
 {
     QSettings draft("TikStream", "UI2");
     QDialog dialog(this);
-    dialog.setWindowTitle("Przygotuj transmisję");
+    dialog.setWindowTitle("Prepare Stream");
     dialog.resize(540, 0);
     auto *layout = new QVBoxLayout(&dialog);
     auto *form = new QFormLayout;
@@ -2721,8 +2721,8 @@ bool MainWindow::prepareStream()
     auto addField = [&dialog, form](const QString &label, QWidget *field, auto readText) {
         auto *row = new QHBoxLayout;
         row->addWidget(field, 1);
-        auto *copy = new QPushButton("Kopiuj");
-        copy->setAccessibleName("Kopiuj „" + label + "”");
+        auto *copy = new QPushButton("Copy");
+        copy->setAccessibleName("Copy \"" + label + "\"");
         copy->setAutoDefault(false);
         connect(copy, &QPushButton::clicked, &dialog, [readText] {
             QApplication::clipboard()->setText(readText());
@@ -2730,21 +2730,21 @@ bool MainWindow::prepareStream()
         row->addWidget(copy, 0, Qt::AlignTop);
         form->addRow(label, row);
     };
-    addField("Tytuł", title, [title] { return title->text(); });
-    addField("Kategoria lub gra", category, [category] { return category->text(); });
-    addField("Opis", description, [description] { return description->toPlainText(); });
-    layout->addWidget(hintLabel("To lokalny szkic. Ustaw te dane w panelu serwisu przed rozpoczęciem transmisji."));
+    addField("Title", title, [title] { return title->text(); });
+    addField("Category or Game", category, [category] { return category->text(); });
+    addField("Description", description, [description] { return description->toPlainText(); });
+    layout->addWidget(hintLabel("This is a local draft. Set these details in your platform's dashboard before going live."));
 
     const bool hasDestination = !m_s["serverUrl"].toString().trimmed().isEmpty()
         && !m_s["streamKey"].toString().trimmed().isEmpty();
     if (!hasDestination)
-        layout->addWidget(hintLabel("Aby rozpocząć transmisję RTMP, ustaw adres serwera i klucz transmisji."));
+        layout->addWidget(hintLabel("To start RTMP streaming, configure the server URL and stream key."));
 
     auto *buttons = new QDialogButtonBox;
-    auto *start = buttons->addButton("Rozpocznij transmisję", QDialogButtonBox::AcceptRole);
-    auto *save = buttons->addButton("Zapisz szkic", QDialogButtonBox::ActionRole);
-    auto *settings = buttons->addButton("Ustawienia transmisji", QDialogButtonBox::ActionRole);
-    auto *cancel = buttons->addButton("Anuluj", QDialogButtonBox::RejectRole);
+    auto *start = buttons->addButton("Start Streaming", QDialogButtonBox::AcceptRole);
+    auto *save = buttons->addButton("Save Draft", QDialogButtonBox::ActionRole);
+    auto *settings = buttons->addButton("Stream Settings", QDialogButtonBox::ActionRole);
+    auto *cancel = buttons->addButton("Cancel", QDialogButtonBox::RejectRole);
     start->setEnabled(hasDestination);
     settings->setVisible(!hasDestination);
     cancel->setDefault(true);
@@ -2774,7 +2774,7 @@ void MainWindow::toggleRecord()
     m_btnRecord->setEnabled(false);
     pushSettings();
     const auto r = EngineHost::instance().callObj(m_recording ? "stopRecord" : "startRecord");
-    if (r.contains("error")) QMessageBox::warning(this, "Nagrywanie", r["error"].toString());
+    if (r.contains("error")) QMessageBox::warning(this, "Recording", r["error"].toString());
     m_btnRecord->setEnabled(true);
     pollStats();
 }
@@ -2797,9 +2797,9 @@ void MainWindow::openSettings()
 
 void MainWindow::updateLiveButtons()
 {
-    m_btnStream->setText(m_streaming ? "  Zatrzymaj transmisję" : "  Rozpocznij transmisję");
+    m_btnStream->setText(m_streaming ? "  Stop Streaming" : "  Start Streaming");
     m_btnStream->setProperty("live", m_streaming);
-    m_btnRecord->setText(m_recording ? "  Zatrzymaj nagrywanie" : "  Rozpocznij nagrywanie");
+    m_btnRecord->setText(m_recording ? "  Stop Recording" : "  Start Recording");
     m_btnRecord->setProperty("live", m_recording);
     for (auto *b : {m_btnStream, m_btnRecord}) { b->style()->unpolish(b); b->style()->polish(b); }
     m_stLive->setProperty("on", m_streaming);
@@ -2832,13 +2832,13 @@ void MainWindow::pollStats()
     qint64 dropped = 0;
     for (const auto &ov : st["outputs"].toArray()) {
         const auto o = ov.toObject();
-        if (o["name"].toString() == "Transmisja") { kbps = o["kbps"].toDouble(); dropped = qint64(o["dropped"].toDouble()); }
+        if (o["name"].toString() == "Stream") { kbps = o["kbps"].toDouble(); dropped = qint64(o["dropped"].toDouble()); }
     }
-    m_stBitrate->setText(s ? QString("%1 kb/s").arg(kbps, 0, 'f', 0) : "— kb/s");
-    m_stDropped->setText(QString("Odrzucone: %1").arg(dropped));
+    m_stBitrate->setText(s ? QString("%1 kbps").arg(kbps, 0, 'f', 0) : "— kbps");
+    m_stDropped->setText(QString("Dropped: %1").arg(dropped));
 
     updateSourceStatus();
-    if (m_drag == Drag::None) updateSelection(); // FitBlur zależy od rozmiaru źródła
+    if (m_drag == Drag::None) updateSelection(); // FitBlur depends on source dimensions
 
     const QString err = st["lastError"].toString();
     if (!err.isEmpty()) {
@@ -2846,7 +2846,7 @@ void MainWindow::pollStats()
         m_stMsg->setText("⚠ " + err);
         QMessageBox::warning(this, "TikStream", err);
     } else {
-        m_stMsg->setText(QString("Scena: %1  •  %2").arg(activeScene()["name"].toString(), m_gpu));
+        m_stMsg->setText(QString("Scene: %1  •  %2").arg(activeScene()["name"].toString(), m_gpu));
     }
 }
 
@@ -2864,7 +2864,7 @@ void MainWindow::pollLevels()
 void MainWindow::closeEvent(QCloseEvent *e)
 {
     if ((m_streaming || m_recording) &&
-        QMessageBox::question(this, "TikStream", "Transmisja lub nagrywanie trwa. Zakończyć i zamknąć?") != QMessageBox::Yes) {
+        QMessageBox::question(this, "TikStream", "Streaming or recording is active. Stop and exit?") != QMessageBox::Yes) {
         e->ignore();
         return;
     }

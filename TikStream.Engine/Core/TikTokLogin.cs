@@ -21,9 +21,9 @@ internal sealed class TikTokLogin
 
     public object Configure(string key, string secret)
     {
-        if (_pending != null) return new { error = "Najpierw anuluj bieżące logowanie." };
+        if (_pending != null) return new { error = "Cancel the current sign-in first." };
         if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(secret))
-            return new { error = "Podaj oba pola z zakładki Sandbox." };
+            return new { error = "Enter both fields from the Sandbox tab." };
         Clear();
         _sandboxKey = key.Trim();
         _sandboxSecret = secret.Trim();
@@ -32,7 +32,7 @@ internal sealed class TikTokLogin
 
     public object Begin()
     {
-        if (_pending != null) return new { error = "Logowanie jest już w toku." };
+        if (_pending != null) return new { error = "Sign-in is already in progress." };
         var key = _sandboxKey ?? Environment.GetEnvironmentVariable("TIKSTREAM_TIKTOK_SANDBOX_KEY")?.Trim();
         var secret = _sandboxSecret ?? Environment.GetEnvironmentVariable("TIKSTREAM_TIKTOK_SANDBOX_SECRET")?.Trim();
         if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(secret))
@@ -44,7 +44,7 @@ internal sealed class TikTokLogin
         catch (HttpListenerException)
         {
             listener.Close();
-            return new { error = "Nie udało się otworzyć adresu powrotu 127.0.0.1:3455. Sprawdź, czy port jest dostępny." };
+            return new { error = "Could not open callback address 127.0.0.1:3455. Check if the port is available." };
         }
         var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         var verifier = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -64,9 +64,9 @@ internal sealed class TikTokLogin
         if (_pending is { IsCompleted: true })
         {
             try { _name = _pending.GetAwaiter().GetResult(); }
-            catch (OperationCanceledException) { _error = "Przekroczono czas logowania."; }
+            catch (OperationCanceledException) { _error = "Sign-in timed out."; }
             catch (InvalidOperationException ex) { _error = ex.Message; }
-            catch (Exception) { _error = "Nie udało się połączyć z TikTokiem."; }
+            catch (Exception) { _error = "Could not connect to TikTok."; }
             _pending = null;
             _cancel?.Dispose();
             _cancel = null;
@@ -113,7 +113,7 @@ internal sealed class TikTokLogin
                 if (matches) break;
             }
         }
-        if (string.IsNullOrEmpty(code)) throw new InvalidOperationException("TikTok nie udzielił zgody na logowanie.");
+        if (string.IsNullOrEmpty(code)) throw new InvalidOperationException("TikTok did not grant login authorization.");
 
         using var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -123,7 +123,7 @@ internal sealed class TikTokLogin
         using var tokenResponse = await Http.PostAsync("https://open.tiktokapis.com/v2/oauth/token/", form, ct).ConfigureAwait(false);
         using var token = JsonDocument.Parse(await tokenResponse.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
         if (!tokenResponse.IsSuccessStatusCode || !token.RootElement.TryGetProperty("access_token", out var accessToken))
-            throw new InvalidOperationException("TikTok odrzucił kod logowania. Sprawdź dane klienta Sandbox i Redirect URI.");
+            throw new InvalidOperationException("TikTok rejected the login code. Check your Sandbox client credentials and Redirect URI.");
 
         using var profileRequest = new HttpRequestMessage(HttpMethod.Get,
             "https://open.tiktokapis.com/v2/user/info/?fields=display_name");
@@ -136,6 +136,6 @@ internal sealed class TikTokLogin
             && user.TryGetProperty("display_name", out var name)
             && name.GetString() is { Length: > 0 } displayName)
             return displayName;
-        throw new InvalidOperationException("Nie udało się odczytać profilu. Sprawdź zakres user.info.basic.");
+        throw new InvalidOperationException("Failed to read profile. Verify the user.info.basic scope.");
     }
 }

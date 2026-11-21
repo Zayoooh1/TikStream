@@ -15,7 +15,7 @@ public:
     explicit PaddedSpinBox(QWidget *parent = nullptr);
 };
 
-// Wskaźnik poziomu jak w OBS: zielony → żółty → czerwony, skala dB, wskazanie szczytu z opadaniem.
+// OBS-style level meter: green -> yellow -> red, dB scale, peak hold with decay.
 class MeterWidget : public QWidget
 {
     Q_OBJECT
@@ -58,7 +58,7 @@ private:
     QString m_title;
 };
 
-// Nagłówek sekcji w panelach (mały, wersalikami, przygaszony).
+// Section header in panels (small, uppercase, dimmed).
 class SectionLabel : public QWidget
 {
     Q_OBJECT

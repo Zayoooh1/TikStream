@@ -1,7 +1,7 @@
 #pragma once
 #include <QWidget>
 
-// Natywne okno, w które silnik C# rysuje podgląd przez swapchain D3D11 (Qt nic tu nie maluje).
+// Native window where the C# engine renders the preview via D3D11 swapchain (Qt does not paint here).
 class PreviewWidget : public QWidget
 {
     Q_OBJECT
@@ -10,7 +10,7 @@ public:
     void setCanvasSize(int w, int h) { m_canvasW = w; m_canvasH = h; }
     QPaintEngine *paintEngine() const override { return nullptr; }
 
-    // znormalizowane współrzędne płótna (0..1) dla punktu w widżecie
+    // normalized canvas coordinates (0..1) for a point in widget space
     QPointF toCanvas(const QPointF &widgetPos) const;
 
 signals:

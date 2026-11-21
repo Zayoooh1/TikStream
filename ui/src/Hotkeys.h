@@ -4,7 +4,7 @@
 #include <QKeySequence>
 #include <QObject>
 
-// Globalne skróty klawiszowe (działają też, gdy gra jest na pierwszym planie) — RegisterHotKey.
+// Global hotkeys (work even when a game is in the foreground) — RegisterHotKey.
 class Hotkeys : public QObject, public QAbstractNativeEventFilter
 {
     Q_OBJECT
@@ -12,11 +12,11 @@ public:
     explicit Hotkeys(QObject *parent = nullptr);
     ~Hotkeys() override;
 
-    // action → sekwencja, np. "toggleStream" → "Ctrl+F9". Zwraca listę akcji, których nie udało się zarejestrować.
+    // action -> key sequence, e.g. "toggleStream" -> "Ctrl+F9". Returns list of actions that failed to register.
     QStringList apply(const QHash<QString, QString> &map);
     bool nativeEventFilter(const QByteArray &type, void *message, qintptr *result) override;
 
-    static QList<QPair<QString, QString>> actions(); // (id, opis)
+    static QList<QPair<QString, QString>> actions(); // (id, label)
 
 signals:
     void triggered(const QString &action);

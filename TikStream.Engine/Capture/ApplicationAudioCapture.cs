@@ -42,7 +42,7 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
                             ex is COMException or TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
                         {
                             if (lastFailure != ex.Message)
-                                Log.Warn($"Dźwięk aplikacji '{executable}': {ex.Message} Ponawiam przechwytywanie.");
+                                Log.Warn($"Application audio '{executable}': {ex.Message} Retrying capture.");
                             lastFailure = ex.Message;
                         }
                     }
@@ -87,7 +87,7 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
                     try
                     {
                         if (bytes <= 0) continue;
-                        // Rozmiar pakietu pochodzi z GetBuffer, a nie z GetBufferSize wirtualnego urządzenia.
+                        // Packet size comes from GetBuffer, not from the virtual device's GetBufferSize.
                         if (buffer.Length < bytes) buffer = new byte[bytes];
                         if ((flags & AudioClientBufferFlags.Silent) != 0) Array.Clear(buffer, 0, bytes);
                         else if (captureChannels == StereoChannels)
@@ -160,7 +160,7 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
 
     private int InitializeLoopback(IAudioClient client)
     {
-        // NAudio przekazuje wskaźnik na GUID. Sesja process loopback nie potrzebuje GUID-u.
+        // NAudio passes a pointer to a GUID. Process loopback sessions do not require a session GUID.
         var pointer = Marshal.GetComInterfaceForObject(client, typeof(IAudioClient));
         try
         {
@@ -176,7 +176,7 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
             int hr2 = initialize(pointer, (int)AudioClientShareMode.Shared, (uint)flags, 0, 0, &format2, IntPtr.Zero);
             if (hr2 >= 0)
             {
-                Log.Info($"Dźwięk aplikacji '{executable}': fallback loopback 8ch (0x{hr:X8}) → 2ch stereo.");
+                Log.Info($"Application audio '{executable}': fallback loopback 8ch (0x{hr:X8}) -> 2ch stereo.");
                 return StereoChannels;
             }
             Marshal.ThrowExceptionForHR(hr);

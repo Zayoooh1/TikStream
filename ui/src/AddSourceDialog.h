@@ -13,8 +13,8 @@ class QWidget;
 struct AddSourceResult
 {
     QString type;
-    QString name;        // nowe źródło
-    QString existingId;  // albo istniejące (pusty = nowe)
+    QString name;        // new source
+    QString existingId;  // or existing source (empty = new)
     bool visible = true;
 };
 

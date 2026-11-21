@@ -15,8 +15,8 @@ public sealed record CameraMode(int Width, int Height, int Fps, string Format)
 public sealed record CameraInfo(string Name, List<CameraMode> Modes);
 
 /// <summary>
-/// Kamerka przez FFmpeg/DirectShow na własnym wątku. Wynik: klatka NV12 (Y + przeplecione UV),
-/// konwersja do RGB robi shader na GPU — przy surowym NV12 z kamerki procesor tylko kopiuje bajty.
+/// Webcam capture via FFmpeg/DirectShow on a dedicated thread. Output: NV12 frame (Y + interleaved UV);
+/// RGB conversion is performed in a GPU shader — with raw NV12 from the camera, the CPU only copies bytes.
 /// </summary>
 public sealed unsafe class CameraCapture : IDisposable
 {
@@ -32,7 +32,7 @@ public sealed unsafe class CameraCapture : IDisposable
     private long _seq;
 
     public string Name => _name;
-    public string Status { get; private set; } = "Uruchamianie…";
+    public string Status { get; private set; } = "Starting…";
     public double MeasuredFps { get; private set; }
 
     public CameraCapture(string name, CameraMode mode, int outputFps = 120)
@@ -44,7 +44,7 @@ public sealed unsafe class CameraCapture : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Jeśli jest nowa klatka: upload(ptrY, ptrUV, w, h) — oba plany ze stride = w.</summary>
+    /// <summary>If a new frame is available: upload(ptrY, ptrUV, w, h) — both planes with stride = w.</summary>
     public bool TryConsume(ref long lastSeq, Action<IntPtr, IntPtr, int, int> upload)
     {
         int w, h;
@@ -55,7 +55,7 @@ public sealed unsafe class CameraCapture : IDisposable
             w = _w; h = _h;
             (_front, _upload) = (_upload, _front);
         }
-        // Wątek przechwytywania może publikować kolejne klatki w trakcie uploadu.
+        // Capture thread can publish subsequent frames while uploading.
         fixed (byte* p = _upload) upload((IntPtr)p, (IntPtr)(p + w * h), w, h);
         return true;
     }
@@ -83,11 +83,11 @@ public sealed unsafe class CameraCapture : IDisposable
                 if (!_run) return;
                 bool opened = false;
                 TryRun(opts, ref opened);
-                if (opened) break; // działała i padła → zacznij od najlepszego trybu
+                if (opened) break; // worked and dropped -> restart from best mode
             }
             if (!_run) return;
             MeasuredFps = 0;
-            Status = "Brak obrazu — ponawiam…";
+            Status = "No video — retrying…";
             Thread.Sleep(2000);
         }
     }
@@ -107,12 +107,12 @@ public sealed unsafe class CameraCapture : IDisposable
             int pixels = Math.Max(640 * 480, _mode.Width * _mode.Height);
             int bufferBytes = optsIn.TryGetValue("vcodec", out var videoCodec) && videoCodec == "mjpeg"
                 ? Math.Max(4 * 1024 * 1024, pixels * 2)
-                : pixels * 3; // mniejszy bufor NV12 = mniejsze opóźnienie kamerki względem mikrofonu
+                : pixels * 3; // smaller NV12 buffer = lower camera latency relative to microphone
             ffmpeg.av_dict_set(&opts, "rtbufsize", bufferBytes.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
             var ifmt = ffmpeg.av_find_input_format("dshow");
             string desc = string.Join(",", optsIn.Select(k => k.Key + "=" + k.Value));
             int r = ffmpeg.avformat_open_input(&fmt, "video=" + _name, ifmt, &opts);
-            if (r < 0) { Log.Warn($"Kamerka '{_name}' [{desc}]: {FF.Err(r)}"); return; }
+            if (r < 0) { Log.Warn($"Camera '{_name}' [{desc}]: {FF.Err(r)}"); return; }
             int vi = ffmpeg.av_find_best_stream(fmt, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, null, 0);
             if (vi < 0) return;
             var par = fmt->streams[vi]->codecpar;
@@ -120,7 +120,7 @@ public sealed unsafe class CameraCapture : IDisposable
             if (codec == null) return;
             dec = ffmpeg.avcodec_alloc_context3(codec);
             ffmpeg.avcodec_parameters_to_context(dec, par);
-            // Nie buforuj przyszłych klatek w dekoderze kamery. MJPEG dopuszcza pomijanie spóźnionych pakietów.
+            // Do not buffer future frames in the camera decoder. MJPEG allows skipping late packets.
             dec->thread_count = 1;
             dec->thread_type = 0;
             bool independent = par->codec_id is AVCodecID.AV_CODEC_ID_MJPEG or AVCodecID.AV_CODEC_ID_RAWVIDEO;
@@ -132,7 +132,7 @@ public sealed unsafe class CameraCapture : IDisposable
                 ? ffmpeg.av_get_pix_fmt_name((AVPixelFormat)par->format)
                 : ffmpeg.avcodec_get_name(par->codec_id);
             Status = $"{par->width}×{par->height} {fmtName}";
-            Log.Info($"Kamerka '{_name}' otwarta [{desc}] → {Status}");
+            Log.Info($"Camera '{_name}' opened [{desc}] -> {Status}");
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             int frames = 0;
@@ -142,11 +142,11 @@ public sealed unsafe class CameraCapture : IDisposable
             while (_run)
             {
                 r = ffmpeg.av_read_frame(fmt, pkt);
-                if (r < 0) { Log.Warn("Kamerka: odczyt przerwany: " + FF.Err(r)); return; }
+                if (r < 0) { Log.Warn("Camera: read interrupted: " + FF.Err(r)); return; }
                 if (pkt->stream_index != vi) { ffmpeg.av_packet_unref(pkt); continue; }
                 if (newer != null)
                 {
-                    // Zostaw najnowszy dostępny pakiet. Zegary DirectShow i aplikacji mogą się rozjeżdżać.
+                    // Keep the newest available packet. DirectShow and app clocks can drift.
                     int flags = fmt->flags;
                     fmt->flags |= ffmpeg.AVFMT_FLAG_NONBLOCK;
                     for (int i = 0; i < 16 && _run && ffmpeg.av_read_frame(fmt, newer) >= 0; i++)
@@ -202,7 +202,7 @@ public sealed unsafe class CameraCapture : IDisposable
         {
             if ((AVPixelFormat)f->format == AVPixelFormat.AV_PIX_FMT_NV12)
             {
-                // surowe NV12 z kamerki: tylko kopia wierszy
+                // raw NV12 from camera: row copy only
                 for (int y = 0; y < h; y++)
                     Buffer.MemoryCopy(f->data[0] + y * f->linesize[0], dst + y * w, w, w);
                 byte* uv = dst + w * h;
@@ -228,10 +228,10 @@ public sealed unsafe class CameraCapture : IDisposable
     public void Dispose()
     {
         _run = false;
-        if (!_thread.Join(3000)) Log.Warn("Wątek kamerki nie zakończył się w czasie.");
+        if (!_thread.Join(3000)) Log.Warn("Camera thread did not exit in time.");
     }
 
-    // ======================= wyliczanie kamerek i trybów =======================
+    // ======================= camera and mode enumeration =======================
 
     private static readonly Regex DeviceRx = new("\"([^\"]+)\"\\s+\\(video\\)", RegexOptions.Compiled);
     private static readonly Regex ModeRx = new(@"(pixel_format|vcodec)=(\S+)\s+min s=(\d+)x(\d+) fps=([\d.]+) max s=(\d+)x(\d+) fps=([\d.]+)", RegexOptions.Compiled);
@@ -309,7 +309,7 @@ internal static unsafe class FF
     private static readonly object CaptureLock = new();
     private static bool _initialized;
 
-    /// <summary>Przechwytuje komunikaty FFmpeg (np. listę urządzeń dshow) zamiast zapisywać je do logu.</summary>
+    /// <summary>Captures FFmpeg log messages (e.g. dshow device list) instead of writing them to the log file.</summary>
     public static string CaptureLog(Action action)
     {
         lock (CaptureLock)

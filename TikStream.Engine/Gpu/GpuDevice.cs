@@ -6,8 +6,8 @@ using Vortice.DXGI;
 namespace TikStream.Gpu;
 
 /// <summary>
-/// Urządzenie D3D11 tworzone jawnie na karcie NVIDIA (ważne na laptopach z Optimusem —
-/// domyślnie Windows dałby Intel UHD, a NVENC jest tylko na RTX).
+/// D3D11 device explicitly created on the NVIDIA adapter (important on Optimus laptops —
+/// Windows defaults to Intel UHD, whereas NVENC is only available on RTX).
 /// </summary>
 public sealed class GpuDevice : IDisposable
 {
@@ -39,12 +39,12 @@ public sealed class GpuDevice : IDisposable
             }
             else a.Dispose();
         }
-        if (best == null) throw new InvalidOperationException("Nie znaleziono karty graficznej.");
+        if (best == null) throw new InvalidOperationException("No graphics adapter found.");
 
         Adapter = best;
         AdapterName = best.Description1.Description;
         IsNvidia = bestNv;
-        if (!IsNvidia) Log.Warn("Nie znaleziono karty NVIDIA — NVENC może nie działać.");
+        if (!IsNvidia) Log.Warn("NVIDIA GPU not found — NVENC may not work.");
 
         var levels = new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 };
         D3D11.D3D11CreateDevice(Adapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
@@ -55,18 +55,18 @@ public sealed class GpuDevice : IDisposable
         using (var mt = Device.QueryInterface<ID3D11Multithread>())
             mt.SetMultithreadProtected(true);
 
-        // Priorytet GPU: kompozytor nie może czekać w kolejce za grą, inaczej gubimy klatki.
+        // GPU priority: compositor must not queue behind the game, otherwise frames drop.
         try
         {
             using var dxgiDev = Device.QueryInterface<IDXGIDevice>();
             dxgiDev.SetGPUThreadPriority(7);
-            Log.Info("Priorytet wątku GPU ustawiony na +7.");
+            Log.Info("GPU thread priority set to +7.");
         }
         catch (Exception ex) { Log.Warn("SetGPUThreadPriority: " + ex.Message); }
         try
         {
             bool hags = Native.IsHagsEnabled();
-            // Przy włączonym HAGS priorytet REALTIME potrafi degradować płynność (fix OBS 9de6b18d) → wtedy używamy HIGH.
+            // When HAGS is enabled, REALTIME priority can degrade smoothness (OBS fix 9de6b18d) -> use HIGH instead.
             int desired = hags ? Native.D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH : Native.D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME;
             string desiredName = hags ? "HIGH" : "REALTIME";
             int hr = Native.D3DKMTSetProcessSchedulingPriorityClass(Native.GetCurrentProcess(), desired);
@@ -76,12 +76,12 @@ public sealed class GpuDevice : IDisposable
                 desiredName = "HIGH";
             }
             Log.Info(hr == 0
-                ? $"Klasa priorytetu GPU procesu: {desiredName} (HAGS={(hags ? "ON" : "OFF")})."
-                : $"Klasa priorytetu GPU {desiredName} niedostępna (0x{hr:X8}, HAGS={(hags ? "ON" : "OFF")}) — uruchom jako administrator dla najlepszej płynności.");
+                ? $"Process GPU scheduling priority: {desiredName} (HAGS={(hags ? "ON" : "OFF")})."
+                : $"Process GPU priority {desiredName} unavailable (0x{hr:X8}, HAGS={(hags ? "ON" : "OFF")}) — run as administrator for best smoothness.");
         }
         catch (Exception ex) { Log.Warn("D3DKMTSetProcessSchedulingPriorityClass: " + ex.Message); }
 
-        Log.Info($"Urządzenie D3D11 na: {AdapterName}, feature level {Device.FeatureLevel}");
+        Log.Info($"D3D11 device on: {AdapterName}, feature level {Device.FeatureLevel}");
     }
 
     public void Dispose()

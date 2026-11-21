@@ -8,7 +8,7 @@ namespace TikStream.Core;
 public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay }
 public enum FitMode { Free, Fill, FitBlur }
 
-/// <summary>Prostokąt w znormalizowanych współrzędnych płótna (0..1, oś Y w dół).</summary>
+/// <summary>Rectangle in normalized canvas coordinates (0..1, Y axis pointing down).</summary>
 public struct NRect
 {
     public float X { get; set; }
@@ -18,33 +18,33 @@ public struct NRect
     public NRect(float x, float y, float w, float h) { X = x; Y = y; W = w; H = h; }
 }
 
-/// <summary>Źródło (jak w OBS): jedno urządzenie/plik, może występować w wielu scenach.</summary>
+/// <summary>Source definition (OBS-style): a single device/file that can be referenced across multiple scenes.</summary>
 public sealed record SourceDef
 {
     public string Id { get; set; } = NewId();
     public SourceType Type { get; set; }
     public string Name { get; set; } = "";
 
-    // przechwytywanie ekranu / okna
-    public string CaptureId { get; set; } = "";     // Screen: nazwa monitora (\\.\DISPLAYn), Window: "proces|tytuł"
+    // display / window capture
+    public string CaptureId { get; set; } = "";     // Screen: display name (\\.\DISPLAYn), Window: "process|title"
     public bool CaptureCursor { get; set; } = true;
     public string GameMode { get; set; } = "Fullscreen";
     public bool MatchWindowTitle { get; set; }
     public bool CaptureFromDesktop { get; set; }
 
-    // kamerka
+    // camera
     public string CameraName { get; set; } = "";
     public int CameraWidth { get; set; } = 1920;
     public int CameraHeight { get; set; } = 1080;
     public int CameraFps { get; set; } = 60;
     public string CameraFormat { get; set; } = "nv12";
 
-    // obraz / multimedia
+    // image / media
     public string FilePath { get; set; } = "";
     public bool Loop { get; set; } = true;
 
-    // tekst (ColorArgb służy też źródłu „Kolor”)
-    public string Text { get; set; } = "Mój stream!";
+    // text (ColorArgb is also used by Color sources)
+    public string Text { get; set; } = "My Stream!";
     public string FontName { get; set; } = "Segoe UI";
     public float FontSize { get; set; } = 72;
     public bool Bold { get; set; } = true;
@@ -53,19 +53,19 @@ public sealed record SourceDef
     public float OutlineWidth { get; set; } = 6;
     public int BackgroundArgb { get; set; }
 
-    // dźwięk (wejście / wyjście / dźwięk multimediów)
-    public string DeviceId { get; set; } = "";      // "" = domyślne urządzenie systemu
+    // audio (input / output / media audio)
+    public string DeviceId { get; set; } = "";      // "" = system default device
     public float Volume { get; set; } = 1f;
     public bool Muted { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? GlobalAudio { get; set; }
 
-    // overlay czatu LIVE
+    // LIVE chat overlay
     public bool ShowChat { get; set; } = true;
     public bool ShowGifts { get; set; } = true;
     public bool ShowTaps { get; set; } = true;
 
-    // filtry dźwięku (tłumienie hałasu, bramka szumów, kompresor, limiter, opóźnienie synchronizacji)
+    // audio filters (noise suppression, noise gate, compressor, limiter, sync offset)
     public int SyncOffsetMs { get; set; }
     public bool NoiseSuppressEnabled { get; set; }
     public string NoiseSuppressMethod { get; set; } = "rnnoise"; // "rnnoise" | "speex"
@@ -84,7 +84,7 @@ public sealed record SourceDef
     [JsonIgnore] public bool HasAudio => !IsVisual || Type == SourceType.Media;
 }
 
-/// <summary>Wystąpienie źródła w scenie: pozycja, rozmiar, dopasowanie, efekty.</summary>
+/// <summary>Source instance inside a scene: position, size, fit mode, and GPU effects.</summary>
 public sealed class SceneItem
 {
     public string Id { get; set; } = SourceDef.NewId();
@@ -102,7 +102,7 @@ public sealed class SceneItem
     public float Corner { get; set; }
     public float Opacity { get; set; } = 1;
 
-    // kadrowanie krawędzi (ułamek 0..0.45) i filtry wideo GPU
+    // edge cropping (fraction 0..0.45) and GPU video filters
     public float CropLeft { get; set; }
     public float CropRight { get; set; }
     public float CropTop { get; set; }
@@ -119,23 +119,23 @@ public sealed class SceneItem
 public sealed class Scene
 {
     public string Id { get; set; } = SourceDef.NewId();
-    public string Name { get; set; } = "Scena";
-    /// <summary>Kolejność rysowania: od spodu do wierzchu.</summary>
+    public string Name { get; set; } = "Scene";
+    /// <summary>Draw order: bottom to top.</summary>
     public List<SceneItem> Items { get; set; } = new();
 }
 
 public sealed class AppSettings
 {
-    // ---------- Transmisja ----------
+    // ---------- Stream ----------
     public string ServerUrl { get; set; } = "";
     public string StreamKeyProtected { get; set; } = "";
     public string TikTokUsername { get; set; } = "";
     public bool SecondStreamEnabled { get; set; }
-    public string SecondStreamName { get; set; } = "Drugi kanał";
+    public string SecondStreamName { get; set; } = "Second Channel";
     public string SecondServerUrl { get; set; } = "";
     public string SecondStreamKeyProtected { get; set; } = "";
 
-    // ---------- Wyjście ----------
+    // ---------- Output ----------
     public int VideoBitrateKbps { get; set; } = 6000;
     public int KeyframeSec { get; set; } = 2;
     public string NvencPreset { get; set; } = "p5";
@@ -148,32 +148,32 @@ public sealed class AppSettings
     public string RecordFolder { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
     public string RecordFormat { get; set; } = "mkv";
 
-    // ---------- Obraz ----------
+    // ---------- Video ----------
     public int Width { get; set; } = 1080;
     public int Height { get; set; } = 1920;
     public int Fps { get; set; } = 60;
 
-    // ---------- Ogólne ----------
+    // ---------- General ----------
     public bool ConfirmStreamStop { get; set; } = true;
-    public bool RecordToFile { get; set; }          // automatyczne nagrywanie podczas transmisji
+    public bool RecordToFile { get; set; }          // automatically record while streaming
     public bool Snapping { get; set; } = true;
 
-    // ---------- Zaawansowane ----------
+    // ---------- Advanced ----------
     public bool PreviewEnabled { get; set; } = true;
     public string ProcessPriority { get; set; } = "AboveNormal";
     public bool AutoReconnect { get; set; } = true;
     public int ReconnectDelaySec { get; set; } = 2;
     public int ReconnectMaxRetries { get; set; } = 25;
 
-    // ---------- Skróty klawiszowe (akcja → "Ctrl+Shift+F9") ----------
+    // ---------- Hotkeys (action -> "Ctrl+Shift+F9") ----------
     public Dictionary<string, string> Hotkeys { get; set; } = new();
 
-    // ---------- Sceny i źródła ----------
+    // ---------- Scenes and sources ----------
     public List<SourceDef> Sources { get; set; } = new();
     public List<Scene> Scenes { get; set; } = new();
     public string ActiveSceneId { get; set; } = "";
 
-    // ---------- Stary format (wczytywany tylko do migracji) ----------
+    // ---------- Legacy format (loaded for migration only) ----------
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? GameSourceKind { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? GameSourceId { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? GameMode { get; set; }
@@ -226,7 +226,7 @@ public sealed class AppSettings
             if (File.Exists(DefaultPath))
                 s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(DefaultPath), JsonOpts) ?? new AppSettings();
         }
-        catch (Exception ex) { Log.Warn("Nie udało się wczytać ustawień: " + ex.Message); }
+        catch (Exception ex) { Log.Warn("Failed to load settings: " + ex.Message); }
         s.Normalize();
         return s;
     }
@@ -240,7 +240,7 @@ public sealed class AppSettings
             File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOpts));
             File.Move(tmp, DefaultPath, true);
         }
-        catch (Exception ex) { Log.Warn("Nie udało się zapisać ustawień: " + ex.Message); }
+        catch (Exception ex) { Log.Warn("Failed to save settings: " + ex.Message); }
     }
 
     public AppSettings Clone() => JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(this, JsonOpts), JsonOpts)!;
@@ -259,36 +259,36 @@ public sealed class AppSettings
     public Scene? ActiveScene => Scenes.FirstOrDefault(x => x.Id == ActiveSceneId) ?? Scenes.FirstOrDefault();
     public SourceDef? FindSource(string id) => Sources.FirstOrDefault(x => x.Id == id);
 
-    /// <summary>Uzupełnia brakujące elementy i przenosi ustawienia ze starej wersji programu.</summary>
+    /// <summary>Fills missing defaults and migrates settings from legacy versions.</summary>
     public void Normalize()
     {
         if (Scenes.Count == 0)
         {
-            var scene = new Scene { Name = "Scena 1" };
+            var scene = new Scene { Name = "Scene 1" };
             bool hasLegacy = !string.IsNullOrEmpty(GameSourceKind) || !string.IsNullOrEmpty(GameSourceId)
                 || !string.IsNullOrEmpty(CameraName) || !string.IsNullOrEmpty(MicDeviceId) || DesktopAudio.HasValue;
             if (hasLegacy)
             {
-                // migracja ze starej wersji programu
+                // migration from legacy settings format
                 var cap = new SourceDef
                 {
                     Type = GameSourceKind == "Window" ? SourceType.Window : SourceType.Screen,
-                    Name = GameSourceKind == "Window" ? "Okno gry" : "Przechwytywanie ekranu",
+                    Name = GameSourceKind == "Window" ? "Game Window" : "Display Capture",
                     CaptureId = GameSourceKind is "Window" or "Monitor" ? GameSourceId ?? "" : "",
                 };
                 Sources.Add(cap);
                 scene.Items.Add(new SceneItem { SourceId = cap.Id, Fit = GameMode == "Fill" ? FitMode.Fill : FitMode.FitBlur });
                 if (!string.IsNullOrEmpty(CameraName))
                 {
-                    var cam = new SourceDef { Type = SourceType.Camera, Name = "Kamerka", CameraName = CameraName };
+                    var cam = new SourceDef { Type = SourceType.Camera, Name = "Camera", CameraName = CameraName };
                     Sources.Add(cam);
                     var r = CameraRect ?? new NRect(0.55f, 0.03f, 0.42f, 0.133f);
                     scene.Items.Add(new SceneItem { SourceId = cam.Id, X = r.X, Y = r.Y, W = r.W, H = r.H, Mirror = CameraMirror ?? true, Corner = 0.12f });
                 }
                 if (!Sources.Any(x => x.Type == SourceType.AudioOutput) && DesktopAudio == true)
-                    Sources.Add(new SourceDef { Type = SourceType.AudioOutput, Name = "Dźwięk pulpitu" });
+                    Sources.Add(new SourceDef { Type = SourceType.AudioOutput, Name = "Desktop Audio" });
                 if (!Sources.Any(x => x.Type == SourceType.AudioInput) && !string.IsNullOrEmpty(MicDeviceId))
-                    Sources.Add(new SourceDef { Type = SourceType.AudioInput, Name = "Mikrofon", DeviceId = MicDeviceId });
+                    Sources.Add(new SourceDef { Type = SourceType.AudioInput, Name = "Microphone", DeviceId = MicDeviceId });
             }
             Scenes.Add(scene);
             ActiveSceneId = scene.Id;
@@ -297,14 +297,14 @@ public sealed class AppSettings
         CameraRect = null; CameraMirror = null; DesktopAudio = null;
 
         if (Scenes.All(x => x.Id != ActiveSceneId)) ActiveSceneId = Scenes[0].Id;
-        // Starsza wersja mogła wstawić tę samą pozycję dwa razy podczas zmiany kolejności.
+        // Older versions could insert duplicate items during reordering.
         var sourceIds = Sources.Select(s => s.Id).ToHashSet();
         foreach (var sc in Scenes)
         {
             var itemIds = new HashSet<string>();
             sc.Items.RemoveAll(i => !sourceIds.Contains(i.SourceId) || !itemIds.Add(i.Id));
         }
-        // Starsze ustawienia wybierały pierwsze urządzenie danego typu jako główne.
+        // Older settings treated the first device of each type as global.
         foreach (var type in new[] { SourceType.AudioInput, SourceType.AudioOutput })
         {
             var devices = Sources.Where(s => s.Type == type).ToList();

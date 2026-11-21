@@ -25,7 +25,7 @@ internal sealed unsafe class WindowCaptureRt : RtSource
     private ID3D11Texture2D? _texture;
     private Windows.Graphics.SizeInt32 _poolSize;
     private volatile bool _closed;
-    private string _status = "Oczekiwanie na okno…";
+    private string _status = "Waiting for window…";
     private bool _cursor;
 
     public override string Status => _status;
@@ -36,9 +36,9 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         catch (Exception ex)
         {
             Dispose();
-            _status = "System nie udostępnia obrazu tego okna";
+            _status = "System does not expose this window's video";
             _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
-            Log.Warn($"Przechwytywanie '{Def.Name}': {ex.Message}");
+            Log.Warn($"Capture '{Def.Name}': {ex.Message}");
         }
     }
 
@@ -52,10 +52,10 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         if (_pool == null) return;
         if (Native.IsIconic(_target))
         {
-            _status = "Okno zminimalizowane • ostatnia dostępna klatka";
+            _status = "Window minimized • last available frame";
             return;
         }
-        _status = Ready ? $"{Width}×{Height} • Windows Graphics Capture" : "Oczekiwanie na klatkę…";
+        _status = Ready ? $"{Width}×{Height} • Windows Graphics Capture" : "Waiting for frame…";
         if (_cursor != Def.CaptureCursor && _session != null)
             _session.IsCursorCaptureEnabled = _cursor = Def.CaptureCursor;
         using var frame = _pool.TryGetNextFrame();
@@ -95,11 +95,11 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         if (fullscreen && target == IntPtr.Zero && _target != IntPtr.Zero && !_closed && Native.IsWindow(_target)) return;
         if (_pool != null && !_closed && target == _target) return;
         Dispose();
-        _status = fullscreen ? "Oczekiwanie na aplikację pełnoekranową…" : "Oczekiwanie na wybrane okno…";
+        _status = fullscreen ? "Waiting for fullscreen application…" : "Waiting for selected window…";
         if (target == IntPtr.Zero) return;
         if (Native.IsIconic(target))
         {
-            _status = "Okno zminimalizowane • oczekiwanie na pierwszą klatkę";
+            _status = "Window minimized • waiting for first frame";
             return;
         }
         if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows Graphics Capture");

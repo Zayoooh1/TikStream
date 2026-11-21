@@ -8,8 +8,8 @@ using DXGIFormat = Vortice.DXGI.Format;
 namespace TikStream.Encode;
 
 /// <summary>
-/// H.264 przez NVENC, wejście: tekstury NV12 z puli D3D11 FFmpeg-a — kompozytor renderuje prosto w nie.
-/// Klatka nigdy nie opuszcza VRAM.
+/// H.264 via NVENC, input: NV12 textures from FFmpeg's D3D11 pool — the compositor renders straight into them.
+/// Frames never leave VRAM.
 /// </summary>
 public sealed record VideoEncoderOptions(int Fps, int Kbps, string Preset, string Profile, int KeyframeSec, int BFrames, bool SpatialAq, bool LookAhead, bool ZeroFpsImpact = false);
 
@@ -31,11 +31,11 @@ public sealed unsafe class VideoEncoder : IDisposable
         int fps = o.Fps, kbps = o.Kbps;
         string preset = o.Preset;
 
-        // --- urządzenie hw FFmpeg-a = NASZE urządzenie D3D11 (to samo, na którym renderujemy) ---
+        // --- FFmpeg hw device = OUR D3D11 device (same one we render on) ---
         _hwDevice = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
         var devCtx = (AVHWDeviceContext*)_hwDevice->data;
         var d3dCtx = (AVD3D11VADeviceContext*)devCtx->hwctx;
-        gpu.Device.AddRef(); // FFmpeg zwolni tę referencję przy sprzątaniu
+        gpu.Device.AddRef(); // FFmpeg will release this reference on cleanup
         d3dCtx->device = (FFmpeg.AutoGen.ID3D11Device*)gpu.Device.NativePointer;
         FF.Check(ffmpeg.av_hwdevice_ctx_init(_hwDevice), "av_hwdevice_ctx_init");
 
@@ -45,12 +45,12 @@ public sealed unsafe class VideoEncoder : IDisposable
         fc->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
         fc->width = width;
         fc->height = height;
-        fc->initial_pool_size = 0; // pojedyncze tekstury alokowane na żądanie i używane ponownie przez pulę
+        fc->initial_pool_size = 0; // individual textures allocated on demand and reused by the pool
         ((AVD3D11VAFramesContext*)fc->hwctx)->BindFlags = (uint)D3D.BindFlags.RenderTarget;
         FF.Check(ffmpeg.av_hwframe_ctx_init(_hwFrames), "av_hwframe_ctx_init");
 
         var codec = ffmpeg.avcodec_find_encoder_by_name("h264_nvenc");
-        if (codec == null) throw new InvalidOperationException("Brak enkodera h264_nvenc w FFmpeg.");
+        if (codec == null) throw new InvalidOperationException("h264_nvenc encoder not found in FFmpeg.");
         CodecName = "h264_nvenc";
 
         _ctx = ffmpeg.avcodec_alloc_context3(codec);
@@ -60,11 +60,11 @@ public sealed unsafe class VideoEncoder : IDisposable
         _ctx->framerate = new AVRational { num = fps, den = 1 };
         _ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_D3D11;
         _ctx->hw_frames_ctx = ffmpeg.av_buffer_ref(_hwFrames);
-        _ctx->gop_size = fps * Math.Clamp(o.KeyframeSec, 1, 10); // TikTok/RTMP: keyframe co 2 s
+        _ctx->gop_size = fps * Math.Clamp(o.KeyframeSec, 1, 10); // TikTok/RTMP: keyframe every 2 s
         _ctx->max_b_frames = Math.Clamp(o.BFrames, 0, 4);
         _ctx->bit_rate = kbps * 1000L;
         _ctx->rc_max_rate = kbps * 1000L;
-        _ctx->rc_buffer_size = kbps * 1000;  // bufor 1 s = stabilny CBR
+        _ctx->rc_buffer_size = kbps * 1000;  // 1 s buffer = steady CBR
         _ctx->profile = o.Profile == "main" ? 77 : 100;
         _ctx->color_range = AVColorRange.AVCOL_RANGE_MPEG;
         _ctx->colorspace = AVColorSpace.AVCOL_SPC_BT709;
@@ -94,8 +94,8 @@ public sealed unsafe class VideoEncoder : IDisposable
         int r = ffmpeg.avcodec_open2(_ctx, codec, &opts);
         if (r < 0)
         {
-            // starsze sterowniki / ograniczenia — spróbuj bez B-ramek
-            Log.Warn("NVENC z B-ramkami nie wystartował (" + FF.Err(r) + "), próbuję bez.");
+            // older drivers / hardware limits — retry without B-frames
+            Log.Warn("NVENC failed to start with B-frames (" + FF.Err(r) + "), retrying without.");
             ffmpeg.av_dict_free(&opts);
             _ctx->max_b_frames = 0;
             ffmpeg.av_dict_set(&opts, "preset", effPreset, 0);
@@ -105,10 +105,10 @@ public sealed unsafe class VideoEncoder : IDisposable
         }
         ffmpeg.av_dict_free(&opts);
         FF.Check(r, "avcodec_open2(h264_nvenc)");
-        Log.Info($"NVENC: {width}x{height}@{fps}, {kbps} kb/s CBR, preset {effPreset}, profil {o.Profile}, keyframe {o.KeyframeSec}s, B-ramki {_ctx->max_b_frames}, AQ {effAq}, look-ahead {effLookAhead}{(o.ZeroFpsImpact ? " [Zero FPS Impact]" : "")}");
+        Log.Info($"NVENC: {width}x{height}@{fps}, {kbps} kbps CBR, preset {effPreset}, profile {o.Profile}, keyframe {o.KeyframeSec}s, B-frames {_ctx->max_b_frames}, AQ {effAq}, look-ahead {effLookAhead}{(o.ZeroFpsImpact ? " [Zero FPS Impact]" : "")}");
     }
 
-    /// <summary>Bierze wolną teksturę z puli i zwraca widoki do renderowania (Y, UV).</summary>
+    /// <summary>Acquires a free texture from the pool and returns Y and UV render target views.</summary>
     public AVFrame* AcquireFrame(out D3D.ID3D11RenderTargetView yRtv, out D3D.ID3D11RenderTargetView uvRtv)
     {
         var f = ffmpeg.av_frame_alloc();
@@ -119,7 +119,7 @@ public sealed unsafe class VideoEncoder : IDisposable
         if (!_views.TryGetValue((texPtr, index), out var v))
         {
             var tex = new D3D.ID3D11Texture2D(texPtr);
-            tex.AddRef(); // nasz wrapper trzyma własną referencję
+            tex.AddRef(); // our wrapper holds its own reference
             var arr = tex.Description.ArraySize > 1;
             D3D.RenderTargetViewDescription Desc(DXGIFormat fmt) => arr
                 ? new D3D.RenderTargetViewDescription(D3D.RenderTargetViewDimension.Texture2DArray, fmt, 0, (uint)index, 1)
@@ -128,14 +128,14 @@ public sealed unsafe class VideoEncoder : IDisposable
             var uv = _dev.CreateRenderTargetView(tex, Desc(DXGIFormat.R8G8_UNorm));
             v = (tex, y, uv);
             _views[(texPtr, index)] = v;
-            if (_views.Count > 32) Log.Warn($"Pula NVENC urosła do {_views.Count} tekstur");
+            if (_views.Count > 32) Log.Warn($"NVENC texture pool grew to {_views.Count} textures");
         }
         yRtv = v.Y;
         uvRtv = v.UV;
         return f;
     }
 
-    /// <summary>Wysyła klatkę do enkodera (przejmuje ją) i oddaje gotowe pakiety.</summary>
+    /// <summary>Submits a frame to the encoder (takes ownership) and drains ready packets.</summary>
     public void Encode(AVFrame* frame, long pts, bool forceKeyframe, Action<IntPtr> onPacket)
     {
         if (frame != null)
