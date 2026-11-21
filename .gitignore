@@ -1,4 +1,4 @@
-# Artefakty budowania i dystrybucji
+# Build and distribution artifacts
 dist/
 ui/build/
 TikStream.Engine/bin/
@@ -8,12 +8,15 @@ installer/*.msi
 installer/*.wixpdb
 chat/node_modules/
 
-# Duże binaria FFmpeg (przekraczają limit 100 MB GitHuba — dołączane w GitHub Releases / MSI)
+# Large FFmpeg binaries (exceed GitHub's 100 MB file limit — distributed via GitHub Releases / MSI)
 TikStream.Engine/native/av*.dll
 TikStream.Engine/native/sw*.dll
 TikStream.Engine/native/ffprobe.exe
 
-# Pliki prywatne, robocze, logi i nagrania
+# Agent instructions, private/scratch files, logs, and recordings
+AGENTS.md
+CLAUDE.md
+GEMINI.md
 CODEX_HANDOFF.md
 PRZEKAZANIE_*.md
 *.docx

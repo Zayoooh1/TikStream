@@ -1,13 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot 'dist/TikStream.exe'
 if (!(Test-Path -LiteralPath $exe -PathType Leaf)) {
-    throw 'Najpierw zbuduj TikStream w folderze dist.'
+    throw 'Build TikStream into the dist folder first.'
 }
 
-$key = Read-Host 'Client key z Sandbox'
-$secret = Read-Host 'Client secret z Sandbox' -AsSecureString
+$key = Read-Host 'TikTok Sandbox Client Key'
+$secret = Read-Host 'TikTok Sandbox Client Secret' -AsSecureString
 if ([string]::IsNullOrWhiteSpace($key) -or $secret.Length -eq 0) {
-    throw 'Podaj oba pola z zakladki Sandbox.'
+    throw 'Please enter both fields from the TikTok Developer Sandbox tab.'
 }
 
 $startInfo = [System.Diagnostics.ProcessStartInfo]::new($exe)

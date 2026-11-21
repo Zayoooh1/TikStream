@@ -10,7 +10,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <RootNamespace>TikStream</RootNamespace>
     <AssemblyName>TikStream.Engine</AssemblyName>
-    <!-- biblioteka ładowana z C++ przez hostfxr -->
+    <!-- Library loaded in-process from C++ via hostfxr -->
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>

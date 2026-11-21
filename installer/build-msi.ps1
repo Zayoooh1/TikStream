@@ -5,7 +5,7 @@ $stage = Join-Path $PSScriptRoot "stage"
 $icoPath = Join-Path $PSScriptRoot "TikStream.ico"
 $msiOut = Join-Path $PSScriptRoot "TikStreamSetup.msi"
 
-# 1. Wygeneruj ikonę TikStream.ico (256x256 PNG w kontenerze ICO) jeśli brak
+# 1. Generate TikStream.ico (256x256 PNG inside ICO container) if missing
 if (-not (Test-Path $icoPath)) {
     Add-Type -AssemblyName System.Drawing
     $bmp = New-Object System.Drawing.Bitmap 256, 256
@@ -54,16 +54,16 @@ if (-not (Test-Path $icoPath)) {
     Write-Host "Generated $icoPath"
 }
 
-# 2. Przygotuj czysty katalog stage (tylko pliki produkcyjne z dist, bez folderów test_*)
+# 2. Prepare clean stage directory (production runtime files from dist only, excluding test_* folders)
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory $stage -Force | Out-Null
 
-# Pliki w katalogu głównym dist (exe + dll)
+# Top-level dist binaries (exe + dll)
 Get-ChildItem $dist -File | Where-Object { $_.Extension -in '.exe','.dll' } | ForEach-Object {
     Copy-Item $_.FullName $stage -Force
 }
 
-# Wymagane katalogi runtime
+# Required runtime directories
 $runtimeDirs = @('engine', 'chat', 'platforms', 'styles', 'imageformats', 'iconengines', 'generic', 'networkinformation', 'tls')
 foreach ($d in $runtimeDirs) {
     $src = Join-Path $dist $d
@@ -72,7 +72,7 @@ foreach ($d in $runtimeDirs) {
     }
 }
 
-# Dołącz przenośny node.exe do chat/, aby użytkownik nie musiał instalować Node.js
+# Bundle portable node.exe into chat/ so users don't need to install Node.js
 $stageNode = Join-Path $stage "chat\node.exe"
 if (-not (Test-Path $stageNode)) {
     $sysNode = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -82,14 +82,14 @@ if (-not (Test-Path $stageNode)) {
     }
 }
 
-# Usuń ewentualne pliki pdb/testowe ze stage
+# Remove any debug symbols (pdb) from stage
 Get-ChildItem $stage -Recurse -Include *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 $fileCount = (Get-ChildItem $stage -Recurse -File).Count
 $totalMb = [Math]::Round(((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "Staged $fileCount files ($totalMb MB) -> $stage"
 
-# 3. Zbuduj TikStreamSetup.msi przez WiX 5
+# 3. Build TikStreamSetup.msi with WiX 5
 $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
 Push-Location $PSScriptRoot
 try {
