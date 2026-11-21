@@ -78,6 +78,11 @@ public sealed record SourceDef
     // native TikTok LIVE alert box
     public string AlertSoundPath { get; set; } = "";
     public string AlertImagePath { get; set; } = "";
+    public string AlertGiftImagePath { get; set; } = "";
+    public string AlertGiftSoundPath { get; set; } = "";
+    public string AlertFollowImagePath { get; set; } = "";
+    public string AlertFollowSoundPath { get; set; } = "";
+    public float AlertVolume { get; set; } = 1.0f;
     public int AlertDurationSec { get; set; } = 5;
     public bool AlertOnGift { get; set; } = true;
     public bool AlertOnFollow { get; set; } = true;

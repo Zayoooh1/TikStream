@@ -263,7 +263,8 @@ public static unsafe class NativeApi
             case "playAlertSound":
             {
                 var path = j["path"]?.GetValue<string>() ?? "";
-                AudioEngine.PlayOneShot(path);
+                var vol = j["volume"]?.GetValue<float>() ?? 1f;
+                Engine().Audio.PlayAlertSound(path, vol);
                 return Ok();
             }
 

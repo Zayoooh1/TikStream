@@ -42,6 +42,7 @@ export function liveEvents() {
     let roomId;
     let taps = null;
     const gifts = new Set();
+    const follows = new Map();
     const series = new Map();
     const bursts = new Map();
 
@@ -57,9 +58,19 @@ export function liveEvents() {
             roomId = id;
             taps = null;
             gifts.clear();
+            follows.clear();
             series.clear();
             bursts.clear();
             return true;
+        },
+        follow(event, now = Date.now()) {
+            const sender = author(event.user);
+            if (!sender) return null;
+            const key = event.user?.id && event.user.id !== '0' ? String(event.user.id) : sender.nick;
+            const prev = follows.get(key);
+            if (prev && now - prev < 30000) return null;
+            remember(follows, key, now);
+            return { ...sender, kind: 'follow', text: 'just followed!' };
         },
         like(event) {
             const total = event.totalLikeCount;
@@ -84,7 +95,7 @@ export function liveEvents() {
                 gifts.add(id);
                 if (gifts.size > 512) gifts.delete(gifts.values().next().value);
             }
-            const name = (details?.giftName || (event.giftId ? `Prezent #${event.giftId}` : 'Prezent')).slice(0, 180);
+            const name = (details?.giftName || (event.giftId ? `Gift #${event.giftId}` : 'Gift')).slice(0, 180);
             const senderId = event.user?.id && event.user.id !== '0' ? String(event.user.id) : sender.nick;
             const key = JSON.stringify([senderId, event.giftId || details?.id || name]);
             let count = Math.max(1, event.repeatCount || event.comboCount || event.groupCount || 1);

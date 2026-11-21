@@ -231,24 +231,69 @@ public sealed class AudioEngine : IDisposable
         _monitorBuf = null;
     }
 
-    /// <summary>Plays a one-shot alert sound file (.wav/.mp3) on the default output device without blocking.</summary>
-    public static void PlayOneShot(string path)
+    /// <summary>
+    /// Plays an alert sound file (.mp3/.wav) into BOTH the live stream/recording mix and the local default headphones.
+    /// Runs decoding off the render/UI thread.
+    /// </summary>
+    public void PlayAlertSound(string path, float volume = 1f)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        float vol = Math.Clamp(volume, 0f, 2f);
         Task.Run(() =>
         {
             try
             {
-                using var reader = new AudioFileReader(path);
+                // 1. Decode to 48 kHz stereo float and mix into the live output stream
+                using (var reader = new AudioFileReader(path))
+                {
+                    ISampleProvider sp = reader;
+                    if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
+                    else if (sp.WaveFormat.Channels > 2) sp = new MultiplexingSampleProvider(new[] { sp }, 2);
+                    if (sp.WaveFormat.SampleRate != SampleRate) sp = new WdlResamplingSampleProvider(sp, SampleRate);
+                    if (Math.Abs(vol - 1f) > 0.001f) sp = new VolumeSampleProvider(sp) { Volume = vol };
+
+                    var pcm = new List<float>(SampleRate * Channels * 4);
+                    var tmp = new float[4096];
+                    int n;
+                    int maxSamples = SampleRate * Channels * 15; // cap at 15 s
+                    while ((n = sp.Read(tmp, 0, tmp.Length)) > 0 && pcm.Count < maxSamples)
+                    {
+                        for (int i = 0; i < n && pcm.Count < maxSamples; i++) pcm.Add(tmp[i]);
+                    }
+                    if (pcm.Count > 0)
+                    {
+                        var samples = pcm.ToArray();
+                        var prov = new OneShotSampleProvider(samples, MixFormat);
+                        lock (_lock) _mixer.AddMixerInput(prov);
+                    }
+                }
+
+                // 2. Also play locally on default playback device so the streamer hears the alert
+                using var localReader = new AudioFileReader(path) { Volume = Math.Clamp(vol, 0f, 1f) };
                 using var wo = new WasapiOut(AudioClientShareMode.Shared, 60);
                 using var done = new ManualResetEventSlim(false);
                 wo.PlaybackStopped += (_, _) => done.Set();
-                wo.Init(reader);
+                wo.Init(localReader);
                 wo.Play();
                 done.Wait(TimeSpan.FromSeconds(15));
             }
             catch (Exception ex) { Log.Warn("Alert sound: " + ex.Message); }
         });
+    }
+
+    private sealed class OneShotSampleProvider(float[] samples, WaveFormat format) : ISampleProvider
+    {
+        private int _pos;
+        public WaveFormat WaveFormat => format;
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int avail = samples.Length - _pos;
+            if (avail <= 0) return 0;
+            int n = Math.Min(count, avail);
+            Array.Copy(samples, _pos, buffer, offset, n);
+            _pos += n;
+            return n;
+        }
     }
 
     public void Dispose()

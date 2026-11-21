@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QPointer>
+#include <QQueue>
 
 class PreviewWidget;
 class MeterWidget;
@@ -27,6 +28,7 @@ class QFrame;
 class QVBoxLayout;
 class QBoxLayout;
 class QSystemTrayIcon;
+class QMovie;
 
 class MainWindow : public QMainWindow
 {
@@ -72,6 +74,7 @@ private:
     void openBrowserInteractDialog(const QString &sourceId);
     void toggleSelectedItemLock();
     void triggerAlert(const QString &kind, const QString &user, const QString &detail);
+    void showNextAlert();
     void updateAlertOverlays();
 
     // ---------- model ----------
@@ -180,8 +183,11 @@ private:
     bool m_updateCheckPending = false;
     bool m_reallyQuit = false;
     QString m_skippedUpdateVersion;
+    struct AlertEvent { QString kind, user, detail; };
+    QQueue<AlertEvent> m_alertQueue;
     QString m_alertKind, m_alertUser, m_alertDetail;
     quint64 m_alertRevision = 0;
+    QMovie *m_alertMovie = nullptr;
     QSystemTrayIcon *m_tray = nullptr;
     QList<double> m_histFps, m_histRenderMs, m_histKbps;
     QPointer<QWidget> m_statsGraphWidget;
@@ -211,9 +217,10 @@ private:
     QWidget *m_windowTarget = nullptr;
     QCheckBox *m_screenCursor = nullptr, *m_windowCursor = nullptr;
     QComboBox *m_camDevice = nullptr, *m_camMode = nullptr;
-    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr, *m_alertSoundPath = nullptr, *m_alertImagePath = nullptr;
+    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr;
+    QLineEdit *m_alertGiftImage = nullptr, *m_alertGiftSound = nullptr, *m_alertFollowImage = nullptr, *m_alertFollowSound = nullptr;
     QCheckBox *m_mediaLoop = nullptr, *m_browserMuted = nullptr, *m_alertOnGift = nullptr, *m_alertOnFollow = nullptr;
-    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr, *m_alertDuration = nullptr;
+    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr, *m_alertDuration = nullptr, *m_alertVolume = nullptr;
     QPlainTextEdit *m_text = nullptr, *m_browserCss = nullptr;
     QFontComboBox *m_font = nullptr;
     QSpinBox *m_fontSize = nullptr, *m_outlineW = nullptr;

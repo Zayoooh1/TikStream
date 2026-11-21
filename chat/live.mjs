@@ -67,6 +67,22 @@ for (;;) {
         const gift = events.gift(event);
         if (gift) enqueue(gift);
     });
+    if (WebcastEvent.FOLLOW) {
+        client.on(WebcastEvent.FOLLOW, event => {
+            updateRoom(client.roomId || event.common?.roomId);
+            const flw = events.follow(event);
+            if (flw) enqueue(flw);
+        });
+    }
+    if (WebcastEvent.SOCIAL) {
+        client.on(WebcastEvent.SOCIAL, event => {
+            const dt = String(event.displayType || event.common?.displayText?.key || '').toLowerCase();
+            if (!dt.includes('follow')) return;
+            updateRoom(client.roomId || event.common?.roomId);
+            const flw = events.follow(event);
+            if (flw) enqueue(flw);
+        });
+    }
     client.on(WebcastEvent.LIKE, event => {
         updateRoom(client.roomId || event.common?.roomId);
         const latest = events.like(event);

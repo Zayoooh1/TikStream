@@ -40,6 +40,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QMovie>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -358,6 +359,53 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         collect = [&] {
             options["deviceId"] = combo->currentData().toString();
         };
+    } else if (type == "AlertBox") {
+        auto makeFileRow = [&](const QString &title, const QString &filter, const QString &placeholder) {
+            auto *row = new QHBoxLayout;
+            auto *edit = new QLineEdit;
+            edit->setPlaceholderText(placeholder);
+            auto *btn = new QPushButton("Browse…");
+            row->addWidget(edit, 1);
+            row->addWidget(btn);
+            QObject::connect(btn, &QPushButton::clicked, &dialog, [&dialog, edit, title, filter] {
+                const QString p = QFileDialog::getOpenFileName(&dialog, title, {}, filter);
+                if (!p.isEmpty()) edit->setText(QDir::toNativeSeparators(p));
+            });
+            return QPair<QHBoxLayout *, QLineEdit *>{row, edit};
+        };
+        auto *onGift = new QCheckBox("Enable Gift alerts");
+        onGift->setChecked(true);
+        auto [gImgRow, gImg] = makeFileRow("Select Gift Alert Image/GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG for Gift alert");
+        auto [gSndRow, gSnd] = makeFileRow("Select Gift Alert Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV sound for Gift alert");
+        auto *onFollow = new QCheckBox("Enable Follow alerts");
+        onFollow->setChecked(true);
+        auto [fImgRow, fImg] = makeFileRow("Select Follow Alert Image/GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG for Follow alert");
+        auto [fSndRow, fSnd] = makeFileRow("Select Follow Alert Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV sound for Follow alert");
+        auto *dur = new PaddedSpinBox;
+        dur->setRange(2, 15); dur->setSuffix(" s"); dur->setValue(5);
+        auto *vol = new PaddedSpinBox;
+        vol->setRange(0, 100); vol->setSuffix(" %"); vol->setValue(100);
+
+        f->addRow("", onGift);
+        f->addRow("Gift Image/GIF", gImgRow);
+        f->addRow("Gift Sound", gSndRow);
+        f->addRow("", onFollow);
+        f->addRow("Follow Image/GIF", fImgRow);
+        f->addRow("Follow Sound", fSndRow);
+        f->addRow("Duration", dur);
+        f->addRow("Sound Volume", vol);
+        layout->addWidget(hintLabel("Plays animated GIFs / images and MP3/WAV sounds in real time when someone follows or sends a gift on TikTok LIVE."));
+
+        collect = [&] {
+            options["alertOnGift"] = onGift->isChecked();
+            options["alertGiftImagePath"] = gImg->text().trimmed();
+            options["alertGiftSoundPath"] = gSnd->text().trimmed();
+            options["alertOnFollow"] = onFollow->isChecked();
+            options["alertFollowImagePath"] = fImg->text().trimmed();
+            options["alertFollowSoundPath"] = fSnd->text().trimmed();
+            options["alertDurationSec"] = dur->value();
+            options["alertVolume"] = vol->value() / 100.0;
+        };
     } else {
         return true;
     }
@@ -416,11 +464,13 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     m_alertTimer = new QTimer(this);
     m_alertTimer->setSingleShot(true);
     connect(m_alertTimer, &QTimer::timeout, this, [this] {
+        if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
         m_alertKind.clear();
         m_alertUser.clear();
         m_alertDetail.clear();
         ++m_alertRevision;
         updateAlertOverlays();
+        if (!m_alertQueue.isEmpty()) QTimer::singleShot(250, this, &MainWindow::showNextAlert);
     });
 
     QSettings qs("TikStream", "UI2");
@@ -1372,31 +1422,46 @@ QWidget *MainWindow::pageAlertBox()
     auto *w = new QWidget;
     auto *f = form(w);
 
-    auto *imgRow = new QHBoxLayout();
-    m_alertImagePath = new QLineEdit;
-    m_alertImagePath->setPlaceholderText("Optional custom image (PNG / JPG / GIF)");
-    auto *imgBrowse = new QPushButton("Browse…");
-    imgRow->addWidget(m_alertImagePath, 1);
-    imgRow->addWidget(imgBrowse);
-    f->addRow("Image", imgRow);
+    auto addPicker = [&](const QString &rowLabel, QLineEdit *&edit, const QString &title, const QString &filter, const QString &placeholder, const char *jsonKey) {
+        auto *row = new QHBoxLayout();
+        edit = new QLineEdit;
+        edit->setPlaceholderText(placeholder);
+        auto *btn = new QPushButton("Browse…");
+        row->addWidget(edit, 1);
+        row->addWidget(btn);
+        f->addRow(rowLabel, row);
+        connect(btn, &QPushButton::clicked, this, [this, edit, title, filter, jsonKey] {
+            const QString p = QFileDialog::getOpenFileName(this, title, {}, filter);
+            if (p.isEmpty()) return;
+            const QString nat = QDir::toNativeSeparators(p);
+            edit->setText(nat);
+            editSource([nat, jsonKey](QJsonObject &s) { s[jsonKey] = nat; });
+        });
+        connect(edit, &QLineEdit::editingFinished, this, [this, edit, jsonKey] {
+            if (!m_loading) editSource([edit, jsonKey](QJsonObject &s) { s[jsonKey] = edit->text().trimmed(); });
+        });
+    };
 
-    auto *sndRow = new QHBoxLayout();
-    m_alertSoundPath = new QLineEdit;
-    m_alertSoundPath->setPlaceholderText("Optional alert sound (WAV / MP3)");
-    auto *sndBrowse = new QPushButton("Browse…");
-    sndRow->addWidget(m_alertSoundPath, 1);
-    sndRow->addWidget(sndBrowse);
-    f->addRow("Sound", sndRow);
+    m_alertOnGift = new QCheckBox("Enable Gift alerts");
+    f->addRow("", m_alertOnGift);
+    addPicker("Gift Image/GIF", m_alertGiftImage, "Select Gift Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertGiftImagePath");
+    addPicker("Gift Sound", m_alertGiftSound, "Select Gift Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertGiftSoundPath");
+
+    m_alertOnFollow = new QCheckBox("Enable Follow alerts");
+    f->addRow("", m_alertOnFollow);
+    addPicker("Follow Image/GIF", m_alertFollowImage, "Select Follow Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertFollowImagePath");
+    addPicker("Follow Sound", m_alertFollowSound, "Select Follow Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertFollowSoundPath");
 
     m_alertDuration = new PaddedSpinBox;
     m_alertDuration->setRange(2, 15);
     m_alertDuration->setSuffix(" s");
     f->addRow("Duration", m_alertDuration);
 
-    m_alertOnGift = new QCheckBox("Show alerts on TikTok LIVE gifts");
-    m_alertOnFollow = new QCheckBox("Show alerts on new follows");
-    f->addRow("", m_alertOnGift);
-    f->addRow("", m_alertOnFollow);
+    m_alertVolume = new PaddedSpinBox;
+    m_alertVolume->setRange(0, 100);
+    m_alertVolume->setSingleStep(5);
+    m_alertVolume->setSuffix(" %");
+    f->addRow("Sound Volume", m_alertVolume);
 
     auto *testRow = new QHBoxLayout();
     auto *testGift = new QPushButton("Test Gift Alert");
@@ -1406,30 +1471,13 @@ QWidget *MainWindow::pageAlertBox()
     testRow->addWidget(testGift);
     testRow->addWidget(testFollow);
     f->addRow("", testRow);
-    f->addRow("", hintLabel("Native alerts powered directly by TikStream's TikTok LIVE connection — no external accounts required."));
+    f->addRow("", hintLabel("Animated GIFs, PNG/JPG images, and MP3/WAV sounds play in real time on both your stream and headphones."));
 
-    connect(imgBrowse, &QPushButton::clicked, this, [this] {
-        const QString p = QFileDialog::getOpenFileName(this, "Select Alert Image", {}, "Images (*.png *.jpg *.jpeg *.gif *.webp)");
-        if (p.isEmpty()) return;
-        const QString nat = QDir::toNativeSeparators(p);
-        m_alertImagePath->setText(nat);
-        editSource([nat](QJsonObject &s) { s["alertImagePath"] = nat; });
-    });
-    connect(m_alertImagePath, &QLineEdit::editingFinished, this, [this] {
-        if (!m_loading) editSource([this](QJsonObject &s) { s["alertImagePath"] = m_alertImagePath->text().trimmed(); });
-    });
-    connect(sndBrowse, &QPushButton::clicked, this, [this] {
-        const QString p = QFileDialog::getOpenFileName(this, "Select Alert Sound", {}, "Audio (*.wav *.mp3)");
-        if (p.isEmpty()) return;
-        const QString nat = QDir::toNativeSeparators(p);
-        m_alertSoundPath->setText(nat);
-        editSource([nat](QJsonObject &s) { s["alertSoundPath"] = nat; });
-    });
-    connect(m_alertSoundPath, &QLineEdit::editingFinished, this, [this] {
-        if (!m_loading) editSource([this](QJsonObject &s) { s["alertSoundPath"] = m_alertSoundPath->text().trimmed(); });
-    });
     connect(m_alertDuration, &QSpinBox::valueChanged, this, [this](int v) {
         if (!m_loading) editSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
+    });
+    connect(m_alertVolume, &QSpinBox::valueChanged, this, [this](int v) {
+        if (!m_loading) editSource([v](QJsonObject &s) { s["alertVolume"] = v / 100.0; });
     });
     connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
         if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
@@ -1438,7 +1486,7 @@ QWidget *MainWindow::pageAlertBox()
         if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnFollow"] = on; });
     });
     connect(testGift, &QPushButton::clicked, this, [this] { triggerAlert("gift", "alex_gg", "🎁 Rose ×10"); });
-    connect(testFollow, &QPushButton::clicked, this, [this] { triggerAlert("follow", "maya_live", "followed the channel!"); });
+    connect(testFollow, &QPushButton::clicked, this, [this] { triggerAlert("follow", "maya_live", "just followed!"); });
     return w;
 }
 
@@ -2224,9 +2272,14 @@ void MainWindow::loadProperties()
         m_browserCss->setPlainText(src["browserCss"].toString("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"));
         m_browserMuted->setChecked(src["browserMuted"].toBool(false));
     } else if (type == "AlertBox") {
-        m_alertImagePath->setText(src["alertImagePath"].toString());
-        m_alertSoundPath->setText(src["alertSoundPath"].toString());
+        const QString fallbackImg = src["alertImagePath"].toString();
+        const QString fallbackSnd = src["alertSoundPath"].toString();
+        m_alertGiftImage->setText(src["alertGiftImagePath"].toString().isEmpty() ? fallbackImg : src["alertGiftImagePath"].toString());
+        m_alertGiftSound->setText(src["alertGiftSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertGiftSoundPath"].toString());
+        m_alertFollowImage->setText(src["alertFollowImagePath"].toString().isEmpty() ? fallbackImg : src["alertFollowImagePath"].toString());
+        m_alertFollowSound->setText(src["alertFollowSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertFollowSoundPath"].toString());
         m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
+        m_alertVolume->setValue(qRound(src["alertVolume"].toDouble(1.0) * 100.0));
         m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
         m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
     }
@@ -2474,7 +2527,7 @@ void MainWindow::addSourceDialog()
     if (r.existingId.isEmpty() && (r.type == "Game" || r.type == "Window" || r.type == "AudioApplication")) {
         refreshCaptureList();
         if (!newCaptureOptions(this, r.type, m_captureList, options)) return;
-    } else if (r.existingId.isEmpty() && (r.type == "Browser" || r.type == "Screen" || r.type == "Text" || r.type == "AudioInput" || r.type == "AudioOutput")) {
+    } else if (r.existingId.isEmpty() && (r.type == "Browser" || r.type == "Screen" || r.type == "Text" || r.type == "AudioInput" || r.type == "AudioOutput" || r.type == "AlertBox")) {
         if (r.type == "Screen") refreshCaptureList();
         if (r.type == "AudioInput" || r.type == "AudioOutput") m_audioDevices = EngineHost::instance().callObj("listAudioDevices");
         if (!newSourceOptions(this, r.type, m_captureList, m_audioDevices, options)) return;
@@ -2712,25 +2765,60 @@ void MainWindow::updateChatOverlays()
 
 void MainWindow::triggerAlert(const QString &kind, const QString &user, const QString &detail)
 {
-    int maxDur = 0;
-    QString soundPath;
-    for (const auto &v : sources()) {
-        const auto s = v.toObject();
-        if (s["type"].toString() != "AlertBox") continue;
-        if (kind == "gift" && !s["alertOnGift"].toBool(true)) continue;
-        if (kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
-        maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
-        if (soundPath.isEmpty()) soundPath = s["alertSoundPath"].toString();
+    if (m_alertQueue.size() < 32) m_alertQueue.enqueue({kind, user, detail});
+    if (m_alertKind.isEmpty()) showNextAlert();
+}
+
+void MainWindow::showNextAlert()
+{
+    while (!m_alertQueue.isEmpty()) {
+        const auto ev = m_alertQueue.dequeue();
+        int maxDur = 0;
+        QString soundPath, imagePath;
+        double volume = 1.0;
+        for (const auto &v : sources()) {
+            const auto s = v.toObject();
+            if (s["type"].toString() != "AlertBox") continue;
+            if (ev.kind == "gift" && !s["alertOnGift"].toBool(true)) continue;
+            if (ev.kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
+            maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
+            volume = s["alertVolume"].toDouble(1.0);
+            if (soundPath.isEmpty()) {
+                soundPath = s[ev.kind == "gift" ? "alertGiftSoundPath" : "alertFollowSoundPath"].toString();
+                if (soundPath.isEmpty()) soundPath = s["alertSoundPath"].toString();
+            }
+            if (imagePath.isEmpty()) {
+                imagePath = s[ev.kind == "gift" ? "alertGiftImagePath" : "alertFollowImagePath"].toString();
+                if (imagePath.isEmpty()) imagePath = s["alertImagePath"].toString();
+            }
+        }
+        if (maxDur <= 0) continue;
+
+        if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
+        if (!imagePath.isEmpty() && imagePath.endsWith(".gif", Qt::CaseInsensitive) && QFileInfo::exists(imagePath)) {
+            m_alertMovie = new QMovie(imagePath, QByteArray(), this);
+            if (m_alertMovie->isValid()) {
+                connect(m_alertMovie, &QMovie::frameChanged, this, [this] {
+                    ++m_alertRevision;
+                    updateAlertOverlays();
+                });
+                m_alertMovie->start();
+            } else {
+                delete m_alertMovie;
+                m_alertMovie = nullptr;
+            }
+        }
+
+        m_alertKind = ev.kind;
+        m_alertUser = ev.user;
+        m_alertDetail = ev.detail;
+        ++m_alertRevision;
+        updateAlertOverlays();
+        if (!soundPath.isEmpty())
+            EngineHost::instance().call("playAlertSound", {{"path", soundPath}, {"volume", volume}});
+        m_alertTimer->start(maxDur * 1000);
+        return;
     }
-    if (maxDur <= 0) return;
-    m_alertKind = kind;
-    m_alertUser = user;
-    m_alertDetail = detail;
-    ++m_alertRevision;
-    updateAlertOverlays();
-    if (!soundPath.isEmpty())
-        EngineHost::instance().call("playAlertSound", {{"path", soundPath}});
-    m_alertTimer->start(maxDur * 1000);
 }
 
 void MainWindow::updateAlertOverlays()
@@ -2903,13 +2991,17 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                 p.setPen(QPen(accent, 3.0));
                 p.drawRoundedRect(QRectF(8, 8, 624, 244), 20, 20);
                 int leftX = 28;
-                const QString imgPath = src["alertImagePath"].toString();
-                if (!imgPath.isEmpty()) {
-                    QImage iconImg(imgPath);
-                    if (!iconImg.isNull()) {
-                        p.drawImage(QRect(26, 48, 160, 160), iconImg.scaled(160, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-                        leftX = 204;
-                    }
+                QImage iconImg;
+                if (m_alertMovie && m_alertMovie->state() == QMovie::Running) {
+                    iconImg = m_alertMovie->currentImage();
+                } else {
+                    QString imgPath = src[m_alertKind == "gift" ? "alertGiftImagePath" : "alertFollowImagePath"].toString();
+                    if (imgPath.isEmpty()) imgPath = src["alertImagePath"].toString();
+                    if (!imgPath.isEmpty()) iconImg = QImage(imgPath);
+                }
+                if (!iconImg.isNull()) {
+                    p.drawImage(QRect(26, 48, 160, 160), iconImg.scaled(160, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                    leftX = 204;
                 }
                 const int textW = 612 - leftX;
                 p.setFont(QFont("Segoe UI", 16, QFont::Bold));
