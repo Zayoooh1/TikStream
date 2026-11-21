@@ -46,6 +46,8 @@ QList<QPair<QString, QString>> Hotkeys::actions()
     return {
         {"toggleStream", "Start / stop streaming"},
         {"toggleRecord", "Start / stop recording"},
+        {"toggleReplay", "Start / stop replay buffer"},
+        {"saveReplay", "Save replay clip"},
         {"toggleMic", "Mute / unmute microphone"},
         {"nextScene", "Next scene"},
         {"prevScene", "Previous scene"},

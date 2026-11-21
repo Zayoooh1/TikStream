@@ -130,6 +130,8 @@ private:
     void toggleStream();
     bool prepareStream();
     void toggleRecord();
+    void toggleReplay();
+    void saveReplay();
     void openSettings();
     void pollStats();
     void pollLevels();
@@ -139,7 +141,7 @@ private:
     int m_canvasW, m_canvasH;
     QString m_gpu;
     bool m_loading = false;
-    bool m_streaming = false, m_recording = false;
+    bool m_streaming = false, m_recording = false, m_replayActive = false;
     QString m_selItem;
     QList<QJsonObject> m_undoStack, m_redoStack;
     QJsonObject m_clipboardItem, m_clipboardSource;
@@ -206,7 +208,7 @@ private:
     QHash<QString, Strip> m_strips;
 
     // controls panel
-    QPushButton *m_btnStream = nullptr, *m_btnRecord = nullptr;
+    QPushButton *m_btnStream = nullptr, *m_btnRecord = nullptr, *m_btnReplay = nullptr, *m_btnSaveReplay = nullptr;
 
     // status bar
     QLabel *m_stLive = nullptr, *m_stRec = nullptr, *m_stCpu = nullptr, *m_stFps = nullptr,

@@ -50,12 +50,12 @@ private:
     QCheckBox *m_secondEnabled = nullptr;
     QLineEdit *m_secondName = nullptr, *m_secondServer = nullptr, *m_secondKey = nullptr;
     // output
-    QSpinBox *m_bitrate = nullptr, *m_keyframe = nullptr, *m_bframes = nullptr;
+    QSpinBox *m_bitrate = nullptr, *m_keyframe = nullptr, *m_bframes = nullptr, *m_replaySec = nullptr;
     QComboBox *m_preset = nullptr, *m_profile = nullptr, *m_audioBitrate = nullptr, *m_recFormat = nullptr;
-    QCheckBox *m_aq = nullptr, *m_lookahead = nullptr, *m_zeroFpsImpact = nullptr;
+    QCheckBox *m_aq = nullptr, *m_lookahead = nullptr, *m_zeroFpsImpact = nullptr, *m_multiTrack = nullptr;
     QLineEdit *m_folder = nullptr;
     // video
-    QSpinBox *m_videoWidth = nullptr, *m_videoHeight = nullptr, *m_fps = nullptr;
+    QSpinBox *m_videoWidth = nullptr, *m_videoHeight = nullptr, *m_fps = nullptr, *m_transitionMs = nullptr;
     // audio
     QComboBox *m_desktopDev = nullptr, *m_micDev = nullptr;
     // hotkeys

@@ -141,16 +141,31 @@ public sealed class AudioEngine : IDisposable
         lock (_lock) if (_inputs.Remove(id, out var i)) i.Dispose(_mixer);
     }
 
-    /// <summary>Reads exactly <paramref name="frames"/> interleaved stereo frames into the buffer.</summary>
-    public void Read(float[] buffer, int frames)
+    /// <summary>Lists currently registered audio inputs (Id, Name) for multi-track MKV recording.</summary>
+    public List<(string Id, string Name)> GetActiveInputs()
     {
+        lock (_lock) return _inputs.Select(kv => (kv.Key, kv.Value.Name)).ToList();
+    }
+
+    /// <summary>Reads exactly <paramref name="frames"/> interleaved stereo frames into the buffer, optionally returning per-source tapped samples.</summary>
+    public void Read(float[] buffer, int frames, Dictionary<string, float[]>? perSource = null)
+    {
+        int samples = frames * Channels;
         lock (_lock)
         {
             foreach (var i in _inputs.Values) i.TrimLatency();
-            int read = _mixer.Read(buffer, 0, frames * Channels);
-            if (read < frames * Channels) Array.Clear(buffer, read, frames * Channels - read);
+            int read = _mixer.Read(buffer, 0, samples);
+            if (read < samples) Array.Clear(buffer, read, samples - read);
+            if (perSource != null)
+            {
+                foreach (var (id, buf) in perSource)
+                {
+                    if (_inputs.TryGetValue(id, out var inp)) inp.CopyLastSamples(buf, samples);
+                    else Array.Clear(buf, 0, Math.Min(buf.Length, samples));
+                }
+            }
         }
-        for (int i = 0; i < frames * Channels; i++)
+        for (int i = 0; i < samples; i++)
         {
             float v = buffer[i];
             if (v > 1f) buffer[i] = 1f; else if (v < -1f) buffer[i] = -1f;
@@ -189,8 +204,10 @@ public sealed class AudioEngine : IDisposable
         private readonly VolumeSampleProvider _volume;
         private readonly LimiterProvider _limiter;
         private readonly DelayProvider _delay;
+        private readonly TapSampleProvider _tap;
         private readonly ISampleProvider _chainOut;
         private readonly bool _trim;
+        public string Name { get; }
         public string Key { get; private init; } = "";
         public bool IsDevice => _capture != null;
         public volatile bool Stopped;
@@ -198,6 +215,7 @@ public sealed class AudioEngine : IDisposable
 
         private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer)
         {
+            Name = name;
             _capture = capture;
             _trim = trim;
             _buffer = new BufferedWaveProvider(fmt)
@@ -218,7 +236,8 @@ public sealed class AudioEngine : IDisposable
             _delay = new DelayProvider(_limiter);
             var meter = new MeteringSampleProvider(_delay, SampleRate / 20);
             meter.StreamVolume += (_, e) => Peak = e.MaxSampleValues.Length > 0 ? e.MaxSampleValues.Max() : 0;
-            _chainOut = meter;
+            _tap = new TapSampleProvider(meter);
+            _chainOut = _tap;
             mixer.AddMixerInput(_chainOut);
             if (capture != null)
             {
@@ -276,6 +295,8 @@ public sealed class AudioEngine : IDisposable
             var tmp = new byte[excess];
             _buffer.Read(tmp, 0, excess);
         }
+
+        public void CopyLastSamples(float[] dst, int count) => _tap.CopyLast(dst, count);
 
         public void Dispose(MixingSampleProvider mixer)
         {
@@ -421,6 +442,36 @@ public sealed class AudioEngine : IDisposable
                 if (++_writePos >= len) _writePos = 0;
             }
             return read;
+        }
+    }
+
+    /// <summary>Captures the most recently mixed block per input for multi-track MKV recording, zero allocations.</summary>
+    private sealed class TapSampleProvider(ISampleProvider source) : ISampleProvider
+    {
+        private float[] _last = new float[2048];
+        private int _lastCount;
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            if (_last.Length < count) _last = new float[count];
+            if (read > 0) Array.Copy(buffer, offset, _last, 0, read);
+            if (read < count) Array.Clear(_last, read, count - read);
+            _lastCount = count;
+            return read;
+        }
+
+        public void CopyLast(float[] dst, int count)
+        {
+            int n = Math.Min(count, Math.Min(dst.Length, _lastCount));
+            if (n > 0) Array.Copy(_last, 0, dst, 0, n);
+            if (n < count && n < dst.Length) Array.Clear(dst, n, Math.Min(count, dst.Length) - n);
+            for (int i = 0; i < Math.Min(count, dst.Length); i++)
+            {
+                float v = dst[i];
+                if (v > 1f) dst[i] = 1f; else if (v < -1f) dst[i] = -1f;
+            }
         }
     }
 }

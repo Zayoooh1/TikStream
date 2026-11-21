@@ -228,6 +228,10 @@ QPushButton#recordButton[live="true"] {
     border: 2px solid #f5d03b;
     color: #f5d03b;
 }
+QPushButton#replayButton[live="true"] {
+    border: 2px solid #25f4ee;
+    color: #25f4ee;
+}
 
 QToolButton {
     background: transparent;

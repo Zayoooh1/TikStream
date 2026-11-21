@@ -9,6 +9,9 @@ A lightweight, high-performance Windows streaming and recording application buil
 - **HDR Support**: Automatic HDR display detection (`R16G16B16A16_FLOAT`) with real-time scRGB → SDR ACES filmic tone mapping in HLSL.
 - **GPU Video Filters**: Brightness, contrast, saturation, CbCr Chroma Key with edge despill, and L/R/T/B edge cropping.
 - **Advanced WASAPI Audio Engine**: Per-application audio capture (WASAPI Process Loopback), native **RNNoise** and **SpeexDSP** noise suppression, noise gate, compressor, limiter, and A/V sync offset (ms).
+- **Smooth Scene Transitions (GPU Fade)**: Configurable hardware-accelerated crossfade between scenes (`0–1500 ms`, default `250 ms`) executed in a single VRAM draw call.
+- **Replay Buffer (Instant Clip Saving)**: Rolling in-memory ring buffer (`10–120 s`) of already-encoded NVENC video and AAC audio packets with zero extra encoding overhead, instant keyframe-aligned saving to MKV/MP4, and global hotkeys.
+- **Multi-Track MKV Audio Recording**: Optional multi-track Matroska recording — Track 1 holds the Full Mix (same as RTMP stream) while Tracks 2+ store individual labeled audio sources (e.g., Microphone, Desktop Audio, Game Audio) for clean post-production editing.
 - **Multistreaming**: Stream simultaneously to a second RTMP destination sharing the same NVENC and AAC encoders.
 - **TikTok LIVE Chat & Overlay**: Built-in LIVE chat dock for any `@username` with gift notifications, tap counter, and a **LIVE Chat Overlay** source (bundles portable `node.exe` in the installer — no separate Node.js installation required).
 - **WiX 5 MSI Installer**: Clean default state on first install, preserves user settings on upgrades/reinstalls, and performs a complete user-data cleanup on uninstall.

@@ -186,6 +186,8 @@ float4 PSUV(VO i) : SV_Target
     public ID3D11Texture2D Canvas { get; }
     public ID3D11RenderTargetView CanvasRtv { get; }
     public ID3D11ShaderResourceView CanvasSrv { get; }
+    private readonly ID3D11Texture2D _prevCanvas;
+    private readonly ID3D11ShaderResourceView _prevCanvasSrv;
 
     // small background blur buffers — computed at low resolution for near-zero GPU cost
     public const int BlurSlots = 4;
@@ -227,6 +229,8 @@ float4 PSUV(VO i) : SV_Target
         Canvas = CreateRt(width, height, Format.B8G8R8A8_UNorm);
         CanvasRtv = _dev.CreateRenderTargetView(Canvas);
         CanvasSrv = _dev.CreateShaderResourceView(Canvas);
+        _prevCanvas = CreateRt(width, height, Format.B8G8R8A8_UNorm);
+        _prevCanvasSrv = _dev.CreateShaderResourceView(_prevCanvas);
 
         for (int i = 0; i < BlurSlots; i++)
         {
@@ -311,6 +315,23 @@ float4 PSUV(VO i) : SV_Target
         _ctx.PSSetShaderResource(0, null!);
         _ctx.PSSetShaderResource(1, null!);
         _ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
+    }
+
+    /// <summary>Snapshots the current canvas into a secondary VRAM texture for smooth scene fade transitions.</summary>
+    public void CapturePreviousCanvas() => _ctx.CopyResource(_prevCanvas, Canvas);
+
+    /// <summary>Blends the previous scene snapshot over the newly rendered canvas (alpha: 1 -> 0).</summary>
+    public void BlendPreviousCanvas(float alpha)
+    {
+        if (alpha <= 0.001f) return;
+        SetCommon();
+        _ctx.OMSetRenderTargets(CanvasRtv);
+        _ctx.RSSetViewport(new Viewport(0, 0, Width, Height));
+        _ctx.OMSetBlendState(_alphaBlend);
+        _ctx.PSSetShader(_psLayer);
+        var full = new Vector4(0, 0, 1, 1);
+        DrawQuad(_prevCanvasSrv, full, full, new Vector4(Math.Clamp(alpha, 0f, 1f), 0, 1, 1), new Vector4(Width, Height, 0, 0));
+        _ctx.PSSetShaderResource(0, null!);
     }
 
     /// <summary>Composites layers onto the canvas.</summary>
@@ -467,6 +488,7 @@ float4 PSUV(VO i) : SV_Target
         ReleasePreview();
         WhiteSrv.Dispose(); _white.Dispose();
         for (int i = 0; i < BlurSlots; i++) { _bgSrv[i].Dispose(); _bgRtv[i].Dispose(); _bg[i].Dispose(); }
+        _prevCanvasSrv.Dispose(); _prevCanvas.Dispose();
         CanvasSrv.Dispose(); CanvasRtv.Dispose(); Canvas.Dispose();
         _raster.Dispose(); _opaque.Dispose(); _alphaBlend.Dispose(); _linear.Dispose(); _cb.Dispose();
         _psUV.Dispose(); _psY.Dispose(); _psBlur.Dispose(); _psLayer.Dispose(); _vs.Dispose();

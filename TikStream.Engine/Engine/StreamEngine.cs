@@ -36,6 +36,7 @@ public sealed class EngineStats
     public long SkippedFrames { get; set; }
     public bool Streaming { get; set; }
     public bool Recording { get; set; }
+    public bool ReplayActive { get; set; }
     public double StreamSeconds { get; set; }
     public double RecordSeconds { get; set; }
     public long EncodedFrames { get; set; }
@@ -84,19 +85,25 @@ public sealed unsafe class StreamEngine : IDisposable
     private VideoEncoder? _venc;
     private AudioEncoder? _aenc;
     private readonly object _audioEncLock = new();
+    private readonly List<(string SourceId, string Title, AudioEncoder Enc, float[] Buf)> _extraAudio = new();
+    private volatile Dictionary<string, float[]>? _extraAudioMap;
     private long _encStartSamples;
     private volatile bool _encRun;
     private volatile StreamOutput[] _outputs = Array.Empty<StreamOutput>();
+    private volatile ReplayBuffer? _replay;
     private long _encStartTicks;
     private long _lastPts = -1;
     private volatile bool _forceKey;
     private long _encodedFrames;
     private long _streamStart, _recordStart;
     private string _lastError = "";
+    private string _lastSceneId = "";
+    private long _transStartTicks, _transDurTicks;
     private readonly System.Runtime.GCLatencyMode _prevGcMode;
 
     public bool IsStreaming => _outputs.Any(o => o.Name != "File");
     public bool IsRecording => _outputs.Any(o => o.Name == "File");
+    public bool IsReplayActive => _replay != null;
 
     public StreamEngine(AppSettings settings)
     {
@@ -279,6 +286,35 @@ public sealed unsafe class StreamEngine : IDisposable
     public Task<string?> StartRecordAsync() => RunOnRender(() => { if (!IsRecording) StartRecordInternal(); });
     public Task<string?> StopRecordAsync() => RunOnRender(() => RemoveOutput("File", "stopped"));
 
+    public Task<string?> StartReplayAsync() => RunOnRender(() =>
+    {
+        if (_replay != null) return;
+        EnsureEncoders();
+        _replay = new ReplayBuffer(_venc!, _aenc!, _fps, _scene.ReplayBufferSec);
+        _forceKey = true;
+    });
+
+    public Task<string?> StopReplayAsync() => RunOnRender(() =>
+    {
+        var r = _replay;
+        if (r == null) return;
+        _replay = null;
+        if (_outputs.Length == 0) TeardownEncoders();
+        Task.Run(r.Dispose);
+    });
+
+    public Task<(string? Path, string? Error)> SaveReplayAsync()
+    {
+        var r = _replay;
+        if (r == null) return Task.FromResult<(string?, string?)>((null, "Replay buffer is not running."));
+        var folder = string.IsNullOrWhiteSpace(_scene.RecordFolder) ? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) : _scene.RecordFolder;
+        Directory.CreateDirectory(folder);
+        var ext = _scene.RecordFormat == "mp4" ? "mp4" : "mkv";
+        var path = Path.Combine(folder, $"Replay {DateTime.Now:yyyy-MM-dd HH-mm-ss}.{ext}");
+        return r.SaveAsync(path).ContinueWith<(string?, string?)>(t =>
+            t.IsFaulted ? (null, t.Exception?.GetBaseException().Message ?? "Failed to save replay.") : (t.Result, null));
+    }
+
     private void StartRecordInternal()
     {
         EnsureEncoders();
@@ -286,8 +322,61 @@ public sealed unsafe class StreamEngine : IDisposable
         Directory.CreateDirectory(folder);
         var ext = _scene.RecordFormat == "mp4" ? "mp4" : "mkv";
         var path = Path.Combine(folder, $"TikStream {DateTime.Now:yyyy-MM-dd HH-mm-ss}.{ext}");
-        AddOutput(new StreamOutput("File", path, _venc!, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe));
+
+        List<(string Title, AudioEncoder Enc)>? extraForOutput = null;
+        if (_scene.MultiTrackAudio && ext == "mkv")
+        {
+            var inputs = Audio.GetActiveInputs();
+            if (inputs.Count > 0)
+            {
+                var created = new List<(string SourceId, string Title, AudioEncoder Enc, float[] Buf)>();
+                var map = new Dictionary<string, float[]>();
+                extraForOutput = new List<(string Title, AudioEncoder Enc)>();
+                try
+                {
+                    foreach (var (id, name) in inputs.Take(6))
+                    {
+                        var enc = new AudioEncoder(_scene.AudioBitrateKbps, globalHeader: true);
+                        var buf = new float[1024 * AudioEngine.Channels];
+                        created.Add((id, name, enc, buf));
+                        map[id] = buf;
+                        extraForOutput.Add((name, enc));
+                    }
+                    lock (_audioEncLock)
+                    {
+                        DisposeExtraAudioLocked();
+                        _extraAudio.AddRange(created);
+                        _extraAudioMap = map;
+                    }
+                    Log.Info($"Multi-track MKV recording: Full Mix + {created.Count} separate audio track(s).");
+                }
+                catch
+                {
+                    foreach (var x in created) x.Enc.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        AddOutput(new StreamOutput("File", path, _venc!, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
         _recordStart = _clock.ElapsedTicks;
+    }
+
+    private void DisposeExtraAudioLocked(StreamOutput? flushTo = null)
+    {
+        _extraAudioMap = null;
+        for (int i = 0; i < _extraAudio.Count; i++)
+        {
+            var enc = _extraAudio[i].Enc;
+            int streamIdx = StreamOutput.AudioIndex + 1 + i;
+            if (flushTo != null)
+            {
+                try { enc.Flush(p => DeliverTo(p, streamIdx, flushTo)); }
+                catch (Exception ex) { Log.Warn("Extra audio flush: " + ex.Message); }
+            }
+            enc.Dispose();
+        }
+        _extraAudio.Clear();
     }
 
     private Task<string?> RunOnRender(Action a)
@@ -300,7 +389,7 @@ public sealed unsafe class StreamEngine : IDisposable
             {
                 Log.Error("Output command", ex);
                 _lastError = ex.Message;
-                if (_outputs.Length == 0) TeardownEncoders();
+                if (_outputs.Length == 0 && _replay == null) TeardownEncoders();
                 tcs.SetResult(ex.Message);
             }
         });
@@ -341,7 +430,11 @@ public sealed unsafe class StreamEngine : IDisposable
         var o = _outputs.FirstOrDefault(x => x.Name == name);
         if (o == null) return;
         _outputs = _outputs.Where(x => x != o).ToArray();
-        if (_outputs.Length == 0) TeardownEncoders(flushTo: o);
+        if (name == "File")
+        {
+            lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
+        }
+        if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o);
         Task.Run(o.Dispose);
         Log.Info($"=== STOP: {name} ({reason})");
     }
@@ -354,6 +447,7 @@ public sealed unsafe class StreamEngine : IDisposable
             _encRun = false;
             aenc = _aenc;
             _aenc = null;
+            DisposeExtraAudioLocked(flushTo);
         }
         if (flushTo != null && _venc != null && aenc != null)
         {
@@ -373,6 +467,18 @@ public sealed unsafe class StreamEngine : IDisposable
         var pkt = (AVPacket*)p;
         pkt->stream_index = streamIndex;
         foreach (var o in _outputs) o.Enqueue(pkt);
+        _replay?.Enqueue(pkt, streamIndex);
+        ffmpeg.av_packet_free(&pkt);
+    }
+
+    private void DeliverToFile(IntPtr p, int streamIndex)
+    {
+        var pkt = (AVPacket*)p;
+        pkt->stream_index = streamIndex;
+        foreach (var o in _outputs)
+        {
+            if (o.Name == "File") { o.Enqueue(pkt); break; }
+        }
         ffmpeg.av_packet_free(&pkt);
     }
 
@@ -401,14 +507,26 @@ public sealed unsafe class StreamEngine : IDisposable
                 if (target - produced > AudioEngine.SampleRate) produced = target - n;
                 while (produced + n <= target && _run)
                 {
-                    Audio.Read(buf, n);
+                    var extraMap = _extraAudioMap;
+                    Audio.Read(buf, n, extraMap);
                     lock (_audioEncLock)
                     {
                         var aenc = _aenc;
                         if (aenc != null && _encRun)
                         {
                             long pts = produced - _encStartSamples;
-                            if (pts >= 0) aenc.Encode(buf, pts, p => Deliver(p, StreamOutput.AudioIndex));
+                            if (pts >= 0)
+                            {
+                                aenc.Encode(buf, pts, p => Deliver(p, StreamOutput.AudioIndex));
+                                if (extraMap != null && _extraAudio.Count > 0)
+                                {
+                                    for (int i = 0; i < _extraAudio.Count; i++)
+                                    {
+                                        int streamIdx = StreamOutput.AudioIndex + 1 + i;
+                                        _extraAudio[i].Enc.Encode(_extraAudio[i].Buf, pts, p => DeliverToFile(p, streamIdx));
+                                    }
+                                }
+                            }
                         }
                     }
                     produced += n;
@@ -482,6 +600,7 @@ public sealed unsafe class StreamEngine : IDisposable
                     SkippedFrames = skipped,
                     Streaming = IsStreaming,
                     Recording = IsRecording,
+                    ReplayActive = IsReplayActive,
                     StreamSeconds = IsStreaming ? (double)(_clock.ElapsedTicks - _streamStart) / freq : 0,
                     RecordSeconds = IsRecording ? (double)(_clock.ElapsedTicks - _recordStart) / freq : 0,
                     EncodedFrames = _encodedFrames,
@@ -527,6 +646,13 @@ public sealed unsafe class StreamEngine : IDisposable
         }
 
         foreach (var o in _outputs.ToArray()) RemoveOutput(o.Name, "application shutdown");
+        var r = _replay;
+        if (r != null)
+        {
+            _replay = null;
+            TeardownEncoders();
+            r.Dispose();
+        }
         if (mm != IntPtr.Zero) Native.AvRevertMmThreadCharacteristics(mm);
     }
 
@@ -546,6 +672,13 @@ public sealed unsafe class StreamEngine : IDisposable
         _drawList.Clear();
         int blurSlot = 0;
         var scene = s.ActiveScene;
+        if (scene != null && !string.IsNullOrEmpty(_lastSceneId) && scene.Id != _lastSceneId && s.SceneTransitionMs > 0)
+        {
+            _comp.CapturePreviousCanvas();
+            _transStartTicks = frameTime;
+            _transDurTicks = Math.Clamp(s.SceneTransitionMs, 10, 5000) * Stopwatch.Frequency / 1000;
+        }
+        _lastSceneId = scene?.Id ?? "";
         if (scene != null)
         {
             foreach (var item in scene.Items)
@@ -612,6 +745,12 @@ public sealed unsafe class StreamEngine : IDisposable
         }
 
         _comp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
+        if (_transDurTicks > 0)
+        {
+            double t = (frameTime - _transStartTicks) / (double)_transDurTicks;
+            if (t >= 0 && t < 1.0) _comp.BlendPreviousCanvas((float)(1.0 - t));
+            else if (t >= 1.0) _transDurTicks = 0;
+        }
 
         // 3. encode — straight into NVENC texture
         if (_venc != null)

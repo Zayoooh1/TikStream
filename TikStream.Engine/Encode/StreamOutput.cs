@@ -25,6 +25,7 @@ public sealed unsafe class StreamOutput : IDisposable
     private readonly AVCodecParameters* _vpar;
     private readonly AVCodecParameters* _apar;
     private readonly AVRational _vtb, _atb;
+    private readonly List<(string Title, IntPtr Par, AVRational Tb)> _extraAudio = new();
     private readonly int _fps;
     private readonly Action _requestKeyframe;
 
@@ -46,7 +47,8 @@ public sealed unsafe class StreamOutput : IDisposable
     public int Reconnects { get; private set; }
     public int QueueLength => _queue.Count;
 
-    public StreamOutput(string name, string url, VideoEncoder venc, AudioEncoder aenc, int fps, OutputOptions opt, Action requestKeyframe)
+    public StreamOutput(string name, string url, VideoEncoder venc, AudioEncoder aenc, int fps, OutputOptions opt, Action requestKeyframe,
+        IReadOnlyList<(string Title, AudioEncoder Enc)>? extraAudioTracks = null)
     {
         _name = name;
         _url = url;
@@ -61,6 +63,15 @@ public sealed unsafe class StreamOutput : IDisposable
         FF.Check(ffmpeg.avcodec_parameters_from_context(_apar, aenc.Context), "params(audio)");
         _vtb = venc.TimeBase;
         _atb = aenc.TimeBase;
+        if (extraAudioTracks != null)
+        {
+            foreach (var (title, enc) in extraAudioTracks)
+            {
+                var ep = ffmpeg.avcodec_parameters_alloc();
+                FF.Check(ffmpeg.avcodec_parameters_from_context(ep, enc.Context), "params(extra audio)");
+                _extraAudio.Add((title, (IntPtr)ep, enc.TimeBase));
+            }
+        }
         _thread = new Thread(Run) { IsBackground = true, Name = "Output:" + name, Priority = ThreadPriority.AboveNormal };
         _thread.Start();
     }
@@ -95,6 +106,16 @@ public sealed unsafe class StreamOutput : IDisposable
         ffmpeg.avcodec_parameters_copy(aus->codecpar, _apar);
         aus->codecpar->codec_tag = 0;
         aus->time_base = _atb;
+        if (!_isNetwork && _extraAudio.Count > 0)
+            ffmpeg.av_dict_set(&aus->metadata, "title", "Full Mix", 0);
+        foreach (var (title, epPtr, tb) in _extraAudio)
+        {
+            var es = ffmpeg.avformat_new_stream(oc, null);
+            ffmpeg.avcodec_parameters_copy(es->codecpar, (AVCodecParameters*)epPtr);
+            es->codecpar->codec_tag = 0;
+            es->time_base = tb;
+            ffmpeg.av_dict_set(&es->metadata, "title", title, 0);
+        }
 
         if ((oc->oformat->flags & ffmpeg.AVFMT_NOFILE) == 0)
         {
@@ -205,7 +226,10 @@ public sealed unsafe class StreamOutput : IDisposable
                 else { FreePacket(p, false); continue; }
             }
 
-            var srcTb = isVideo ? _vtb : _atb;
+            if (pkt->stream_index < 0 || pkt->stream_index >= (int)_oc->nb_streams) { FreePacket(p, false); continue; }
+            var srcTb = isVideo ? _vtb
+                : pkt->stream_index == AudioIndex ? _atb
+                : _extraAudio[pkt->stream_index - AudioIndex - 1].Tb;
             long off = ffmpeg.av_rescale_q(offsetUs, us, srcTb);
             pkt->pts -= off;
             pkt->dts -= off;
@@ -254,5 +278,11 @@ public sealed unsafe class StreamOutput : IDisposable
         }
         var v = _vpar; ffmpeg.avcodec_parameters_free(&v);
         var a = _apar; ffmpeg.avcodec_parameters_free(&a);
+        foreach (var (_, epPtr, _) in _extraAudio)
+        {
+            var ep = (AVCodecParameters*)epPtr;
+            ffmpeg.avcodec_parameters_free(&ep);
+        }
+        _extraAudio.Clear();
     }
 }

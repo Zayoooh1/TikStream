@@ -26,6 +26,7 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontComboBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -595,8 +596,12 @@ void MainWindow::buildDocks()
     m_btnStream->setObjectName("streamButton");
     m_btnRecord = new QPushButton(themedIcon("record"), "  Start Recording");
     m_btnRecord->setObjectName("recordButton");
+    m_btnReplay = new QPushButton(themedIcon("refresh"), "  Start Replay Buffer");
+    m_btnReplay->setObjectName("replayButton");
+    m_btnSaveReplay = new QPushButton(themedIcon("folder"), "  Save Replay");
+    m_btnSaveReplay->setEnabled(false);
     auto *btnSettings = new QPushButton(themedIcon("gear"), "  Settings");
-    for (auto *b : {m_btnStream, m_btnRecord, btnSettings}) {
+    for (auto *b : {m_btnStream, m_btnRecord, m_btnReplay, m_btnSaveReplay, btnSettings}) {
         b->setMinimumHeight(b == m_btnStream ? 38 : 30);
         b->setIconSize(QSize(18, 18));
         b->setCursor(Qt::PointingHandCursor);
@@ -605,6 +610,8 @@ void MainWindow::buildDocks()
     cv->addStretch();
     connect(m_btnStream, &QPushButton::clicked, this, &MainWindow::toggleStream);
     connect(m_btnRecord, &QPushButton::clicked, this, &MainWindow::toggleRecord);
+    connect(m_btnReplay, &QPushButton::clicked, this, &MainWindow::toggleReplay);
+    connect(m_btnSaveReplay, &QPushButton::clicked, this, &MainWindow::saveReplay);
     connect(btnSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
     auto *dCtl = makeDock("Controls", "dockControls", ctl, Qt::RightDockWidgetArea);
 
@@ -2363,6 +2370,8 @@ void MainWindow::triggerAction(const QString &action)
 {
     if (action == "toggleStream") toggleStream();
     else if (action == "toggleRecord") toggleRecord();
+    else if (action == "toggleReplay") toggleReplay();
+    else if (action == "saveReplay") saveReplay();
     else if (action == "nextScene") switchScene(+1);
     else if (action == "prevScene") switchScene(-1);
     else if (action == "toggleMic") {
@@ -2779,10 +2788,34 @@ void MainWindow::toggleRecord()
     pollStats();
 }
 
+void MainWindow::toggleReplay()
+{
+    m_btnReplay->setEnabled(false);
+    pushSettings();
+    const auto r = EngineHost::instance().callObj(m_replayActive ? "stopReplay" : "startReplay");
+    if (r.contains("error")) QMessageBox::warning(this, "Replay Buffer", r["error"].toString());
+    m_btnReplay->setEnabled(true);
+    pollStats();
+}
+
+void MainWindow::saveReplay()
+{
+    if (!m_replayActive) return;
+    m_btnSaveReplay->setEnabled(false);
+    const auto r = EngineHost::instance().callObj("saveReplay");
+    m_btnSaveReplay->setEnabled(m_replayActive);
+    if (r.contains("error")) {
+        QMessageBox::warning(this, "Replay Buffer", r["error"].toString());
+    } else {
+        const QString saved = QFileInfo(r["path"].toString()).fileName();
+        m_stMsg->setText("Replay saved: " + saved);
+    }
+}
+
 void MainWindow::openSettings()
 {
     m_audioDevices = EngineHost::instance().callObj("listAudioDevices");
-    SettingsDialog dlg(m_s, m_audioDevices, m_streaming || m_recording, this);
+    SettingsDialog dlg(m_s, m_audioDevices, m_streaming || m_recording || m_replayActive, this);
     connect(&dlg, &SettingsDialog::applied, this, [this](const QJsonObject &s) {
         m_s = s;
         pushSettings();
@@ -2801,7 +2834,10 @@ void MainWindow::updateLiveButtons()
     m_btnStream->setProperty("live", m_streaming);
     m_btnRecord->setText(m_recording ? "  Stop Recording" : "  Start Recording");
     m_btnRecord->setProperty("live", m_recording);
-    for (auto *b : {m_btnStream, m_btnRecord}) { b->style()->unpolish(b); b->style()->polish(b); }
+    m_btnReplay->setText(m_replayActive ? "  Stop Replay Buffer" : "  Start Replay Buffer");
+    m_btnReplay->setProperty("live", m_replayActive);
+    m_btnSaveReplay->setEnabled(m_replayActive);
+    for (auto *b : {m_btnStream, m_btnRecord, m_btnReplay}) { b->style()->unpolish(b); b->style()->polish(b); }
     m_stLive->setProperty("on", m_streaming);
     m_stRec->setProperty("on", m_recording);
     for (auto *l : {m_stLive, m_stRec}) { l->style()->unpolish(l); l->style()->polish(l); }
@@ -2811,8 +2847,8 @@ void MainWindow::pollStats()
 {
     const auto st = EngineHost::instance().callObj("stats");
     if (st.isEmpty()) return;
-    const bool s = st["streaming"].toBool(), r = st["recording"].toBool();
-    if (s != m_streaming || r != m_recording) { m_streaming = s; m_recording = r; updateLiveButtons(); }
+    const bool s = st["streaming"].toBool(), r = st["recording"].toBool(), rep = st["replayActive"].toBool();
+    if (s != m_streaming || r != m_recording || rep != m_replayActive) { m_streaming = s; m_recording = r; m_replayActive = rep; updateLiveButtons(); }
 
     const int cw = st["canvasWidth"].toInt(m_canvasW), ch = st["canvasHeight"].toInt(m_canvasH);
     if (cw > 0 && ch > 0 && (cw != m_canvasW || ch != m_canvasH)) {

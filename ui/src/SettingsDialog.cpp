@@ -490,9 +490,27 @@ QWidget *SettingsDialog::pageOutput()
     m_recFormat->addItem("MP4 (.mp4) — fragmented, ready for editing", "mp4");
     m_recFormat->setCurrentIndex(m_s["recordFormat"].toString("mkv") == "mp4" ? 1 : 0);
     fr->addRow("Format", m_recFormat);
+    m_multiTrack = track(new QCheckBox("Multi-track audio (MKV only — Track 1: Full Mix, Tracks 2+: separate audio sources)"));
+    m_multiTrack->setChecked(m_s["multiTrackAudio"].toBool(false));
+    auto updateMultiTrack = [this] {
+        m_multiTrack->setEnabled(!m_live && m_recFormat->currentData().toString() == "mkv");
+    };
+    connect(m_recFormat, &QComboBox::currentIndexChanged, this, updateMultiTrack);
+    fr->addRow("", m_multiTrack);
 
-    for (QWidget *x : std::initializer_list<QWidget *>{m_bitrate, m_keyframe, m_preset, m_profile, m_bframes, m_zeroFpsImpact, m_aq, m_lookahead, m_audioBitrate, m_recFormat})
+    QFormLayout *fb;
+    v->addWidget(card(w, &fb, "Replay Buffer", "Keeps the last N seconds of encoded video and audio in RAM with zero extra encoding overhead."));
+    m_replaySec = track(new PaddedSpinBox);
+    m_replaySec->setRange(10, 120);
+    m_replaySec->setSingleStep(5);
+    m_replaySec->setSuffix(" s");
+    m_replaySec->setValue(m_s["replayBufferSec"].toInt(30));
+    fb->addRow("Buffer Length", m_replaySec);
+    fb->addRow("", hint("Use the Controls dock or Hotkeys to start/stop the replay buffer and save instant clips to your recording folder."));
+
+    for (QWidget *x : std::initializer_list<QWidget *>{m_bitrate, m_keyframe, m_preset, m_profile, m_bframes, m_zeroFpsImpact, m_aq, m_lookahead, m_audioBitrate, m_recFormat, m_replaySec})
         x->setEnabled(!m_live);
+    updateMultiTrack();
     if (m_zeroFpsImpact->isChecked()) {
         m_aq->setEnabled(false);
         m_lookahead->setEnabled(false);
@@ -547,6 +565,13 @@ QWidget *SettingsDialog::pageVideo()
     m_fps->setRange(1, 120);
     m_fps->setValue(m_s["fps"].toInt(60));
     f->addRow("Frames per second", m_fps);
+    m_transitionMs = track(new PaddedSpinBox);
+    m_transitionMs->setRange(0, 1500);
+    m_transitionMs->setSingleStep(50);
+    m_transitionMs->setSuffix(" ms");
+    m_transitionMs->setValue(m_s["sceneTransitionMs"].toInt(250));
+    f->addRow("Scene Transition (Fade)", m_transitionMs);
+    f->addRow(hint("0 ms = instant cut. GPU crossfade runs directly on the canvas with zero extra CPU cost."));
     f->addRow(hint("NVENC requires even width and height. Odd values will be rounded down."));
     for (QWidget *field : std::initializer_list<QWidget *>{preset, m_videoWidth, m_videoHeight, m_fps})
         field->setEnabled(!m_live);
@@ -672,10 +697,13 @@ QJsonObject SettingsDialog::result() const
     s["audioBitrateKbps"] = m_audioBitrate->currentData().toInt();
     s["recordFolder"] = m_folder->text().trimmed();
     s["recordFormat"] = m_recFormat->currentData().toString();
+    s["multiTrackAudio"] = m_multiTrack->isChecked();
+    s["replayBufferSec"] = m_replaySec->value();
 
     s["width"] = m_videoWidth->value() & ~1;
     s["height"] = m_videoHeight->value() & ~1;
     s["fps"] = m_fps->value();
+    s["sceneTransitionMs"] = m_transitionMs->value();
 
     // Global audio devices are active across all scenes.
     QJsonArray sources = s["sources"].toArray();

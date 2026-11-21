@@ -147,11 +147,15 @@ public sealed class AppSettings
     public int AudioBitrateKbps { get; set; } = 160;
     public string RecordFolder { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
     public string RecordFormat { get; set; } = "mkv";
+    public bool MultiTrackAudio { get; set; }
+    public bool ReplayBufferEnabled { get; set; }
+    public int ReplayBufferSec { get; set; } = 30;
 
     // ---------- Video ----------
     public int Width { get; set; } = 1080;
     public int Height { get; set; } = 1920;
     public int Fps { get; set; } = 60;
+    public int SceneTransitionMs { get; set; } = 250;
 
     // ---------- General ----------
     public bool ConfirmStreamStop { get; set; } = true;

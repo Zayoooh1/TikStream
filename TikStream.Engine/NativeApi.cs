@@ -190,6 +190,15 @@ public static unsafe class NativeApi
             case "stopStream": return Result(Engine().StopStreamAsync());
             case "startRecord": return Result(Engine().StartRecordAsync());
             case "stopRecord": return Result(Engine().StopRecordAsync());
+            case "startReplay": return Result(Engine().StartReplayAsync());
+            case "stopReplay": return Result(Engine().StopReplayAsync());
+            case "saveReplay":
+            {
+                var task = Engine().SaveReplayAsync();
+                if (!task.Wait(30000)) return JsonSerializer.Serialize(new { error = "Replay save timed out" }, Json);
+                var (path, err) = task.Result;
+                return err == null ? Ok(new { ok = true, path }) : JsonSerializer.Serialize(new { error = err }, Json);
+            }
 
             case "levels":
                 return JsonSerializer.Serialize(Engine().Audio.Levels, Json);
