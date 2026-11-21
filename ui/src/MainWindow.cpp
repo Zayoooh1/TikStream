@@ -62,7 +62,7 @@
 #include <utility>
 
 namespace {
-enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgChatOverlay, PgApplicationAudio, PgAudioDevice, PgNone };
+enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgBrowser, PgChatOverlay, PgApplicationAudio, PgAudioDevice, PgNone };
 
 QString newId() { return QUuid::createUuid().toString(QUuid::Id128); }
 
@@ -725,6 +725,7 @@ void MainWindow::buildProperties(QWidget *host)
     m_pages->addWidget(pageText());
     m_pages->addWidget(pageColor());
     m_pages->addWidget(pageMedia());
+    m_pages->addWidget(pageBrowser());
     m_pages->addWidget(pageChatOverlay());
     m_pages->addWidget(pageApplicationAudio());
     m_pages->addWidget(pageAudioDevice());
@@ -1084,6 +1085,79 @@ QWidget *MainWindow::pageMedia()
         editSource([p](QJsonObject &s) { s["filePath"] = QDir::toNativeSeparators(p); });
     });
     connect(m_mediaLoop, &QCheckBox::toggled, this, [this](bool on) { if (!m_loading) editSource([on](QJsonObject &s) { s["loop"] = on; }); });
+    return w;
+}
+
+QWidget *MainWindow::pageBrowser()
+{
+    auto *w = new QWidget;
+    auto *f = form(w);
+
+    auto *urlRow = new QHBoxLayout();
+    m_browserUrl = new QLineEdit;
+    m_browserUrl->setPlaceholderText("https://... or local HTML file");
+    auto *browse = new QPushButton("File…");
+    browse->setToolTip("Select a local HTML file");
+    urlRow->addWidget(m_browserUrl, 1);
+    urlRow->addWidget(browse);
+    f->addRow("URL", urlRow);
+
+    auto *sizeRow = new QHBoxLayout();
+    m_browserWidth = new PaddedSpinBox;
+    m_browserWidth->setRange(64, 3840);
+    m_browserWidth->setSingleStep(10);
+    m_browserWidth->setSuffix(" px");
+    m_browserHeight = new PaddedSpinBox;
+    m_browserHeight->setRange(64, 2160);
+    m_browserHeight->setSingleStep(10);
+    m_browserHeight->setSuffix(" px");
+    sizeRow->addWidget(m_browserWidth, 1);
+    sizeRow->addWidget(new QLabel("×"));
+    sizeRow->addWidget(m_browserHeight, 1);
+    f->addRow("Size", sizeRow);
+
+    m_browserFps = new PaddedSpinBox;
+    m_browserFps->setRange(1, 60);
+    m_browserFps->setSuffix(" fps");
+    f->addRow("FPS", m_browserFps);
+
+    m_browserCss = new QPlainTextEdit;
+    m_browserCss->setFixedHeight(78);
+    m_browserCss->setPlaceholderText("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+    f->addRow("Custom CSS", m_browserCss);
+
+    m_browserMuted = new QCheckBox("Mute browser audio");
+    f->addRow("", m_browserMuted);
+
+    auto *refresh = new QPushButton(themedIcon("refresh"), "  Refresh Cache of Current Page");
+    refresh->setCursor(Qt::PointingHandCursor);
+    f->addRow("", refresh);
+    f->addRow("", hintLabel("Renders web pages, StreamElements, Streamlabs, and TikFinity overlays off-screen with transparent background (Chromium)."));
+
+    connect(m_browserUrl, &QLineEdit::editingFinished, this, [this] {
+        if (m_loading) return;
+        const QString u = m_browserUrl->text().trimmed();
+        editSource([u](QJsonObject &s) { s["browserUrl"] = u; });
+    });
+    connect(browse, &QPushButton::clicked, this, [this] {
+        const QString p = QFileDialog::getOpenFileName(this, "Select HTML File", {}, "HTML Files (*.html *.htm);;All Files (*.*)");
+        if (p.isEmpty()) return;
+        const QString u = QUrl::fromLocalFile(p).toString();
+        m_browserUrl->setText(u);
+        editSource([u](QJsonObject &s) { s["browserUrl"] = u; });
+    });
+    connect(m_browserWidth, &QSpinBox::valueChanged, this, [this](int v) { if (!m_loading) editSource([v](QJsonObject &s) { s["browserWidth"] = v; }); });
+    connect(m_browserHeight, &QSpinBox::valueChanged, this, [this](int v) { if (!m_loading) editSource([v](QJsonObject &s) { s["browserHeight"] = v; }); });
+    connect(m_browserFps, &QSpinBox::valueChanged, this, [this](int v) { if (!m_loading) editSource([v](QJsonObject &s) { s["browserFps"] = v; }); });
+    connect(m_browserCss, &QPlainTextEdit::textChanged, this, [this] {
+        if (!m_loading) editSource([this](QJsonObject &s) { s["browserCss"] = m_browserCss->toPlainText(); });
+    });
+    connect(m_browserMuted, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["browserMuted"] = on; });
+    });
+    connect(refresh, &QPushButton::clicked, this, [this] {
+        editSource([](QJsonObject &s) { s["browserReloadNonce"] = s["browserReloadNonce"].toInt() + 1; });
+    });
     return w;
 }
 
@@ -1748,7 +1822,7 @@ void MainWindow::loadProperties()
     m_srcName->setToolTip(info.name + " — click to rename");
 
     static const QHash<QString, int> pageOf{{"Screen", PgScreen}, {"Window", PgWindow}, {"Camera", PgCamera}, {"Image", PgImage},
-                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
+                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"Browser", PgBrowser}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
                                             {"AudioApplication", PgApplicationAudio}, {"AudioInput", PgAudioDevice}, {"AudioOutput", PgAudioDevice}};
     m_pages->setCurrentIndex(pageOf.value(type, PgNone));
     // Match stacked widget height to the active page instead of the tallest one (avoids blank space)
@@ -1836,6 +1910,13 @@ void MainWindow::loadProperties()
     } else if (type == "Media") {
         m_mediaPath->setText(src["filePath"].toString());
         m_mediaLoop->setChecked(src["loop"].toBool(true));
+    } else if (type == "Browser") {
+        m_browserUrl->setText(src["browserUrl"].toString("https://obsproject.com/browser-source"));
+        m_browserWidth->setValue(src["browserWidth"].toInt(800));
+        m_browserHeight->setValue(src["browserHeight"].toInt(600));
+        m_browserFps->setValue(src["browserFps"].toInt(30));
+        m_browserCss->setPlainText(src["browserCss"].toString("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"));
+        m_browserMuted->setChecked(src["browserMuted"].toBool(false));
     }
 
     m_transform->setVisible(!info.audio);
@@ -2117,6 +2198,15 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             src["colorArgb"] = argbVal(Qt::white); src["outlineArgb"] = argbVal(Qt::black); src["outlineWidth"] = 6; src["backgroundArgb"] = 0;
         }
         if (type == "Color") src["colorArgb"] = argbVal(QColor(0, 0, 0, 160));
+        if (type == "Browser") {
+            src["browserUrl"] = "https://obsproject.com/browser-source";
+            src["browserWidth"] = 800;
+            src["browserHeight"] = 600;
+            src["browserFps"] = 30;
+            src["browserCss"] = "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }";
+            src["browserMuted"] = false;
+            src["browserReloadNonce"] = 0;
+        }
         if (type == "Image" || type == "Media") {
             const QString filter = type == "Image" ? "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
                                                    : "Video (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;All Files (*.*)";

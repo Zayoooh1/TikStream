@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace TikStream.Core;
 
-public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay }
+public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay, Browser }
 public enum FitMode { Free, Fill, FitBlur }
 
 /// <summary>Rectangle in normalized canvas coordinates (0..1, Y axis pointing down).</summary>
@@ -64,6 +64,15 @@ public sealed record SourceDef
     public bool ShowChat { get; set; } = true;
     public bool ShowGifts { get; set; } = true;
     public bool ShowTaps { get; set; } = true;
+
+    // browser source (OBS-style off-screen Chromium)
+    public string BrowserUrl { get; set; } = "https://obsproject.com/browser-source";
+    public int BrowserWidth { get; set; } = 800;
+    public int BrowserHeight { get; set; } = 600;
+    public int BrowserFps { get; set; } = 30;
+    public string BrowserCss { get; set; } = "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }";
+    public bool BrowserMuted { get; set; }
+    public int BrowserReloadNonce { get; set; }
 
     // audio filters (noise suppression, noise gate, compressor, limiter, sync offset)
     public int SyncOffsetMs { get; set; }

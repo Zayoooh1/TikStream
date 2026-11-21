@@ -38,6 +38,7 @@ internal abstract class RtSource : IDisposable
         SourceType.Camera => $"cam|{d.CameraName}|{d.CameraWidth}|{d.CameraHeight}|{d.CameraFps}|{d.CameraFormat}",
         SourceType.Media => $"media|{d.FilePath}|{d.Loop}",
         SourceType.Color => $"color|{d.ColorArgb}",
+        SourceType.Browser => "browser",
         _ => "pixels",
     };
 }
@@ -379,4 +380,45 @@ internal sealed class ColorRt : RtSource
     }
 
     public override void Dispose() { Srv?.Dispose(); _tex.Dispose(); }
+}
+
+// ============================ browser (off-screen Chromium) ============================
+
+internal sealed class BrowserRt : RtSource
+{
+    private readonly BrowserCapture _cap;
+    private ID3D11Texture2D? _tex;
+    private ID3D11ShaderResourceView? _srv;
+
+    public override bool Croppable => false;
+    public override bool PreserveAlpha => true;
+    public override string Status => _cap.Status;
+
+    public BrowserRt(SourceDef def)
+    {
+        Def = def;
+        _cap = new BrowserCapture(def.BrowserUrl, def.BrowserWidth, def.BrowserHeight, def.BrowserFps, def.BrowserCss, def.BrowserMuted, def.BrowserReloadNonce);
+    }
+
+    public override void Update(GpuDevice gpu, Compositor comp)
+    {
+        var d = Def;
+        _cap.Apply(d.BrowserUrl, d.BrowserWidth, d.BrowserHeight, d.BrowserFps, d.BrowserCss, d.BrowserMuted, d.BrowserReloadNonce);
+        int w = Width, h = Height;
+        if (_cap.TryUpload(gpu, ref _tex, ref _srv, ref w, ref h))
+        {
+            Srv = _srv;
+            Width = w;
+            Height = h;
+            Frames = _cap.Frames;
+        }
+    }
+
+    public override void Dispose()
+    {
+        _cap.Dispose();
+        _srv?.Dispose();
+        _tex?.Dispose();
+        Srv = null;
+    }
 }

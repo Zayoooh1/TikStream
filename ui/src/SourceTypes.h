@@ -23,6 +23,7 @@ inline const QList<SourceTypeInfo> &sourceTypes()
         {"Text", "Text", "text", "Text with outline and background — handle, stream title, or info label."},
         {"Media", "Media Source (Video)", "play", "Video file with audio: intro, break screen, or animation. Supports looping."},
         {"Color", "Color Source", "palette", "Solid color rectangle — background, bar, or dimmer."},
+        {"Browser", "Browser Source", "globe", "Web page, alert box, or HTML overlay (StreamElements, TikFinity, Streamlabs) with transparent background."},
         {"ChatOverlay", "LIVE Chat Overlay", "text", "TikTok LIVE chat, gifts, and taps rendered directly on the stream."},
         {"AudioInput", "Audio Input / Microphone", "mic", "Microphone or other audio input device in this scene.", true},
         {"AudioApplication", "Application Audio", "speaker", "Audio from a specific application and its child processes.", true},

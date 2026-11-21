@@ -61,6 +61,7 @@ private:
     QWidget *pageText();
     QWidget *pageColor();
     QWidget *pageMedia();
+    QWidget *pageBrowser();
     QWidget *pageChatOverlay();
     QFrame *buildTransform();
     void openVideoFiltersDialog(const QString &itemId);
@@ -190,9 +191,10 @@ private:
     QWidget *m_windowTarget = nullptr;
     QCheckBox *m_screenCursor = nullptr, *m_windowCursor = nullptr;
     QComboBox *m_camDevice = nullptr, *m_camMode = nullptr;
-    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr;
-    QCheckBox *m_mediaLoop = nullptr;
-    QPlainTextEdit *m_text = nullptr;
+    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr;
+    QCheckBox *m_mediaLoop = nullptr, *m_browserMuted = nullptr;
+    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr;
+    QPlainTextEdit *m_text = nullptr, *m_browserCss = nullptr;
     QFontComboBox *m_font = nullptr;
     QSpinBox *m_fontSize = nullptr, *m_outlineW = nullptr;
     QCheckBox *m_bold = nullptr;
