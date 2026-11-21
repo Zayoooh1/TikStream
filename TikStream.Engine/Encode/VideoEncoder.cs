@@ -11,7 +11,7 @@ namespace TikStream.Encode;
 /// H.264 via NVENC, input: NV12 textures from FFmpeg's D3D11 pool — the compositor renders straight into them.
 /// Frames never leave VRAM.
 /// </summary>
-public sealed record VideoEncoderOptions(int Fps, int Kbps, string Preset, string Profile, int KeyframeSec, int BFrames, bool SpatialAq, bool LookAhead, bool ZeroFpsImpact = false);
+public sealed record VideoEncoderOptions(int Fps, int Kbps, string Preset, string Profile, int KeyframeSec, int BFrames, bool SpatialAq, bool LookAhead, bool ZeroFpsImpact = false, string Codec = "h264");
 
 public sealed unsafe class VideoEncoder : IDisposable
 {
@@ -49,9 +49,21 @@ public sealed unsafe class VideoEncoder : IDisposable
         ((AVD3D11VAFramesContext*)fc->hwctx)->BindFlags = (uint)D3D.BindFlags.RenderTarget;
         FF.Check(ffmpeg.av_hwframe_ctx_init(_hwFrames), "av_hwframe_ctx_init");
 
-        var codec = ffmpeg.avcodec_find_encoder_by_name("h264_nvenc");
+        string wantedName = o.Codec switch
+        {
+            "hevc" => "hevc_nvenc",
+            "av1" => "av1_nvenc",
+            _ => "h264_nvenc",
+        };
+        var codec = ffmpeg.avcodec_find_encoder_by_name(wantedName);
+        if (codec == null)
+        {
+            Log.Warn($"Encoder '{wantedName}' not available in FFmpeg, falling back to h264_nvenc.");
+            wantedName = "h264_nvenc";
+            codec = ffmpeg.avcodec_find_encoder_by_name(wantedName);
+        }
         if (codec == null) throw new InvalidOperationException("h264_nvenc encoder not found in FFmpeg.");
-        CodecName = "h264_nvenc";
+        CodecName = wantedName;
 
         _ctx = ffmpeg.avcodec_alloc_context3(codec);
         _ctx->width = width;
@@ -60,12 +72,12 @@ public sealed unsafe class VideoEncoder : IDisposable
         _ctx->framerate = new AVRational { num = fps, den = 1 };
         _ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_D3D11;
         _ctx->hw_frames_ctx = ffmpeg.av_buffer_ref(_hwFrames);
-        _ctx->gop_size = fps * Math.Clamp(o.KeyframeSec, 1, 10); // TikTok/RTMP: keyframe every 2 s
-        _ctx->max_b_frames = Math.Clamp(o.BFrames, 0, 4);
+        _ctx->gop_size = fps * Math.Clamp(o.KeyframeSec, 1, 10);
+        _ctx->max_b_frames = wantedName == "av1_nvenc" ? 0 : Math.Clamp(o.BFrames, 0, 4);
         _ctx->bit_rate = kbps * 1000L;
         _ctx->rc_max_rate = kbps * 1000L;
-        _ctx->rc_buffer_size = kbps * 1000;  // 1 s buffer = steady CBR
-        _ctx->profile = o.Profile == "main" ? 77 : 100;
+        _ctx->rc_buffer_size = kbps * 1000;
+        if (wantedName == "h264_nvenc") _ctx->profile = o.Profile == "main" ? 77 : 100;
         _ctx->color_range = AVColorRange.AVCOL_RANGE_MPEG;
         _ctx->colorspace = AVColorSpace.AVCOL_SPC_BT709;
         _ctx->color_primaries = AVColorPrimaries.AVCOL_PRI_BT709;
@@ -84,18 +96,21 @@ public sealed unsafe class VideoEncoder : IDisposable
             ffmpeg.av_dict_set(&opts, "multipass", "disabled", 0);
             ffmpeg.av_dict_set(&opts, "temporal-aq", "0", 0);
         }
-        ffmpeg.av_dict_set(&opts, "profile", o.Profile == "main" ? "main" : "high", 0);
+        if (wantedName == "h264_nvenc") ffmpeg.av_dict_set(&opts, "profile", o.Profile == "main" ? "main" : "high", 0);
+        else if (wantedName == "hevc_nvenc") ffmpeg.av_dict_set(&opts, "profile", "main", 0);
         ffmpeg.av_dict_set(&opts, "rc", "cbr", 0);
         ffmpeg.av_dict_set(&opts, "spatial-aq", effAq ? "1" : "0", 0);
         if (effLookAhead) ffmpeg.av_dict_set(&opts, "rc-lookahead", "20", 0);
-        if (_ctx->max_b_frames == 0) ffmpeg.av_dict_set(&opts, "b_ref_mode", "disabled", 0);
-        else ffmpeg.av_dict_set(&opts, "b_ref_mode", "middle", 0);
+        if (wantedName != "av1_nvenc")
+        {
+            if (_ctx->max_b_frames == 0) ffmpeg.av_dict_set(&opts, "b_ref_mode", "disabled", 0);
+            else ffmpeg.av_dict_set(&opts, "b_ref_mode", "middle", 0);
+        }
         ffmpeg.av_dict_set(&opts, "forced-idr", "1", 0);
         int r = ffmpeg.avcodec_open2(_ctx, codec, &opts);
         if (r < 0)
         {
-            // older drivers / hardware limits — retry without B-frames
-            Log.Warn("NVENC failed to start with B-frames (" + FF.Err(r) + "), retrying without.");
+            Log.Warn($"{wantedName} failed to start ({FF.Err(r)}), retrying with simplified options.");
             ffmpeg.av_dict_free(&opts);
             _ctx->max_b_frames = 0;
             ffmpeg.av_dict_set(&opts, "preset", effPreset, 0);
@@ -104,8 +119,8 @@ public sealed unsafe class VideoEncoder : IDisposable
             r = ffmpeg.avcodec_open2(_ctx, codec, &opts);
         }
         ffmpeg.av_dict_free(&opts);
-        FF.Check(r, "avcodec_open2(h264_nvenc)");
-        Log.Info($"NVENC: {width}x{height}@{fps}, {kbps} kbps CBR, preset {effPreset}, profile {o.Profile}, keyframe {o.KeyframeSec}s, B-frames {_ctx->max_b_frames}, AQ {effAq}, look-ahead {effLookAhead}{(o.ZeroFpsImpact ? " [Zero FPS Impact]" : "")}");
+        FF.Check(r, $"avcodec_open2({wantedName})");
+        Log.Info($"NVENC ({wantedName}): {width}x{height}@{fps}, {kbps} kbps CBR, preset {effPreset}, keyframe {o.KeyframeSec}s, B-frames {_ctx->max_b_frames}, AQ {effAq}, look-ahead {effLookAhead}{(o.ZeroFpsImpact ? " [Zero FPS Impact]" : "")}");
     }
 
     /// <summary>Acquires a free texture from the pool and returns Y and UV render target views.</summary>

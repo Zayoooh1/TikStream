@@ -32,7 +32,8 @@ public static unsafe class NativeApi
         {
             // Read-only queries and render-queue commands do not wait on settings saves or output operations.
             if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection"
-                  or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion")
+                  or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion"
+                  or "browserFrame" or "browserInteract" or "playAlertSound")
                 result = Dispatch(m, a);
             else lock (Lock) result = Dispatch(m, a);
         }
@@ -237,6 +238,33 @@ public static unsafe class NativeApi
             {
                 var err = AutoUpdater.LaunchInstaller();
                 return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
+            }
+
+            case "browserFrame":
+            {
+                var id = j["id"]?.GetValue<string>() ?? "";
+                var bmp = Engine().GetBrowser(id)?.SnapshotBmp();
+                return bmp == null ? Ok(new { ok = false }) : Ok(new { ok = true, bmp = Convert.ToBase64String(bmp) });
+            }
+
+            case "browserInteract":
+            {
+                var id = j["id"]?.GetValue<string>() ?? "";
+                var b = Engine().GetBrowser(id);
+                if (b == null) return Ok(new { ok = false });
+                var kind = j["kind"]?.GetValue<string>() ?? "";
+                if (kind == "move") b.SendMouseMove(j["x"]?.GetValue<int>() ?? 0, j["y"]?.GetValue<int>() ?? 0, j["leave"]?.GetValue<bool>() ?? false);
+                else if (kind == "click") b.SendMouseClick(j["x"]?.GetValue<int>() ?? 0, j["y"]?.GetValue<int>() ?? 0, j["button"]?.GetValue<int>() ?? 0, j["up"]?.GetValue<bool>() ?? false, j["clicks"]?.GetValue<int>() ?? 1);
+                else if (kind == "wheel") b.SendMouseWheel(j["x"]?.GetValue<int>() ?? 0, j["y"]?.GetValue<int>() ?? 0, j["dx"]?.GetValue<int>() ?? 0, j["dy"]?.GetValue<int>() ?? 0);
+                else if (kind == "key") b.SendKey(j["ev"]?.GetValue<string>() ?? "down", j["vk"]?.GetValue<int>() ?? 0, j["ch"]?.GetValue<int>() ?? 0);
+                return Ok();
+            }
+
+            case "playAlertSound":
+            {
+                var path = j["path"]?.GetValue<string>() ?? "";
+                AudioEngine.PlayOneShot(path);
+                return Ok();
             }
 
             case "shutdown":

@@ -505,7 +505,12 @@ void LiveChat::appendMessages(const QJsonArray &messages)
         if (message["kind"] == "gift") {
             const auto sender = message["senderId"].toString().left(160);
             m_gifts->add(sender.isEmpty() ? nick : sender, nick, text);
+            emit alertTriggered("gift", nick, text);
             giftChanged = true;
+            continue;
+        }
+        if (message["kind"] == "follow") {
+            emit alertTriggered("follow", nick, "followed the channel!");
             continue;
         }
         if (!chatChanged) {

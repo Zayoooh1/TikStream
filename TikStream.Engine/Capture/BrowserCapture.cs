@@ -403,6 +403,66 @@ public sealed unsafe class BrowserCapture : IDisposable
         }
     }
 
+    public void SendMouseMove(int x, int y, bool mouseLeave = false)
+    {
+        ChromiumWebBrowser? b; lock (_stateLock) b = _browser;
+        b?.GetBrowserHost()?.SendMouseMoveEvent(new MouseEvent(x, y, CefEventFlags.None), mouseLeave);
+    }
+
+    public void SendMouseClick(int x, int y, int button, bool mouseUp, int clickCount)
+    {
+        ChromiumWebBrowser? b; lock (_stateLock) b = _browser;
+        var host = b?.GetBrowserHost();
+        if (host == null) return;
+        var btn = button switch { 1 => MouseButtonType.Middle, 2 => MouseButtonType.Right, _ => MouseButtonType.Left };
+        host.SendFocusEvent(true);
+        host.SendMouseClickEvent(new MouseEvent(x, y, CefEventFlags.None), btn, mouseUp, Math.Max(1, clickCount));
+    }
+
+    public void SendMouseWheel(int x, int y, int deltaX, int deltaY)
+    {
+        ChromiumWebBrowser? b; lock (_stateLock) b = _browser;
+        b?.GetBrowserHost()?.SendMouseWheelEvent(new MouseEvent(x, y, CefEventFlags.None), deltaX, deltaY);
+    }
+
+    public void SendKey(string kind, int keyCode, int charCode)
+    {
+        ChromiumWebBrowser? b; lock (_stateLock) b = _browser;
+        var host = b?.GetBrowserHost();
+        if (host == null) return;
+        var ev = new KeyEvent
+        {
+            Type = kind switch { "up" => KeyEventType.KeyUp, "char" => KeyEventType.Char, _ => KeyEventType.RawKeyDown },
+            WindowsKeyCode = kind == "char" ? charCode : keyCode,
+            NativeKeyCode = keyCode,
+            FocusOnEditableField = true,
+        };
+        host.SendKeyEvent(ev);
+    }
+
+    /// <summary>Returns a lightweight 32-bit BGRA BMP snapshot of the current page for the Interact dialog.</summary>
+    public byte[]? SnapshotBmp()
+    {
+        lock (_frameLock)
+        {
+            if (_frameBuf == null || _frameW <= 0 || _frameH <= 0) return null;
+            int w = _frameW, h = _frameH;
+            int dataSize = w * h * 4;
+            var bmp = new byte[54 + dataSize];
+            bmp[0] = (byte)'B'; bmp[1] = (byte)'M';
+            BitConverter.TryWriteBytes(bmp.AsSpan(2, 4), bmp.Length);
+            BitConverter.TryWriteBytes(bmp.AsSpan(10, 4), 54);
+            BitConverter.TryWriteBytes(bmp.AsSpan(14, 4), 40);
+            BitConverter.TryWriteBytes(bmp.AsSpan(18, 4), w);
+            BitConverter.TryWriteBytes(bmp.AsSpan(22, 4), -h); // top-down DIB
+            BitConverter.TryWriteBytes(bmp.AsSpan(26, 2), (short)1);
+            BitConverter.TryWriteBytes(bmp.AsSpan(28, 2), (short)32);
+            BitConverter.TryWriteBytes(bmp.AsSpan(34, 4), dataSize);
+            Buffer.BlockCopy(_frameBuf, 0, bmp, 54, dataSize);
+            return bmp;
+        }
+    }
+
     private sealed class RawBgraRenderHandler : DefaultRenderHandler
     {
         private readonly Action<IntPtr, int, int> _onPaint;

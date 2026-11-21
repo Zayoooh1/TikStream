@@ -20,6 +20,11 @@ public sealed class AudioEngine : IDisposable
     private readonly MixingSampleProvider _mixer = new(MixFormat) { ReadFully = true };
     private readonly Dictionary<string, Input> _inputs = new();
     private readonly object _lock = new();
+    private WasapiOut? _monitorOut;
+    private BufferedWaveProvider? _monitorBuf;
+    private float[] _monitorMix = new float[2048];
+    private float[] _monitorTmp = new float[2048];
+    private byte[] _monitorBytes = new byte[2048 * 4];
 
     /// <summary>Peak levels (0..1) per source — used for mixer meters.</summary>
     public IReadOnlyDictionary<string, float> Levels
@@ -85,6 +90,7 @@ public sealed class AudioEngine : IDisposable
                 if (_inputs.TryGetValue(d.Id, out var inp))
                 {
                     inp.SetVolume(!d.Muted && (d.GlobalAudio == true || audible?.Contains(d.Id) == true) ? d.Volume : 0);
+                    inp.SetMonitorMode(d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
                 }
@@ -131,9 +137,12 @@ public sealed class AudioEngine : IDisposable
     {
         lock (_lock)
             if (_inputs.TryGetValue(id, out var i))
+            {
+                i.SetMonitorMode(d.MonitorMode);
                 i.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                     d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio,
                     d.LimiterEnabled, d.LimiterCeilingDb);
+            }
     }
 
     public void Unregister(string id)
@@ -151,6 +160,7 @@ public sealed class AudioEngine : IDisposable
     public void Read(float[] buffer, int frames, Dictionary<string, float[]>? perSource = null)
     {
         int samples = frames * Channels;
+        bool hasMonitor = false;
         lock (_lock)
         {
             foreach (var i in _inputs.Values) i.TrimLatency();
@@ -164,6 +174,20 @@ public sealed class AudioEngine : IDisposable
                     else Array.Clear(buf, 0, Math.Min(buf.Length, samples));
                 }
             }
+            foreach (var inp in _inputs.Values)
+            {
+                if (!inp.IsMonitored) continue;
+                if (!hasMonitor)
+                {
+                    if (_monitorMix.Length < samples) { _monitorMix = new float[samples]; _monitorTmp = new float[samples]; _monitorBytes = new byte[samples * 4]; }
+                    Array.Clear(_monitorMix, 0, samples);
+                    hasMonitor = true;
+                }
+                inp.CopyLastSamples(_monitorTmp, samples);
+                for (int k = 0; k < samples; k++) _monitorMix[k] += _monitorTmp[k];
+            }
+            if (hasMonitor) FeedMonitorLocked(samples);
+            else if (_monitorOut != null) StopMonitorLocked();
         }
         for (int i = 0; i < samples; i++)
         {
@@ -172,10 +196,66 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
+    private void FeedMonitorLocked(int samples)
+    {
+        try
+        {
+            if (_monitorOut == null)
+            {
+                _monitorBuf = new BufferedWaveProvider(MixFormat) { BufferDuration = TimeSpan.FromMilliseconds(300), DiscardOnBufferOverflow = true, ReadFully = true };
+                _monitorOut = new WasapiOut(AudioClientShareMode.Shared, 40);
+                _monitorOut.Init(_monitorBuf);
+                _monitorOut.Play();
+            }
+            for (int i = 0; i < samples; i++)
+            {
+                float v = _monitorMix[i];
+                if (v > 1f) _monitorMix[i] = 1f; else if (v < -1f) _monitorMix[i] = -1f;
+            }
+            int byteCount = samples * 4;
+            Buffer.BlockCopy(_monitorMix, 0, _monitorBytes, 0, byteCount);
+            _monitorBuf!.AddSamples(_monitorBytes, 0, byteCount);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Audio monitoring: " + ex.Message);
+            StopMonitorLocked();
+        }
+    }
+
+    private void StopMonitorLocked()
+    {
+        try { _monitorOut?.Stop(); } catch { }
+        try { _monitorOut?.Dispose(); } catch { }
+        _monitorOut = null;
+        _monitorBuf = null;
+    }
+
+    /// <summary>Plays a one-shot alert sound file (.wav/.mp3) on the default output device without blocking.</summary>
+    public static void PlayOneShot(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        Task.Run(() =>
+        {
+            try
+            {
+                using var reader = new AudioFileReader(path);
+                using var wo = new WasapiOut(AudioClientShareMode.Shared, 60);
+                using var done = new ManualResetEventSlim(false);
+                wo.PlaybackStopped += (_, _) => done.Set();
+                wo.Init(reader);
+                wo.Play();
+                done.Wait(TimeSpan.FromSeconds(15));
+            }
+            catch (Exception ex) { Log.Warn("Alert sound: " + ex.Message); }
+        });
+    }
+
     public void Dispose()
     {
         lock (_lock)
         {
+            StopMonitorLocked();
             foreach (var i in _inputs.Values) i.Dispose(_mixer);
             _inputs.Clear();
         }
@@ -210,8 +290,15 @@ public sealed class AudioEngine : IDisposable
         public string Name { get; }
         public string Key { get; private init; } = "";
         public bool IsDevice => _capture != null;
+        public bool IsMonitored { get; private set; }
         public volatile bool Stopped;
         public float Peak;
+
+        public void SetMonitorMode(string? mode)
+        {
+            IsMonitored = mode is "MonitorOnly" or "MonitorAndOutput";
+            _tap.SuppressOutput = mode == "MonitorOnly";
+        }
 
         private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer)
         {
@@ -445,11 +532,12 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    /// <summary>Captures the most recently mixed block per input for multi-track MKV recording, zero allocations.</summary>
+    /// <summary>Captures the most recently mixed block per input for multi-track MKV recording and audio monitoring, zero allocations.</summary>
     private sealed class TapSampleProvider(ISampleProvider source) : ISampleProvider
     {
         private float[] _last = new float[2048];
         private int _lastCount;
+        public volatile bool SuppressOutput;
         public WaveFormat WaveFormat => source.WaveFormat;
 
         public int Read(float[] buffer, int offset, int count)
@@ -459,6 +547,7 @@ public sealed class AudioEngine : IDisposable
             if (read > 0) Array.Copy(buffer, offset, _last, 0, read);
             if (read < count) Array.Clear(_last, read, count - read);
             _lastCount = count;
+            if (SuppressOutput && read > 0) Array.Clear(buffer, offset, read);
             return read;
         }
 

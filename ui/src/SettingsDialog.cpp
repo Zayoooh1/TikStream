@@ -205,8 +205,11 @@ QWidget *SettingsDialog::pageGeneral()
     m_confirmStop->setChecked(m_s["confirmStreamStop"].toBool(true));
     m_autoRecord = track(new QCheckBox("Automatically record when streaming"));
     m_autoRecord->setChecked(m_s["recordToFile"].toBool());
+    m_minToTray = track(new QCheckBox("Minimize to system tray when closing window"));
+    m_minToTray->setChecked(m_s["minimizeToTray"].toBool(false));
     f->addRow(m_confirmStop);
     f->addRow(m_autoRecord);
+    f->addRow(m_minToTray);
 
     QFormLayout *f2;
     v->addWidget(card(w, &f2, "Preview", "How items behave when dragging them with the mouse."));
@@ -505,6 +508,12 @@ QWidget *SettingsDialog::pageOutput()
     m_recFormat->addItem("MP4 (.mp4) — fragmented, ready for editing", "mp4");
     m_recFormat->setCurrentIndex(m_s["recordFormat"].toString("mkv") == "mp4" ? 1 : 0);
     fr->addRow("Format", m_recFormat);
+    m_recCodec = track(new QComboBox);
+    m_recCodec->addItem("H.264 NVENC (shared with stream — zero extra GPU load)", "h264");
+    m_recCodec->addItem("HEVC / H.265 NVENC (better compression)", "hevc");
+    m_recCodec->addItem("AV1 NVENC (RTX 40xx+ — best quality per bitrate)", "av1");
+    m_recCodec->setCurrentIndex(std::max(0, m_recCodec->findData(m_s["recordCodec"].toString("h264"))));
+    fr->addRow("Recording Codec", m_recCodec);
     m_multiTrack = track(new QCheckBox("Multi-track audio (MKV only — Track 1: Full Mix, Tracks 2+: separate audio sources)"));
     m_multiTrack->setChecked(m_s["multiTrackAudio"].toBool(false));
     auto updateMultiTrack = [this] {
@@ -523,7 +532,7 @@ QWidget *SettingsDialog::pageOutput()
     fb->addRow("Buffer Length", m_replaySec);
     fb->addRow("", hint("Use the Controls dock or Hotkeys to start/stop the replay buffer and save instant clips to your recording folder."));
 
-    for (QWidget *x : std::initializer_list<QWidget *>{m_bitrate, m_keyframe, m_preset, m_profile, m_bframes, m_zeroFpsImpact, m_aq, m_lookahead, m_audioBitrate, m_recFormat, m_replaySec})
+    for (QWidget *x : std::initializer_list<QWidget *>{m_bitrate, m_keyframe, m_preset, m_profile, m_bframes, m_zeroFpsImpact, m_aq, m_lookahead, m_audioBitrate, m_recFormat, m_recCodec, m_replaySec})
         x->setEnabled(!m_live);
     updateMultiTrack();
     if (m_zeroFpsImpact->isChecked()) {
@@ -588,6 +597,26 @@ QWidget *SettingsDialog::pageVideo()
     f->addRow("Scene Transition (Fade)", m_transitionMs);
     f->addRow(hint("0 ms = instant cut. GPU crossfade runs directly on the canvas with zero extra CPU cost."));
     f->addRow(hint("NVENC requires even width and height. Odd values will be rounded down."));
+
+    QFormLayout *fd;
+    v->addWidget(card(w, &fd, "Dual-Canvas Recording (Horizontal + Vertical)", "Record a second resolution (e.g. 1920×1080 horizontal VOD) simultaneously while streaming vertical 9:16."));
+    m_dualCanvas = track(new QCheckBox("Enable Dual-Canvas recording output"));
+    m_dualCanvas->setChecked(m_s["dualCanvasEnabled"].toBool(false));
+    fd->addRow("", m_dualCanvas);
+    auto *dualRow = new QHBoxLayout();
+    m_dualW = track(new PaddedSpinBox);
+    m_dualW->setRange(128, 4096); m_dualW->setSingleStep(2); m_dualW->setSuffix(" px"); m_dualW->setValue(m_s["dualCanvasWidth"].toInt(1920));
+    m_dualH = track(new PaddedSpinBox);
+    m_dualH->setRange(128, 4096); m_dualH->setSingleStep(2); m_dualH->setSuffix(" px"); m_dualH->setValue(m_s["dualCanvasHeight"].toInt(1080));
+    dualRow->addWidget(m_dualW, 1);
+    dualRow->addWidget(new QLabel("×"));
+    dualRow->addWidget(m_dualH, 1);
+    fd->addRow("Recording Canvas", dualRow);
+    auto updateDual = [this](bool on) { m_dualW->setEnabled(!m_live && on); m_dualH->setEnabled(!m_live && on); };
+    connect(m_dualCanvas, &QCheckBox::toggled, this, updateDual);
+    m_dualCanvas->setEnabled(!m_live);
+    updateDual(m_dualCanvas->isChecked());
+
     for (QWidget *field : std::initializer_list<QWidget *>{preset, m_videoWidth, m_videoHeight, m_fps})
         field->setEnabled(!m_live);
     return scrollPage(w, v);
@@ -692,6 +721,7 @@ QJsonObject SettingsDialog::result() const
     QJsonObject s = m_s;
     s["confirmStreamStop"] = m_confirmStop->isChecked();
     s["recordToFile"] = m_autoRecord->isChecked();
+    s["minimizeToTray"] = m_minToTray->isChecked();
     s["snapping"] = m_snapping->isChecked();
     s["autoUpdateEnabled"] = m_autoUpdate->isChecked();
 
@@ -713,6 +743,7 @@ QJsonObject SettingsDialog::result() const
     s["audioBitrateKbps"] = m_audioBitrate->currentData().toInt();
     s["recordFolder"] = m_folder->text().trimmed();
     s["recordFormat"] = m_recFormat->currentData().toString();
+    s["recordCodec"] = m_recCodec->currentData().toString();
     s["multiTrackAudio"] = m_multiTrack->isChecked();
     s["replayBufferSec"] = m_replaySec->value();
 
@@ -720,6 +751,9 @@ QJsonObject SettingsDialog::result() const
     s["height"] = m_videoHeight->value() & ~1;
     s["fps"] = m_fps->value();
     s["sceneTransitionMs"] = m_transitionMs->value();
+    s["dualCanvasEnabled"] = m_dualCanvas->isChecked();
+    s["dualCanvasWidth"] = m_dualW->value() & ~1;
+    s["dualCanvasHeight"] = m_dualH->value() & ~1;
 
     // Global audio devices are active across all scenes.
     QJsonArray sources = s["sources"].toArray();

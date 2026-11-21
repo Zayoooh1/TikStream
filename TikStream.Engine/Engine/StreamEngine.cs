@@ -83,6 +83,8 @@ public sealed unsafe class StreamEngine : IDisposable
 
     // outputs
     private VideoEncoder? _venc;
+    private VideoEncoder? _recVenc;    // dedicated encoder when RecordCodec != h264 or DualCanvas is enabled
+    private Compositor? _dualComp;     // secondary horizontal/custom canvas for simultaneous dual-canvas recording
     private AudioEncoder? _aenc;
     private readonly object _audioEncLock = new();
     private readonly List<(string SourceId, string Title, AudioEncoder Enc, float[] Buf)> _extraAudio = new();
@@ -254,6 +256,9 @@ public sealed unsafe class StreamEngine : IDisposable
     public void RequestKeyframe() => _forceKey = true;
     public void ClearError() => _lastError = "";
 
+    public BrowserCapture? GetBrowser(string sourceId) =>
+        _sources.TryGetValue(sourceId, out var rt) && rt is BrowserRt br ? br.Capture : null;
+
     // ===================== streaming / recording =====================
 
     public Task<string?> StartStreamAsync() => RunOnRender(() =>
@@ -359,7 +364,25 @@ public sealed unsafe class StreamEngine : IDisposable
             }
         }
 
-        AddOutput(new StreamOutput("File", path, _venc!, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
+        var recVenc = _venc!;
+        var s = _scene;
+        bool needDedicatedRecVenc = s.DualCanvasEnabled || (s.RecordCodec is "hevc" or "av1");
+        if (needDedicatedRecVenc)
+        {
+            int rw = s.DualCanvasEnabled ? Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096) : _comp.Width;
+            int rh = s.DualCanvasEnabled ? Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096) : _comp.Height;
+            if (s.DualCanvasEnabled)
+            {
+                _dualComp?.Dispose();
+                _dualComp = new Compositor(Gpu, rw, rh);
+            }
+            _recVenc?.Dispose();
+            _recVenc = new VideoEncoder(Gpu, rw, rh, new VideoEncoderOptions(
+                _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
+            recVenc = _recVenc;
+        }
+
+        AddOutput(new StreamOutput("File", path, recVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
         _recordStart = _clock.ElapsedTicks;
     }
 
@@ -433,6 +456,14 @@ public sealed unsafe class StreamEngine : IDisposable
         _outputs = _outputs.Where(x => x != o).ToArray();
         if (name == "File")
         {
+            if (_recVenc != null)
+            {
+                try { _recVenc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, o)); } catch { }
+                _recVenc.Dispose();
+                _recVenc = null;
+            }
+            _dualComp?.Dispose();
+            _dualComp = null;
             lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
         }
         if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o);
@@ -467,7 +498,12 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         var pkt = (AVPacket*)p;
         pkt->stream_index = streamIndex;
-        foreach (var o in _outputs) o.Enqueue(pkt);
+        bool dedicatedFileVideo = streamIndex == StreamOutput.VideoIndex && _recVenc != null;
+        foreach (var o in _outputs)
+        {
+            if (dedicatedFileVideo && o.Name == "File") continue;
+            o.Enqueue(pkt);
+        }
         _replay?.Enqueue(pkt, streamIndex);
         ffmpeg.av_packet_free(&pkt);
     }
@@ -767,6 +803,18 @@ public sealed unsafe class StreamEngine : IDisposable
                 bool key = _forceKey;
                 _forceKey = false;
                 _venc.Encode(frame, pts, key, p => Deliver(p, StreamOutput.VideoIndex));
+                if (_recVenc != null)
+                {
+                    var recComp = _dualComp ?? _comp;
+                    if (_dualComp != null)
+                    {
+                        _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
+                    }
+                    var rFrame = _recVenc.AcquireFrame(out var ry, out var ruv);
+                    recComp.ConvertToNv12(ry, ruv);
+                    ctx.Flush();
+                    _recVenc.Encode(rFrame, pts, key, p => DeliverToFile(p, StreamOutput.VideoIndex));
+                }
                 _lastPts = pts;
                 _encodedFrames++;
             }

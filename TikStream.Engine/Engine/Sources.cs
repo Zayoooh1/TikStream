@@ -390,6 +390,7 @@ internal sealed class BrowserRt : RtSource
     private ID3D11Texture2D? _tex;
     private ID3D11ShaderResourceView? _srv;
 
+    public BrowserCapture Capture => _cap;
     public override bool Croppable => false;
     public override bool PreserveAlpha => true;
     public override string Status => _cap.Status;

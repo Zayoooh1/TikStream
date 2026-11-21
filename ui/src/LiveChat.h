@@ -34,6 +34,7 @@ public:
 signals:
     void overlayChanged();
     void accountChanged(const QString &username);
+    void alertTriggered(const QString &kind, const QString &user, const QString &detail);
 
 protected:
     void showEvent(QShowEvent *event) override;

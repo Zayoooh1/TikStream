@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace TikStream.Core;
 
-public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay, Browser }
+public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay, Browser, AlertBox }
 public enum FitMode { Free, Fill, FitBlur }
 
 /// <summary>Rectangle in normalized canvas coordinates (0..1, Y axis pointing down).</summary>
@@ -57,6 +57,7 @@ public sealed record SourceDef
     public string DeviceId { get; set; } = "";      // "" = system default device
     public float Volume { get; set; } = 1f;
     public bool Muted { get; set; }
+    public string MonitorMode { get; set; } = "Off"; // "Off" | "MonitorOnly" | "MonitorAndOutput"
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? GlobalAudio { get; set; }
 
@@ -73,6 +74,13 @@ public sealed record SourceDef
     public string BrowserCss { get; set; } = "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }";
     public bool BrowserMuted { get; set; }
     public int BrowserReloadNonce { get; set; }
+
+    // native TikTok LIVE alert box
+    public string AlertSoundPath { get; set; } = "";
+    public string AlertImagePath { get; set; } = "";
+    public int AlertDurationSec { get; set; } = 5;
+    public bool AlertOnGift { get; set; } = true;
+    public bool AlertOnFollow { get; set; } = true;
 
     // audio filters (noise suppression, noise gate, compressor, limiter, sync offset)
     public int SyncOffsetMs { get; set; }
@@ -99,6 +107,7 @@ public sealed class SceneItem
     public string Id { get; set; } = SourceDef.NewId();
     public string SourceId { get; set; } = "";
     public bool Visible { get; set; } = true;
+    public bool Locked { get; set; }
     public float X { get; set; }
     public float Y { get; set; }
     public float W { get; set; } = 1;
@@ -156,6 +165,10 @@ public sealed class AppSettings
     public int AudioBitrateKbps { get; set; } = 160;
     public string RecordFolder { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
     public string RecordFormat { get; set; } = "mkv";
+    public string RecordCodec { get; set; } = "h264";
+    public bool DualCanvasEnabled { get; set; }
+    public int DualCanvasWidth { get; set; } = 1920;
+    public int DualCanvasHeight { get; set; } = 1080;
     public bool MultiTrackAudio { get; set; }
     public bool ReplayBufferEnabled { get; set; }
     public int ReplayBufferSec { get; set; } = 30;
@@ -183,6 +196,7 @@ public sealed class AppSettings
 
     // ---------- Scenes and sources ----------
     public bool AutoUpdateEnabled { get; set; } = true;
+    public bool MinimizeToTray { get; set; }
     public List<SourceDef> Sources { get; set; } = new();
     public List<Scene> Scenes { get; set; } = new();
     public string ActiveSceneId { get; set; } = "";

@@ -39,6 +39,8 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -51,19 +53,21 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
+#include <QSystemTrayIcon>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <cmath>
 #include <memory>
 #include <thread>
 #include <utility>
 
 namespace {
-enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgBrowser, PgChatOverlay, PgApplicationAudio, PgAudioDevice, PgNone };
+enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgBrowser, PgAlertBox, PgChatOverlay, PgApplicationAudio, PgAudioDevice, PgNone };
 
 QString newId() { return QUuid::createUuid().toString(QUuid::Id128); }
 
@@ -407,6 +411,17 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     buildCentral();
     buildDocks();
     buildStatusBar();
+    setupTray();
+
+    m_alertTimer = new QTimer(this);
+    m_alertTimer->setSingleShot(true);
+    connect(m_alertTimer, &QTimer::timeout, this, [this] {
+        m_alertKind.clear();
+        m_alertUser.clear();
+        m_alertDetail.clear();
+        ++m_alertRevision;
+        updateAlertOverlays();
+    });
 
     QSettings qs("TikStream", "UI2");
     restoreGeometry(qs.value("geometry").toByteArray());
@@ -465,9 +480,13 @@ void MainWindow::buildMenu()
     file->addAction(themedIcon("folder"), "Show Recordings", this, [this] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_s["recordFolder"].toString()));
     });
+    file->addSeparator();
+    file->addAction("Export Scene Collection…", this, &MainWindow::exportSceneCollection);
+    file->addAction("Import Scene Collection…", this, &MainWindow::importSceneCollection);
+    file->addSeparator();
     file->addAction(themedIcon("gear"), "Settings", QKeySequence("Ctrl+,"), this, &MainWindow::openSettings);
     file->addSeparator();
-    file->addAction(themedIcon("exit"), "Exit", this, &QWidget::close);
+    file->addAction(themedIcon("exit"), "Exit", this, [this] { m_reallyQuit = true; close(); });
 
     auto *edit = menuBar()->addMenu("Edit");
     edit->addAction("Undo", QKeySequence::Undo, this, &MainWindow::undo);
@@ -488,6 +507,7 @@ void MainWindow::buildMenu()
 
     auto *view = menuBar()->addMenu("View");
     view->addAction(themedIcon("refresh"), "Refresh Windows, Displays, and Cameras", this, [this] { refreshCaptureList(); refreshCameras(); });
+    view->addAction(themedIcon("sliders"), "Stats & Performance Graph…", this, &MainWindow::openStatsGraphDialog);
     view->addSeparator();
     auto *panels = view->addMenu("Dock Layout");
     panels->setObjectName("panelsMenu");
@@ -639,6 +659,7 @@ void MainWindow::buildDocks()
     m_liveChat = new LiveChat;
     m_liveChat->setAccount(m_s["tikTokUsername"].toString());
     connect(m_liveChat, &LiveChat::overlayChanged, this, &MainWindow::updateChatOverlays);
+    connect(m_liveChat, &LiveChat::alertTriggered, this, &MainWindow::triggerAlert);
     connect(m_liveChat, &LiveChat::accountChanged, this, [this](const QString &nick) {
         m_s["tikTokUsername"] = nick;
         pushSettings();
@@ -691,11 +712,13 @@ void MainWindow::buildDocks()
     m_btnRemove = toolBtn("trash", "Remove Source from Scene");
     m_btnUp = toolBtn("up", "Move Up (to front)");
     m_btnDown = toolBtn("down", "Move Down");
+    m_btnLock = toolBtn("sliders", "Lock / Unlock Source Position");
     auto *refresh = toolBtn("refresh", "Refresh Windows, Displays, and Cameras");
     connect(add, &QToolButton::clicked, this, &MainWindow::addSourceDialog);
     connect(m_btnRemove, &QToolButton::clicked, this, &MainWindow::removeSelectedItem);
     connect(m_btnUp, &QToolButton::clicked, this, [this] { moveSelectedItem(+1); });
     connect(m_btnDown, &QToolButton::clicked, this, [this] { moveSelectedItem(-1); });
+    connect(m_btnLock, &QToolButton::clicked, this, &MainWindow::toggleSelectedItemLock);
     connect(refresh, &QToolButton::clicked, this, [this] { refreshCaptureList(); refreshCameras(); });
     connect(m_sourceList, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it) {
         if (m_loading) return;
@@ -724,6 +747,9 @@ void MainWindow::buildDocks()
                 else openVideoFiltersDialog(m_selItem);
             });
             m.addAction("Rename", this, [this] { m_srcName->setFocus(); m_srcName->selectAll(); });
+            m.addAction(selectedItem()["locked"].toBool() ? "Unlock Position" : "Lock Position", this, &MainWindow::toggleSelectedItemLock);
+            if (selectedSource()["type"].toString() == "Browser")
+                m.addAction("Interact…", this, [this] { openBrowserInteractDialog(selectedSource()["id"].toString()); });
             if (!sourceTypeInfo(selectedSource()["type"].toString()).audio) {
                 m.addAction("Center", this, [this] {
                     editItem([this](QJsonObject &i) { i = makeFree(i); QRectF r = itemRect(i); r.moveCenter({0.5, 0.5}); i["x"] = r.x(); i["y"] = r.y(); });
@@ -735,7 +761,7 @@ void MainWindow::buildDocks()
         }
         m.exec(m_sourceList->viewport()->mapToGlobal(pos));
     });
-    auto *dSources = makeDock("Sources", "dockSources", withToolbar(m_sourceList, {add, m_btnRemove, m_btnUp, m_btnDown}, {refresh}), Qt::LeftDockWidgetArea);
+    auto *dSources = makeDock("Sources", "dockSources", withToolbar(m_sourceList, {add, m_btnRemove, m_btnUp, m_btnDown, m_btnLock}, {refresh}), Qt::LeftDockWidgetArea);
     splitDockWidget(dScenes, dSources, Qt::Vertical);
 
     // ---------- Properties ----------
@@ -895,6 +921,7 @@ void MainWindow::buildProperties(QWidget *host)
     m_pages->addWidget(pageColor());
     m_pages->addWidget(pageMedia());
     m_pages->addWidget(pageBrowser());
+    m_pages->addWidget(pageAlertBox());
     m_pages->addWidget(pageChatOverlay());
     m_pages->addWidget(pageApplicationAudio());
     m_pages->addWidget(pageAudioDevice());
@@ -1298,10 +1325,20 @@ QWidget *MainWindow::pageBrowser()
     m_browserMuted = new QCheckBox("Mute browser audio");
     f->addRow("", m_browserMuted);
 
-    auto *refresh = new QPushButton(themedIcon("refresh"), "  Refresh Cache of Current Page");
+    auto *btnRow = new QHBoxLayout();
+    auto *interact = new QPushButton(themedIcon("globe"), "  Interact…");
+    interact->setCursor(Qt::PointingHandCursor);
+    auto *refresh = new QPushButton(themedIcon("refresh"), "  Refresh Cache");
     refresh->setCursor(Qt::PointingHandCursor);
-    f->addRow("", refresh);
+    btnRow->addWidget(interact);
+    btnRow->addWidget(refresh);
+    f->addRow("", btnRow);
     f->addRow("", hintLabel("Renders web pages, StreamElements, Streamlabs, and TikFinity overlays off-screen with transparent background (Chromium)."));
+
+    connect(interact, &QPushButton::clicked, this, [this] {
+        const QString id = selectedSource()["id"].toString();
+        if (!id.isEmpty()) openBrowserInteractDialog(id);
+    });
 
     connect(m_browserUrl, &QLineEdit::editingFinished, this, [this] {
         if (m_loading) return;
@@ -1327,6 +1364,81 @@ QWidget *MainWindow::pageBrowser()
     connect(refresh, &QPushButton::clicked, this, [this] {
         editSource([](QJsonObject &s) { s["browserReloadNonce"] = s["browserReloadNonce"].toInt() + 1; });
     });
+    return w;
+}
+
+QWidget *MainWindow::pageAlertBox()
+{
+    auto *w = new QWidget;
+    auto *f = form(w);
+
+    auto *imgRow = new QHBoxLayout();
+    m_alertImagePath = new QLineEdit;
+    m_alertImagePath->setPlaceholderText("Optional custom image (PNG / JPG / GIF)");
+    auto *imgBrowse = new QPushButton("Browse…");
+    imgRow->addWidget(m_alertImagePath, 1);
+    imgRow->addWidget(imgBrowse);
+    f->addRow("Image", imgRow);
+
+    auto *sndRow = new QHBoxLayout();
+    m_alertSoundPath = new QLineEdit;
+    m_alertSoundPath->setPlaceholderText("Optional alert sound (WAV / MP3)");
+    auto *sndBrowse = new QPushButton("Browse…");
+    sndRow->addWidget(m_alertSoundPath, 1);
+    sndRow->addWidget(sndBrowse);
+    f->addRow("Sound", sndRow);
+
+    m_alertDuration = new PaddedSpinBox;
+    m_alertDuration->setRange(2, 15);
+    m_alertDuration->setSuffix(" s");
+    f->addRow("Duration", m_alertDuration);
+
+    m_alertOnGift = new QCheckBox("Show alerts on TikTok LIVE gifts");
+    m_alertOnFollow = new QCheckBox("Show alerts on new follows");
+    f->addRow("", m_alertOnGift);
+    f->addRow("", m_alertOnFollow);
+
+    auto *testRow = new QHBoxLayout();
+    auto *testGift = new QPushButton("Test Gift Alert");
+    auto *testFollow = new QPushButton("Test Follow Alert");
+    testGift->setCursor(Qt::PointingHandCursor);
+    testFollow->setCursor(Qt::PointingHandCursor);
+    testRow->addWidget(testGift);
+    testRow->addWidget(testFollow);
+    f->addRow("", testRow);
+    f->addRow("", hintLabel("Native alerts powered directly by TikStream's TikTok LIVE connection — no external accounts required."));
+
+    connect(imgBrowse, &QPushButton::clicked, this, [this] {
+        const QString p = QFileDialog::getOpenFileName(this, "Select Alert Image", {}, "Images (*.png *.jpg *.jpeg *.gif *.webp)");
+        if (p.isEmpty()) return;
+        const QString nat = QDir::toNativeSeparators(p);
+        m_alertImagePath->setText(nat);
+        editSource([nat](QJsonObject &s) { s["alertImagePath"] = nat; });
+    });
+    connect(m_alertImagePath, &QLineEdit::editingFinished, this, [this] {
+        if (!m_loading) editSource([this](QJsonObject &s) { s["alertImagePath"] = m_alertImagePath->text().trimmed(); });
+    });
+    connect(sndBrowse, &QPushButton::clicked, this, [this] {
+        const QString p = QFileDialog::getOpenFileName(this, "Select Alert Sound", {}, "Audio (*.wav *.mp3)");
+        if (p.isEmpty()) return;
+        const QString nat = QDir::toNativeSeparators(p);
+        m_alertSoundPath->setText(nat);
+        editSource([nat](QJsonObject &s) { s["alertSoundPath"] = nat; });
+    });
+    connect(m_alertSoundPath, &QLineEdit::editingFinished, this, [this] {
+        if (!m_loading) editSource([this](QJsonObject &s) { s["alertSoundPath"] = m_alertSoundPath->text().trimmed(); });
+    });
+    connect(m_alertDuration, &QSpinBox::valueChanged, this, [this](int v) {
+        if (!m_loading) editSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
+    });
+    connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
+    });
+    connect(m_alertOnFollow, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnFollow"] = on; });
+    });
+    connect(testGift, &QPushButton::clicked, this, [this] { triggerAlert("gift", "alex_gg", "🎁 Rose ×10"); });
+    connect(testFollow, &QPushButton::clicked, this, [this] { triggerAlert("follow", "maya_live", "followed the channel!"); });
     return w;
 }
 
@@ -1641,6 +1753,11 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         syncIt->setSizeHint(QSize(0, 34));
         filterKeys.append("");
     }
+    {
+        auto *monIt = new QListWidgetItem("Audio Monitoring", list);
+        monIt->setSizeHint(QSize(0, 34));
+        filterKeys.append("");
+    }
     leftCol->addWidget(list, 1);
     body->addLayout(leftCol);
 
@@ -1803,6 +1920,25 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         pages->addWidget(p);
     }
 
+    // Audio Monitoring (listen to this source in your headphones)
+    {
+        auto *p = new QWidget;
+        auto *f = form(p);
+        auto *mon = new QComboBox;
+        mon->addItem("Monitor Off", "Off");
+        mon->addItem("Monitor Only (mute stream/recording output)", "MonitorOnly");
+        mon->addItem("Monitor and Output", "MonitorAndOutput");
+        const QString curMon = src["monitorMode"].toString("Off");
+        mon->setCurrentIndex(std::max(0, mon->findData(curMon)));
+        f->addRow("Monitoring", mon);
+        f->addRow("", hintLabel("Routes this audio source to your default playback device (headphones) after all filters and volume."));
+        connect(mon, &QComboBox::currentIndexChanged, &dlg, [=, &updateSrc] {
+            const QString mode = mon->currentData().toString();
+            updateSrc([mode](QJsonObject &s) { s["monitorMode"] = mode; });
+        });
+        pages->addWidget(p);
+    }
+
     connect(list, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
     connect(list, &QListWidget::itemChanged, &dlg, [=, &updateSrc](QListWidgetItem *it) {
         const int row = list->row(it);
@@ -1942,7 +2078,8 @@ void MainWindow::rebuildSourceList()
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto item = items[i].toObject();
         const auto src = sourceById(item["sourceId"].toString());
-        auto *it = new QListWidgetItem(themedIcon(sourceTypeInfo(src["type"].toString()).icon), src["name"].toString(), m_sourceList);
+        const QString label = (item["locked"].toBool() ? QStringLiteral("🔒 ") : QString()) + src["name"].toString();
+        auto *it = new QListWidgetItem(themedIcon(sourceTypeInfo(src["type"].toString()).icon), label, m_sourceList);
         it->setData(Qt::UserRole, item["id"].toString());
         it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
         it->setCheckState(item["visible"].toBool(true) ? Qt::Checked : Qt::Unchecked);
@@ -1991,7 +2128,7 @@ void MainWindow::loadProperties()
     m_srcName->setToolTip(info.name + " — click to rename");
 
     static const QHash<QString, int> pageOf{{"Screen", PgScreen}, {"Window", PgWindow}, {"Camera", PgCamera}, {"Image", PgImage},
-                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"Browser", PgBrowser}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
+                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"Browser", PgBrowser}, {"AlertBox", PgAlertBox}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
                                             {"AudioApplication", PgApplicationAudio}, {"AudioInput", PgAudioDevice}, {"AudioOutput", PgAudioDevice}};
     m_pages->setCurrentIndex(pageOf.value(type, PgNone));
     // Match stacked widget height to the active page instead of the tallest one (avoids blank space)
@@ -2086,6 +2223,12 @@ void MainWindow::loadProperties()
         m_browserFps->setValue(src["browserFps"].toInt(30));
         m_browserCss->setPlainText(src["browserCss"].toString("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"));
         m_browserMuted->setChecked(src["browserMuted"].toBool(false));
+    } else if (type == "AlertBox") {
+        m_alertImagePath->setText(src["alertImagePath"].toString());
+        m_alertSoundPath->setText(src["alertSoundPath"].toString());
+        m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
+        m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
+        m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
     }
 
     m_transform->setVisible(!info.audio);
@@ -2380,6 +2523,13 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             src["browserMuted"] = false;
             src["browserReloadNonce"] = 0;
         }
+        if (type == "AlertBox") {
+            src["alertImagePath"] = "";
+            src["alertSoundPath"] = "";
+            src["alertDurationSec"] = 5;
+            src["alertOnGift"] = true;
+            src["alertOnFollow"] = true;
+        }
         if (type == "Image" || type == "Media") {
             const QString filter = type == "Image" ? "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
                                                    : "Video (*.mp4 *.mkv *.mov *.webm *.avi *.gif *.flv);;All Files (*.*)";
@@ -2417,6 +2567,9 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double sc = std::min({1.0, 0.9 * cw / bw, 0.9 * ch / bh});
         const double w = bw * sc / cw, h = bh * sc / ch;
         item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
+    } else if (type == "AlertBox") {
+        const double w = 0.84, h = w * cw / ch * (260.0 / 640.0);
+        item["x"] = (1.0 - w) / 2.0; item["y"] = 0.14; item["w"] = w; item["h"] = h;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
         const double scale = std::min(1.0, 0.8 * cw / sz.width());
@@ -2557,10 +2710,167 @@ void MainWindow::updateChatOverlays()
     }
 }
 
+void MainWindow::triggerAlert(const QString &kind, const QString &user, const QString &detail)
+{
+    int maxDur = 0;
+    QString soundPath;
+    for (const auto &v : sources()) {
+        const auto s = v.toObject();
+        if (s["type"].toString() != "AlertBox") continue;
+        if (kind == "gift" && !s["alertOnGift"].toBool(true)) continue;
+        if (kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
+        maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
+        if (soundPath.isEmpty()) soundPath = s["alertSoundPath"].toString();
+    }
+    if (maxDur <= 0) return;
+    m_alertKind = kind;
+    m_alertUser = user;
+    m_alertDetail = detail;
+    ++m_alertRevision;
+    updateAlertOverlays();
+    if (!soundPath.isEmpty())
+        EngineHost::instance().call("playAlertSound", {{"path", soundPath}});
+    m_alertTimer->start(maxDur * 1000);
+}
+
+void MainWindow::updateAlertOverlays()
+{
+    for (const auto &v : sources()) {
+        const auto s = v.toObject();
+        if (s["type"].toString() == "AlertBox") uploadRaster(s);
+    }
+}
+
+void MainWindow::toggleSelectedItemLock()
+{
+    if (m_selItem.isEmpty()) return;
+    pushUndo();
+    editItem([](QJsonObject &i) { i["locked"] = !i["locked"].toBool(); });
+    rebuildSourceList();
+}
+
+void MainWindow::openBrowserInteractDialog(const QString &sourceId)
+{
+    const auto src = sourceById(sourceId);
+    if (src.isEmpty()) return;
+    const int bw = std::max(64, src["browserWidth"].toInt(800));
+    const int bh = std::max(64, src["browserHeight"].toInt(600));
+
+    class InteractView final : public QWidget {
+    public:
+        QString id;
+        int bw, bh;
+        QImage frame;
+        InteractView(const QString &sourceId, int w, int h, QWidget *parent = nullptr)
+            : QWidget(parent), id(sourceId), bw(w), bh(h)
+        {
+            setMouseTracking(true);
+            setFocusPolicy(Qt::StrongFocus);
+            setMinimumSize(std::min(w, 800), std::min(h, 600));
+        }
+        QPoint mapPt(const QPointF &p) const
+        {
+            const int x = std::clamp(int(p.x() * bw / std::max(1, width())), 0, bw - 1);
+            const int y = std::clamp(int(p.y() * bh / std::max(1, height())), 0, bh - 1);
+            return {x, y};
+        }
+        void paintEvent(QPaintEvent *) override
+        {
+            QPainter p(this);
+            p.fillRect(rect(), QColor(20, 22, 30));
+            if (!frame.isNull()) p.drawImage(rect(), frame);
+        }
+        void mouseMoveEvent(QMouseEvent *e) override
+        {
+            const QPoint pt = mapPt(e->position());
+            EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "move"}, {"x", pt.x()}, {"y", pt.y()}});
+        }
+        void mousePressEvent(QMouseEvent *e) override
+        {
+            const QPoint pt = mapPt(e->position());
+            const int b = e->button() == Qt::MiddleButton ? 1 : (e->button() == Qt::RightButton ? 2 : 0);
+            EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "click"}, {"x", pt.x()}, {"y", pt.y()}, {"button", b}, {"up", false}, {"clicks", 1}});
+        }
+        void mouseReleaseEvent(QMouseEvent *e) override
+        {
+            const QPoint pt = mapPt(e->position());
+            const int b = e->button() == Qt::MiddleButton ? 1 : (e->button() == Qt::RightButton ? 2 : 0);
+            EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "click"}, {"x", pt.x()}, {"y", pt.y()}, {"button", b}, {"up", true}, {"clicks", 1}});
+        }
+        void wheelEvent(QWheelEvent *e) override
+        {
+            const QPoint pt = mapPt(e->position());
+            EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "wheel"}, {"x", pt.x()}, {"y", pt.y()}, {"dx", e->angleDelta().x()}, {"dy", e->angleDelta().y()}});
+        }
+        void keyPressEvent(QKeyEvent *e) override
+        {
+            const int vk = int(e->nativeVirtualKey());
+            if (vk) EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "key"}, {"ev", "down"}, {"vk", vk}, {"ch", 0}});
+            for (const QChar ch : e->text())
+                EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "key"}, {"ev", "char"}, {"vk", vk}, {"ch", int(ch.unicode())}});
+        }
+        void keyReleaseEvent(QKeyEvent *e) override
+        {
+            const int vk = int(e->nativeVirtualKey());
+            if (vk) EngineHost::instance().call("browserInteract", {{"id", id}, {"kind", "key"}, {"ev", "up"}, {"vk", vk}, {"ch", 0}});
+        }
+    };
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Interact — " + src["name"].toString());
+    dlg.resize(std::min(bw + 24, 1000), std::min(bh + 56, 760));
+    auto *v = new QVBoxLayout(&dlg);
+    v->setContentsMargins(8, 8, 8, 8);
+    auto *view = new InteractView(sourceId, bw, bh, &dlg);
+    v->addWidget(view, 1);
+    v->addWidget(hintLabel("Click, scroll, or type directly inside the page (e.g. accept cookies or sign in)."));
+
+    auto *timer = new QTimer(&dlg);
+    timer->setInterval(60);
+    connect(timer, &QTimer::timeout, &dlg, [sourceId, view] {
+        const auto r = EngineHost::instance().callObj("browserFrame", {{"id", sourceId}});
+        if (!r["ok"].toBool()) return;
+        const QByteArray raw = QByteArray::fromBase64(r["bmp"].toString().toLatin1());
+        QImage img;
+        if (img.loadFromData(raw, "BMP")) {
+            view->frame = img;
+            view->update();
+        }
+    });
+    timer->start();
+    dlg.exec();
+}
+
+void MainWindow::setupTray()
+{
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
+    m_tray = new QSystemTrayIcon(themedIcon("logo"), this);
+    m_tray->setToolTip("TikStream");
+    auto *menu = new QMenu(this);
+    menu->addAction("Show / Hide TikStream", this, [this] {
+        if (isVisible() && !isMinimized()) hide();
+        else { showNormal(); raise(); activateWindow(); }
+    });
+    menu->addSeparator();
+    menu->addAction("Start / Stop Streaming", this, &MainWindow::toggleStream);
+    menu->addAction("Start / Stop Recording", this, &MainWindow::toggleRecord);
+    menu->addAction("Start / Stop Replay Buffer", this, &MainWindow::toggleReplay);
+    menu->addAction("Save Replay", this, &MainWindow::saveReplay);
+    menu->addSeparator();
+    menu->addAction("Exit", this, [this] { m_reallyQuit = true; close(); });
+    m_tray->setContextMenu(menu);
+    connect(m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger) {
+            showNormal(); raise(); activateWindow();
+        }
+    });
+    m_tray->show();
+}
+
 void MainWindow::uploadRaster(const QJsonObject &src)
 {
     const QString type = src["type"].toString();
-    if (type != "Image" && type != "Text" && type != "ChatOverlay") return;
+    if (type != "Image" && type != "Text" && type != "ChatOverlay" && type != "AlertBox") return;
     const QString id = src["id"].toString();
     QString key;
     if (type == "ChatOverlay") {
@@ -2570,15 +2880,52 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                   .arg(src["showGifts"].toBool(true))
                   .arg(src["showTaps"].toBool(true))
                   .arg(m_liveChat ? m_liveChat->overlayRevision() : 0);
+    } else if (type == "AlertBox") {
+        if (m_liveChat) m_liveChat->ensureStarted();
+        key = QString("alert|%1|%2|%3").arg(m_alertRevision).arg(src["alertImagePath"].toString()).arg(m_alertKind);
     } else {
         key = rasterKey(src);
     }
     if (m_rasterKeys.value(id) == key && m_rasterSizes.contains(id)) { /* content unchanged */ }
     else {
         m_rasterKeys[id] = key;
-        const QImage img = (type == "ChatOverlay" && m_liveChat)
-            ? m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true))
-            : rasterizeSource(src);
+        QImage img;
+        if (type == "ChatOverlay" && m_liveChat) {
+            img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
+        } else if (type == "AlertBox") {
+            img = QImage(640, 260, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Qt::transparent);
+            if (!m_alertKind.isEmpty()) {
+                QPainter p(&img);
+                p.setRenderHint(QPainter::Antialiasing, true);
+                const QColor accent = m_alertKind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
+                p.setBrush(QColor(18, 20, 30, 230));
+                p.setPen(QPen(accent, 3.0));
+                p.drawRoundedRect(QRectF(8, 8, 624, 244), 20, 20);
+                int leftX = 28;
+                const QString imgPath = src["alertImagePath"].toString();
+                if (!imgPath.isEmpty()) {
+                    QImage iconImg(imgPath);
+                    if (!iconImg.isNull()) {
+                        p.drawImage(QRect(26, 48, 160, 160), iconImg.scaled(160, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                        leftX = 204;
+                    }
+                }
+                const int textW = 612 - leftX;
+                p.setFont(QFont("Segoe UI", 16, QFont::Bold));
+                p.setPen(accent);
+                p.drawText(QRect(leftX, 34, textW, 34), Qt::AlignLeft | Qt::AlignVCenter,
+                           m_alertKind == "gift" ? "TIKTOK LIVE GIFT" : "NEW FOLLOWER");
+                p.setFont(QFont("Segoe UI", 28, QFont::Bold));
+                p.setPen(Qt::white);
+                p.drawText(QRect(leftX, 74, textW, 56), Qt::AlignLeft | Qt::AlignVCenter, m_alertUser);
+                p.setFont(QFont("Segoe UI", 20, QFont::DemiBold));
+                p.setPen(QColor(220, 224, 238));
+                p.drawText(QRect(leftX, 136, textW, 92), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, m_alertDetail);
+            }
+        } else {
+            img = rasterizeSource(src);
+        }
         const QSize oldSize = m_rasterSizes.value(id);
         if (img.isNull()) {
             m_rasterSizes.remove(id);
@@ -2736,7 +3083,7 @@ void MainWindow::onCanvasPressed(QPointF p)
 
     // 1. corner handle of the selected item
     const QJsonObject sel = selectedItem();
-    if (!sel.isEmpty() && sel["visible"].toBool(true) && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
+    if (!sel.isEmpty() && sel["visible"].toBool(true) && !sel["locked"].toBool() && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
         const QRectF r = displayRect(sel);
         const QPointF corners[4] = {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()};
         const QPointF opposite[4] = {r.bottomRight(), r.bottomLeft(), r.topRight(), r.topLeft()};
@@ -2758,6 +3105,7 @@ void MainWindow::onCanvasPressed(QPointF p)
         const QRectF r = displayRect(it);
         if (!r.contains(p)) continue;
         if (it["id"].toString() != m_selItem) selectItem(it["id"].toString());
+        if (it["locked"].toBool()) return;
         pushUndo();
         m_drag = Drag::Move;
         m_dragStart = p;
@@ -2912,7 +3260,7 @@ void MainWindow::duplicateSelectedItem()
 
 void MainWindow::nudgeSelectedItem(int dxPx, int dyPx)
 {
-    if (m_selItem.isEmpty() || sourceTypeInfo(selectedSource()["type"].toString()).audio) return;
+    if (m_selItem.isEmpty() || selectedItem()["locked"].toBool() || sourceTypeInfo(selectedSource()["type"].toString()).audio) return;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     if (nowMs - m_lastUndoMs > 800) { pushUndo(); m_lastUndoMs = nowMs; }
     editItem([this, dxPx, dyPx](QJsonObject &i) {
@@ -2952,7 +3300,7 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
 
 void MainWindow::onCanvasWheel(int delta)
 {
-    if (m_selItem.isEmpty() || sourceTypeInfo(selectedSource()["type"].toString()).audio) return;
+    if (m_selItem.isEmpty() || selectedItem()["locked"].toBool() || sourceTypeInfo(selectedSource()["type"].toString()).audio) return;
     const double f = delta > 0 ? 1.06 : 1 / 1.06;
     editItem([this, f](QJsonObject &i) {
         i = makeFree(i);
@@ -3289,6 +3637,12 @@ void MainWindow::pollStats()
     m_stBitrate->setText(s ? QString("%1 kbps").arg(kbps, 0, 'f', 0) : "— kbps");
     m_stDropped->setText(QString("Dropped: %1").arg(dropped));
 
+    auto pushHist = [](QList<double> &h, double val) { h.append(val); if (h.size() > 60) h.removeFirst(); };
+    pushHist(m_histFps, st["renderFps"].toDouble());
+    pushHist(m_histRenderMs, st["renderMs"].toDouble());
+    pushHist(m_histKbps, kbps);
+    if (m_statsGraphWidget) m_statsGraphWidget->update();
+
     updateSourceStatus();
     if (m_drag == Drag::None) updateSelection(); // FitBlur depends on source dimensions
 
@@ -3313,13 +3667,124 @@ void MainWindow::pollLevels()
     }
 }
 
+void MainWindow::exportSceneCollection()
+{
+    const QString path = QFileDialog::getSaveFileName(this, "Export Scene Collection", "TikStream-Scenes.json", "Scene Collections (*.json)");
+    if (path.isEmpty()) return;
+    QJsonObject doc{
+        {"format", "tikstream-scene-collection"},
+        {"version", 1},
+        {"activeSceneId", m_s["activeSceneId"]},
+        {"scenes", m_s["scenes"]},
+        {"sources", m_s["sources"]},
+    };
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) { QMessageBox::warning(this, "Export", "Could not write file."); return; }
+    f.write(QJsonDocument(doc).toJson(QJsonDocument::Indented));
+    m_stMsg->setText("Scene collection exported: " + QFileInfo(path).fileName());
+}
+
+void MainWindow::importSceneCollection()
+{
+    const QString path = QFileDialog::getOpenFileName(this, "Import Scene Collection", {}, "Scene Collections (*.json)");
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) { QMessageBox::warning(this, "Import", "Could not read file."); return; }
+    const QJsonObject doc = QJsonDocument::fromJson(f.readAll()).object();
+    if (!doc["scenes"].isArray() || doc["scenes"].toArray().isEmpty()) {
+        QMessageBox::warning(this, "Import", "Invalid scene collection file.");
+        return;
+    }
+    if (QMessageBox::question(this, "Import Scene Collection", "Replace current scenes and sources with the imported collection?") != QMessageBox::Yes)
+        return;
+    pushUndo();
+    m_s["scenes"] = doc["scenes"];
+    if (doc["sources"].isArray()) m_s["sources"] = doc["sources"];
+    if (!doc["activeSceneId"].toString().isEmpty()) m_s["activeSceneId"] = doc["activeSceneId"];
+    rebuildScenes();
+    rebuildSourceList();
+    rebuildMixer();
+    for (const auto &v : sources()) uploadRaster(v.toObject());
+    loadProperties();
+    pushSettings();
+    m_stMsg->setText("Scene collection imported: " + QFileInfo(path).fileName());
+}
+
+void MainWindow::openStatsGraphDialog()
+{
+    if (m_statsGraphWidget && m_statsGraphWidget->window()) {
+        m_statsGraphWidget->window()->showNormal();
+        m_statsGraphWidget->window()->raise();
+        m_statsGraphWidget->window()->activateWindow();
+        return;
+    }
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle("TikStream — Stats & Performance Graph");
+    dlg->resize(640, 420);
+    auto *v = new QVBoxLayout(dlg);
+    v->setContentsMargins(12, 12, 12, 12);
+
+    class GraphWidget final : public QWidget {
+    public:
+        const QList<double> *fps, *ms, *kbps;
+        GraphWidget(const QList<double> *f, const QList<double> *m, const QList<double> *k, QWidget *p)
+            : QWidget(p), fps(f), ms(m), kbps(k) {}
+        void paintEvent(QPaintEvent *) override
+        {
+            QPainter p(this);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.fillRect(rect(), QColor(18, 20, 28));
+            auto drawChart = [&](const QRectF &r, const QString &title, const QList<double> &data, double maxVal, const QColor &col, const QString &unit) {
+                p.setPen(QPen(QColor(50, 54, 72), 1));
+                p.setBrush(QColor(24, 27, 38));
+                p.drawRoundedRect(r, 8, 8);
+                const double latest = data.isEmpty() ? 0.0 : data.last();
+                p.setPen(col);
+                p.setFont(QFont("Segoe UI", 10, QFont::Bold));
+                p.drawText(r.adjusted(10, 6, -10, 0), Qt::AlignLeft | Qt::AlignTop,
+                           QString("%1: %2 %3").arg(title).arg(latest, 0, 'f', unit == "ms" ? 2 : 1).arg(unit));
+                if (data.size() < 2) return;
+                const QRectF plot = r.adjusted(10, 28, -10, -8);
+                double hi = maxVal;
+                for (double v : data) hi = std::max(hi, v * 1.15);
+                if (hi <= 0.001) hi = 1.0;
+                p.setPen(QPen(col, 2.0));
+                for (int i = 1; i < data.size(); ++i) {
+                    const double x1 = plot.left() + plot.width() * (i - 1) / 59.0;
+                    const double x2 = plot.left() + plot.width() * i / 59.0;
+                    const double y1 = plot.bottom() - plot.height() * std::clamp(data[i - 1] / hi, 0.0, 1.0);
+                    const double y2 = plot.bottom() - plot.height() * std::clamp(data[i] / hi, 0.0, 1.0);
+                    p.drawLine(QPointF(x1, y1), QPointF(x2, y2));
+                }
+            };
+            const double h = (height() - 24) / 3.0;
+            drawChart(QRectF(4, 4, width() - 8, h - 4), "Render FPS", *fps, 65.0, QColor(80, 230, 140), "FPS");
+            drawChart(QRectF(4, 12 + h, width() - 8, h - 4), "Frame Render Time", *ms, 16.6, QColor(37, 244, 238), "ms");
+            drawChart(QRectF(4, 20 + 2 * h, width() - 8, h - 4), "Stream Bitrate", *kbps, 8000.0, QColor(254, 44, 85), "kbps");
+        }
+    };
+
+    auto *gw = new GraphWidget(&m_histFps, &m_histRenderMs, &m_histKbps, dlg);
+    m_statsGraphWidget = gw;
+    v->addWidget(gw, 1);
+    dlg->show();
+}
+
 void MainWindow::closeEvent(QCloseEvent *e)
 {
-    if ((m_streaming || m_recording) &&
-        QMessageBox::question(this, "TikStream", "Streaming or recording is active. Stop and exit?") != QMessageBox::Yes) {
+    if (!m_reallyQuit && m_s["minimizeToTray"].toBool(false) && m_tray && m_tray->isVisible()) {
+        hide();
         e->ignore();
         return;
     }
+    if ((m_streaming || m_recording) &&
+        QMessageBox::question(this, "TikStream", "Streaming or recording is active. Stop and exit?") != QMessageBox::Yes) {
+        m_reallyQuit = false;
+        e->ignore();
+        return;
+    }
+    if (m_tray) m_tray->hide();
     m_statsTimer->stop();
     m_levelsTimer->stop();
     pushSettings();

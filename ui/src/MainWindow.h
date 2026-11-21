@@ -26,6 +26,7 @@ class QTimer;
 class QFrame;
 class QVBoxLayout;
 class QBoxLayout;
+class QSystemTrayIcon;
 
 class MainWindow : public QMainWindow
 {
@@ -48,6 +49,7 @@ private:
     void buildCentral();
     void buildDocks();
     void buildStatusBar();
+    void setupTray();
     void buildProperties(QWidget *host);
     QWidget *pageScreen();
     QWidget *pageWindow();
@@ -62,10 +64,15 @@ private:
     QWidget *pageColor();
     QWidget *pageMedia();
     QWidget *pageBrowser();
+    QWidget *pageAlertBox();
     QWidget *pageChatOverlay();
     QFrame *buildTransform();
     void openVideoFiltersDialog(const QString &itemId);
     void openAudioFiltersDialog(const QString &sourceId);
+    void openBrowserInteractDialog(const QString &sourceId);
+    void toggleSelectedItemLock();
+    void triggerAlert(const QString &kind, const QString &user, const QString &detail);
+    void updateAlertOverlays();
 
     // ---------- model ----------
     QJsonArray sources() const { return m_s["sources"].toArray(); }
@@ -136,6 +143,9 @@ private:
     void openSettings();
     void checkForUpdates(bool manual);
     void showUpdateDialog(const QJsonObject &info);
+    void exportSceneCollection();
+    void importSceneCollection();
+    void openStatsGraphDialog();
     void pollStats();
     void pollLevels();
     void updateLiveButtons();
@@ -166,15 +176,21 @@ private:
     QPointF m_dragStart, m_anchor;
     QRectF m_startRect;
 
-    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr;
+    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr;
     bool m_updateCheckPending = false;
+    bool m_reallyQuit = false;
     QString m_skippedUpdateVersion;
+    QString m_alertKind, m_alertUser, m_alertDetail;
+    quint64 m_alertRevision = 0;
+    QSystemTrayIcon *m_tray = nullptr;
+    QList<double> m_histFps, m_histRenderMs, m_histKbps;
+    QPointer<QWidget> m_statsGraphWidget;
     Hotkeys *m_hotkeys = nullptr;
 
     PreviewWidget *m_preview = nullptr;
     QStackedWidget *m_previewStack = nullptr;
     QListWidget *m_sceneList = nullptr, *m_sourceList = nullptr;
-    QToolButton *m_btnRemove = nullptr, *m_btnUp = nullptr, *m_btnDown = nullptr;
+    QToolButton *m_btnRemove = nullptr, *m_btnUp = nullptr, *m_btnDown = nullptr, *m_btnLock = nullptr;
 
     // properties
     QStackedWidget *m_propsStack = nullptr;
@@ -195,9 +211,9 @@ private:
     QWidget *m_windowTarget = nullptr;
     QCheckBox *m_screenCursor = nullptr, *m_windowCursor = nullptr;
     QComboBox *m_camDevice = nullptr, *m_camMode = nullptr;
-    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr;
-    QCheckBox *m_mediaLoop = nullptr, *m_browserMuted = nullptr;
-    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr;
+    QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr, *m_alertSoundPath = nullptr, *m_alertImagePath = nullptr;
+    QCheckBox *m_mediaLoop = nullptr, *m_browserMuted = nullptr, *m_alertOnGift = nullptr, *m_alertOnFollow = nullptr;
+    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr, *m_alertDuration = nullptr;
     QPlainTextEdit *m_text = nullptr, *m_browserCss = nullptr;
     QFontComboBox *m_font = nullptr;
     QSpinBox *m_fontSize = nullptr, *m_outlineW = nullptr;
