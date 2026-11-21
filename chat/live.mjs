@@ -1,0 +1,100 @@
+import { setTimeout as delay } from 'node:timers/promises';
+import { TikTokLiveConnection, WebcastEvent, ControlEvent } from 'tiktok-live-connector';
+import { author, classifyError, liveEvents } from './events.mjs';
+
+const account = process.argv[2];
+if (!/^[a-z\d_.]{1,24}$/i.test(account ?? '')) process.exit(2);
+
+const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
+const status = (state, extra = {}) => emit({ type: 'status', state, ...extra });
+let pending = [];
+let flush;
+let blocked = false;
+const events = liveEvents();
+let taps;
+let tapsFlush;
+process.stdout.on('drain', () => { blocked = false; scheduleFlush(); scheduleTaps(); });
+function scheduleTaps() {
+    if (!taps || blocked || tapsFlush) return;
+    tapsFlush = setTimeout(() => {
+        tapsFlush = undefined;
+        if (blocked || !taps) return;
+        const payload = taps;
+        taps = undefined;
+        blocked = !emit({ type: 'taps', ...payload });
+    }, 250);
+}
+
+function scheduleFlush() {
+    if (!pending.length || blocked || flush) return;
+    flush = setTimeout(() => {
+        flush = undefined;
+        if (blocked) return;
+        const messages = pending;
+        pending = [];
+        blocked = !emit({ type: 'messages', messages });
+    }, 45);
+}
+
+function enqueue(message) {
+    if (pending.length === 128) pending.shift();
+    pending.push(message);
+    scheduleFlush();
+}
+
+for (;;) {
+    status('connecting');
+    const client = new TikTokLiveConnection(account, {
+        processInitialData: false,
+        webClientOptions: { timeout: { request: 10000 } },
+        wsClientOptions: { handshakeTimeout: 10000 },
+        ...(process.env.TIKSTREAM_EULER_API_KEY ? { signApiKey: process.env.TIKSTREAM_EULER_API_KEY } : {}),
+    });
+    client.on(ControlEvent.ERROR, () => {});
+    const updateRoom = id => {
+        if (!events.enterRoom(id)) return;
+        pending = pending.filter(message => message.kind !== 'gift');
+        emit({ type: 'clearGifts' });
+        taps = { count: null };
+        scheduleTaps();
+    };
+    client.on(WebcastEvent.CHAT, event => {
+        const sender = author(event.user);
+        if (sender && event.comment) enqueue({ ...sender, text: String(event.comment).slice(0, 500) });
+    });
+    client.on(WebcastEvent.GIFT, event => {
+        updateRoom(client.roomId || event.common?.roomId);
+        const gift = events.gift(event);
+        if (gift) enqueue(gift);
+    });
+    client.on(WebcastEvent.LIKE, event => {
+        updateRoom(client.roomId || event.common?.roomId);
+        const latest = events.like(event);
+        if (latest) {
+            taps = latest;
+            scheduleTaps();
+        }
+    });
+    let streamEnded = false;
+    client.on(WebcastEvent.STREAM_END, () => { streamEnded = true; });
+    const disconnected = new Promise(resolve => client.once(ControlEvent.DISCONNECTED, resolve));
+    try {
+        const connection = await client.connect();
+        updateRoom(connection.roomId);
+        status('connected');
+        const disconnectEvent = await disconnected;
+        if (streamEnded) {
+            status('offline');
+        } else {
+            const wsCode = Number.isInteger(disconnectEvent?.code) ? disconnectEvent.code : undefined;
+            status('disconnected', wsCode !== undefined ? { code: wsCode } : {});
+        }
+    } catch (error) {
+        const classified = classifyError(error);
+        status(classified.state, classified.code !== undefined ? { code: classified.code } : {});
+    } finally {
+        await client.disconnect().catch(() => {});
+        client.removeAllListeners();
+    }
+    await delay(30000);
+}

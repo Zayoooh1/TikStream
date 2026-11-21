@@ -1,0 +1,150 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <UI Id="TikStreamUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" Bold="yes" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="10" Bold="yes" />
+
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WixUI_Mode" Value="InstallDir" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <!-- Ekran wykrycia istniejącej instalacji: pytanie o reinstalację/aktualizację -->
+      <Dialog Id="TikStreamReinstallDlg" Width="370" Height="270" Title="Instalator TikStream">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Wykryto zainstalowany program TikStream" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="330" Height="18" Transparent="yes" NoPrefix="yes" Text="Program TikStream znajduje się już na tym komputerze." />
+
+        <Control Id="Info1" Type="Text" X="20" Y="64" Width="330" Height="36" NoPrefix="yes" Text="Czy chcesz przeinstalować (zaktualizować) istniejącą instalację programu TikStream?" />
+        <Control Id="Info2" Type="Text" X="20" Y="106" Width="330" Height="48" NoPrefix="yes" Text="Poprzednia wersja zostanie automatycznie zastąpiona bez tworzenia drugiego wpisu w systemie. Twoje dotychczasowe ustawienia, sceny, źródła oraz układ paneli zostaną zachowane." />
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="148" Y="243" Width="56" Height="17" Text="Wstecz" />
+        <Control Id="Next" Type="PushButton" X="208" Y="243" Width="88" Height="17" Default="yes" Text="Przeinstaluj (Dalej)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Anuluj">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Własny ekran wyboru folderu (pole ścieżki TYLKO DO ODCZYTU) + opcje -->
+      <Dialog Id="TikStreamOptionsDlg" Width="370" Height="270" Title="Instalator TikStream">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Lokalizacja i opcje instalacji" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="330" Height="18" Transparent="yes" NoPrefix="yes" Text="Wybierz folder docelowy przyciskiem Przeglądaj oraz preferowane opcje uruchomienia." />
+
+        <Control Id="FolderLabel" Type="Text" X="20" Y="56" Width="330" Height="14" NoPrefix="yes" Text="Folder instalacji (wybór wyłącznie przez przycisk Przeglądaj):" />
+        <!-- Disabled="yes" blokuje wpisywanie z klawiatury w polu ścieżki -->
+        <Control Id="FolderEdit" Type="Edit" X="20" Y="72" Width="256" Height="18" Property="INSTALLFOLDER" Disabled="yes" />
+        <Control Id="BrowseBtn" Type="PushButton" X="284" Y="72" Width="66" Height="18" Text="Przeglądaj…">
+          <Publish Event="SetTargetPath" Value="INSTALLFOLDER" Order="1" />
+          <Publish Property="_BrowseProperty" Value="INSTALLFOLDER" Order="2" />
+          <Publish Event="SpawnDialog" Value="TikStreamBrowseDlg" Order="3" />
+        </Control>
+
+        <Control Id="OptionsSep" Type="Line" X="20" Y="102" Width="330" Height="0" />
+        <Control Id="OptionsTitle" Type="Text" X="20" Y="110" Width="330" Height="14" NoPrefix="yes" Text="{\WixUI_Font_Title}Skróty i uruchamianie:" />
+
+        <Control Id="ChkStartMenu" Type="CheckBox" X="24" Y="130" Width="320" Height="17" Property="INSTALL_STARTMENU" CheckBoxValue="1" Text="Utwórz skrót w Menu Start" />
+        <Control Id="ChkDesktop" Type="CheckBox" X="24" Y="150" Width="320" Height="17" Property="INSTALL_DESKTOP" CheckBoxValue="1" Text="Utwórz skrót na Pulpicie" />
+        <Control Id="ChkAutostart" Type="CheckBox" X="24" Y="170" Width="320" Height="17" Property="INSTALL_AUTOSTART" CheckBoxValue="1" Text="Uruchamiaj TikStream wraz ze startem systemu Windows" />
+        <Control Id="ChkMinimized" Type="CheckBox" X="24" Y="190" Width="320" Height="17" Property="INSTALL_MINIMIZED" CheckBoxValue="1" Text="Uruchamiaj zminimalizowany (--minimized)" />
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Wstecz" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Dalej" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Anuluj">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Własne okno wyboru folderu z zablokowanym polem tekstowym ścieżki (brak możliwości wpisywania) -->
+      <Dialog Id="TikStreamBrowseDlg" Width="370" Height="270" Title="Wybierz folder instalacji">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.BrowseDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Zmień folder docelowy" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="330" Height="18" Transparent="yes" NoPrefix="yes" Text="Wskaż folder docelowy na liście poniżej." />
+
+        <Control Id="ComboLabel" Type="Text" X="20" Y="56" Width="60" Height="14" Text="Szukaj w:" />
+        <Control Id="DirectoryCombo" Type="DirectoryCombo" X="82" Y="54" Width="210" Height="80" Property="_BrowseProperty" Indirect="yes" Fixed="yes" Remote="yes">
+          <Subscribe Event="IgnoreChange" Attribute="IgnoreChange" />
+        </Control>
+        <Control Id="Up" Type="PushButton" X="298" Y="54" Width="22" Height="18" ToolTip="Poziom wyżej" Icon="yes" FixedSize="yes" IconSize="16" Text="WixUI_Ico_Up">
+          <Publish Event="DirectoryListUp" Value="0" />
+        </Control>
+        <Control Id="NewFolder" Type="PushButton" X="326" Y="54" Width="22" Height="18" ToolTip="Nowy folder" Icon="yes" FixedSize="yes" IconSize="16" Text="WixUI_Ico_New">
+          <Publish Event="DirectoryListNew" Value="0" />
+        </Control>
+
+        <Control Id="List" Type="DirectoryList" X="20" Y="78" Width="330" Height="112" Property="_BrowseProperty" Sunken="yes" Indirect="yes" />
+
+        <Control Id="PathLabel" Type="Text" X="20" Y="196" Width="330" Height="12" Text="Wybrana ścieżka:" />
+        <!-- Disabled="yes" blokuje wpisywanie ręczne również w oknie Przeglądaj -->
+        <Control Id="PathReadOnly" Type="PathEdit" X="20" Y="210" Width="330" Height="18" Property="_BrowseProperty" Indirect="yes" Disabled="yes" />
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="OK" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="OK">
+          <Publish Event="SetTargetPath" Value="[_BrowseProperty]" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Anuluj">
+          <Publish Event="Reset" Value="0" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+      </Dialog>
+
+      <!-- Ekran końcowy z opcją uruchomienia TikStream -->
+      <Dialog Id="TikStreamExitDlg" Width="370" Height="270" Title="Instalator TikStream">
+        <Control Id="Bitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="234" TabSkip="no" Text="!(loc.ExitDialogBitmap)" />
+        <Control Id="Title" Type="Text" X="135" Y="20" Width="220" Height="40" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Bigger}Zakończono instalację TikStream" />
+        <Control Id="Description" Type="Text" X="135" Y="70" Width="220" Height="40" Transparent="yes" NoPrefix="yes" Text="Program TikStream został pomyślnie zainstalowany na tym komputerze." />
+        <Control Id="LaunchChk" Type="CheckBox" X="135" Y="130" Width="220" Height="17" Property="LAUNCH_AFTER_INSTALL" CheckBoxValue="1" Text="Uruchom TikStream po zakończeniu" Hidden="yes" ShowCondition="NOT Installed" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="Zakończ">
+          <Publish Event="DoAction" Value="LaunchTikStream" Condition="LAUNCH_AFTER_INSTALL = 1 AND NOT Installed" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="999" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="TikStreamExitDlg" OnExit="success" Overridable="yes" />
+      </InstallUISequence>
+      <AdminUISequence>
+        <Show Dialog="TikStreamExitDlg" OnExit="success" Overridable="yes" />
+      </AdminUISequence>
+
+      <!-- Przepływ dialogów -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="TikStreamReinstallDlg" Condition="NOT Installed AND WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="TikStreamOptionsDlg" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="TikStreamReinstallDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="TikStreamReinstallDlg" Control="Next" Event="NewDialog" Value="TikStreamOptionsDlg" />
+
+      <Publish Dialog="TikStreamOptionsDlg" Control="Back" Event="NewDialog" Value="TikStreamReinstallDlg" Condition="WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="TikStreamOptionsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Condition="NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="TikStreamOptionsDlg" Control="Next" Event="SetTargetPath" Value="INSTALLFOLDER" Order="1" />
+      <Publish Dialog="TikStreamOptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="TikStreamOptionsDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
+</Wix>

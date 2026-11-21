@@ -1,0 +1,426 @@
+using System.Collections.Concurrent;
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using TikStream.Core;
+
+namespace TikStream.Capture;
+
+/// <summary>
+/// Miks wszystkich źródeł dźwięku do 48 kHz stereo float.
+/// Konsument (pompa audio) czyta w tempie zegara silnika; bufory zwracają ciszę, gdy brak danych,
+/// więc dźwięk nie „znika”, gdy pulpit milczy (znany problem loopbacku WASAPI).
+/// </summary>
+public sealed class AudioEngine : IDisposable
+{
+    public const int SampleRate = 48000;
+    public const int Channels = 2;
+    public static readonly WaveFormat MixFormat = WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, Channels);
+
+    private readonly MixingSampleProvider _mixer = new(MixFormat) { ReadFully = true };
+    private readonly Dictionary<string, Input> _inputs = new();
+    private readonly object _lock = new();
+
+    /// <summary>Szczytowe poziomy (0..1) per źródło — do wskaźników w mikserze.</summary>
+    public IReadOnlyDictionary<string, float> Levels
+    {
+        get { lock (_lock) return _inputs.ToDictionary(k => k.Key, v => v.Value.Peak); }
+    }
+
+    /// <summary>True, gdy któreś urządzenie zatrzymało się lub czeka na ponowną próbę (hot-plug / recovery).</summary>
+    public bool NeedsSync
+    {
+        get
+        {
+            lock (_lock)
+            {
+                if (_inputs.Values.Any(i => i.Stopped)) return true;
+                var now = DateTime.UtcNow;
+                return _failed.Values.Any(f => now >= f.Retry);
+            }
+        }
+    }
+
+    /// <summary>Synchronizuje urządzenia (wejścia/wyjścia) z listą źródeł. Źródła multimediów rejestrują się osobno.</summary>
+    private readonly Dictionary<string, (string Key, DateTime Retry)> _failed = new();
+
+    public void SyncDevices(AppSettings settings)
+    {
+        var audible = settings.ActiveScene?.Items.Where(i => i.Visible).Select(i => i.SourceId).ToHashSet();
+        lock (_lock)
+        {
+            var wanted = settings.Sources.Where(d => !d.IsVisual).ToDictionary(d => d.Id);
+            foreach (var id in _inputs.Where(kv => kv.Value.IsDevice && !wanted.ContainsKey(kv.Key)).Select(kv => kv.Key).ToList())
+            {
+                _inputs[id].Dispose(_mixer);
+                _inputs.Remove(id);
+            }
+            foreach (var d in wanted.Values)
+            {
+                string target = d.DeviceId;
+                if (d.Type != SourceType.AudioApplication && string.IsNullOrEmpty(target))
+                    target = DefaultDeviceId(d.Type == SourceType.AudioInput ? DataFlow.Capture : DataFlow.Render);
+                string key = d.Type + "|" + target;
+                if (_inputs.TryGetValue(d.Id, out var cur) && (cur.Key != key || cur.Stopped))
+                {
+                    cur.Dispose(_mixer);
+                    _inputs.Remove(d.Id);
+                    cur = null;
+                }
+                // niedostępne urządzenie (np. odłączony headset) — ponawiaj najwyżej co 5 s, nie przy każdej zmianie
+                if (cur == null && (!_failed.TryGetValue(d.Id, out var f) || f.Key != key || DateTime.UtcNow >= f.Retry))
+                {
+                    try
+                    {
+                        var cap = CreateCapture(d.Type, target);
+                        if (cap != null) { _inputs[d.Id] = Input.FromDevice(d.Name, key, cap, _mixer); _failed.Remove(d.Id); }
+                        else _failed[d.Id] = (key, DateTime.UtcNow.AddSeconds(5));
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!_failed.ContainsKey(d.Id)) Log.Warn($"Audio '{d.Name}': urządzenie niedostępne ({ex.Message.Trim()})");
+                        _failed[d.Id] = (key, DateTime.UtcNow.AddSeconds(5));
+                    }
+                }
+                if (_inputs.TryGetValue(d.Id, out var inp))
+                {
+                    inp.SetVolume(!d.Muted && (d.GlobalAudio == true || audible?.Contains(d.Id) == true) ? d.Volume : 0);
+                    inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
+                        d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                }
+            }
+        }
+    }
+
+    public static string DefaultDeviceId(DataFlow flow)
+    {
+        using var en = new MMDeviceEnumerator();
+        if (!en.HasDefaultAudioEndpoint(flow, Role.Multimedia)) return "";
+        using var device = en.GetDefaultAudioEndpoint(flow, Role.Multimedia);
+        return device.ID;
+    }
+
+    private static IWaveIn? CreateCapture(SourceType type, string target)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return null;
+        if (type == SourceType.AudioApplication) return new ApplicationAudioCapture(target);
+        using var en = new MMDeviceEnumerator();
+        using var device = en.GetDevice(target);
+        if (device.State != DeviceState.Active) return null;
+        return type == SourceType.AudioOutput ? new WasapiLoopbackCapture(device) : new WasapiCapture(device, true, 20);
+    }
+
+    /// <summary>Wejście zasilane z kodu (dźwięk pliku multimediów): 48 kHz stereo float z przeplotem.</summary>
+    public Action<float[], int> RegisterPushInput(string id, string name)
+    {
+        lock (_lock)
+        {
+            if (_inputs.Remove(id, out var old)) old.Dispose(_mixer);
+            var inp = Input.FromPush(name, _mixer);
+            _inputs[id] = inp;
+            return inp.Push;
+        }
+    }
+
+    public void SetVolume(string id, float v)
+    {
+        lock (_lock) if (_inputs.TryGetValue(id, out var i)) i.SetVolume(v);
+    }
+
+    public void SetFilters(string id, SourceDef d)
+    {
+        lock (_lock)
+            if (_inputs.TryGetValue(id, out var i))
+                i.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
+                    d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio,
+                    d.LimiterEnabled, d.LimiterCeilingDb);
+    }
+
+    public void Unregister(string id)
+    {
+        lock (_lock) if (_inputs.Remove(id, out var i)) i.Dispose(_mixer);
+    }
+
+    /// <summary>Czyta dokładnie <paramref name="frames"/> ramek stereo (przeplot) do bufora.</summary>
+    public void Read(float[] buffer, int frames)
+    {
+        lock (_lock)
+        {
+            foreach (var i in _inputs.Values) i.TrimLatency();
+            int read = _mixer.Read(buffer, 0, frames * Channels);
+            if (read < frames * Channels) Array.Clear(buffer, read, frames * Channels - read);
+        }
+        for (int i = 0; i < frames * Channels; i++)
+        {
+            float v = buffer[i];
+            if (v > 1f) buffer[i] = 1f; else if (v < -1f) buffer[i] = -1f;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            foreach (var i in _inputs.Values) i.Dispose(_mixer);
+            _inputs.Clear();
+        }
+    }
+
+    public static (List<(string Id, string Name)> Inputs, List<(string Id, string Name)> Outputs) EnumerateDevices()
+    {
+        var ins = new List<(string, string)>();
+        var outs = new List<(string, string)>();
+        try
+        {
+            using var en = new MMDeviceEnumerator();
+            foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)) ins.Add((d.ID, d.FriendlyName));
+            foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)) outs.Add((d.ID, d.FriendlyName));
+        }
+        catch (Exception ex) { Log.Warn("Lista urządzeń audio: " + ex.Message); }
+        return (ins, outs);
+    }
+
+    private sealed class Input
+    {
+        private readonly IWaveIn? _capture;
+        private readonly BufferedWaveProvider _buffer;
+        private readonly NoiseSuppressorProvider _noiseSuppressor;
+        private readonly DynamicsProvider _dynamics;
+        private readonly VolumeSampleProvider _volume;
+        private readonly LimiterProvider _limiter;
+        private readonly DelayProvider _delay;
+        private readonly ISampleProvider _chainOut;
+        private readonly bool _trim;
+        public string Key { get; private init; } = "";
+        public bool IsDevice => _capture != null;
+        public volatile bool Stopped;
+        public float Peak;
+
+        private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer)
+        {
+            _capture = capture;
+            _trim = trim;
+            _buffer = new BufferedWaveProvider(fmt)
+            {
+                BufferDuration = TimeSpan.FromSeconds(trim ? 1 : 3),
+                DiscardOnBufferOverflow = true,
+                ReadFully = true,
+            };
+            bool monoInput = fmt.Channels == 1;
+            ISampleProvider sp = _buffer.ToSampleProvider();
+            if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
+            else if (sp.WaveFormat.Channels > 2) sp = new MultiplexingSampleProvider(new[] { sp }, 2);
+            if (sp.WaveFormat.SampleRate != SampleRate) sp = new WdlResamplingSampleProvider(sp, SampleRate);
+            _noiseSuppressor = new NoiseSuppressorProvider(sp, monoInput);
+            _dynamics = new DynamicsProvider(_noiseSuppressor);
+            _volume = new VolumeSampleProvider(_dynamics);
+            _limiter = new LimiterProvider(_volume);
+            _delay = new DelayProvider(_limiter);
+            var meter = new MeteringSampleProvider(_delay, SampleRate / 20);
+            meter.StreamVolume += (_, e) => Peak = e.MaxSampleValues.Length > 0 ? e.MaxSampleValues.Max() : 0;
+            _chainOut = meter;
+            mixer.AddMixerInput(_chainOut);
+            if (capture != null)
+            {
+                capture.DataAvailable += (_, e) => _buffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                capture.RecordingStopped += (_, e) => {
+                    Stopped = true;
+                    if (e.Exception != null) Log.Error($"Audio '{name}' zatrzymane", e.Exception);
+                };
+                try { capture.StartRecording(); }
+                catch
+                {
+                    mixer.RemoveMixerInput(_chainOut);
+                    capture.Dispose();
+                    throw;
+                }
+                Log.Info($"Audio '{name}': {capture.WaveFormat}");
+            }
+        }
+
+        public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer)
+            => new(name, cap, cap.WaveFormat, true, mixer) { Key = key };
+
+        public static Input FromPush(string name, MixingSampleProvider mixer)
+            => new(name, null, MixFormat, false, mixer) { Key = "push" };
+
+        public void SetVolume(float v)
+        {
+            _volume.Volume = v;
+            _noiseSuppressor.SetMuted(v <= 0f);
+        }
+
+        public void SetFilters(int syncOffsetMs, bool nsOn, string? nsMethod, int nsLevelDb, bool gateOn, float gateDb, bool compOn, float compDb, float compRatio, bool limOn, float limDb)
+        {
+            _delay.Configure(syncOffsetMs);
+            _noiseSuppressor.Configure(nsOn, nsMethod, nsLevelDb);
+            _dynamics.Configure(gateOn, gateDb, compOn, compDb, compRatio);
+            _limiter.Configure(limOn, limDb);
+        }
+
+        public void Push(float[] samples, int count)
+        {
+            var bytes = new byte[count * 4];
+            Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
+            _buffer.AddSamples(bytes, 0, bytes.Length);
+        }
+
+        /// <summary>Zegar urządzenia dryfuje względem naszego — nie pozwól, by opóźnienie narastało.</summary>
+        public void TrimLatency()
+        {
+            if (!_trim) return;
+            var max = _buffer.WaveFormat.AverageBytesPerSecond / 25; // 40 ms (mniejszy lag względem wideo)
+            int excess = _buffer.BufferedBytes - max;
+            if (excess <= 0) return;
+            excess -= excess % _buffer.WaveFormat.BlockAlign;
+            var tmp = new byte[excess];
+            _buffer.Read(tmp, 0, excess);
+        }
+
+        public void Dispose(MixingSampleProvider mixer)
+        {
+            mixer.RemoveMixerInput(_chainOut);
+            _noiseSuppressor.Dispose();
+            if (_capture == null) return;
+            try { _capture.StopRecording(); } catch { }
+            _capture.Dispose();
+        }
+    }
+
+    /// <summary>Bramka szumów (histereza 4 dB) + kompresor (RMS/peak envelope) na 48 kHz stereo float, 0 alokacji.</summary>
+    private sealed class DynamicsProvider(ISampleProvider source) : ISampleProvider
+    {
+        private volatile bool _gateOn, _compOn;
+        private float _gateOpenLin = 0.01f, _gateCloseLin = 0.0063f;
+        private float _compThreshDb = -18f, _compSlope = 0.75f;
+        private float _gateGain = 1f, _compEnv;
+        private int _holdLeft;
+        private const int HoldSamples = SampleRate * 80 / 1000;
+        private const float GateAttack = 1f / (SampleRate * 0.005f);
+        private const float GateRelease = 1f / (SampleRate * 0.150f);
+        private static readonly float CompAttackCoeff = MathF.Exp(-1f / (SampleRate * 0.010f));
+        private static readonly float CompReleaseCoeff = MathF.Exp(-1f / (SampleRate * 0.100f));
+
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public void Configure(bool gateOn, float gateDb, bool compOn, float compDb, float compRatio)
+        {
+            _gateOn = gateOn;
+            _gateOpenLin = MathF.Pow(10f, Math.Clamp(gateDb, -100f, 0f) / 20f);
+            _gateCloseLin = MathF.Pow(10f, Math.Clamp(gateDb - 4f, -104f, -4f) / 20f);
+            _compOn = compOn;
+            _compThreshDb = Math.Clamp(compDb, -100f, 0f);
+            float ratio = Math.Clamp(compRatio, 1f, 20f);
+            _compSlope = 1f - 1f / ratio;
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            bool gateOn = _gateOn, compOn = _compOn;
+            if (!gateOn && !compOn) return read;
+            for (int i = 0; i + 1 < read; i += 2)
+            {
+                float l = buffer[offset + i], r = buffer[offset + i + 1];
+                float level = MathF.Max(MathF.Abs(l), MathF.Abs(r));
+                float gain = 1f;
+
+                if (gateOn)
+                {
+                    if (level >= _gateOpenLin) { _holdLeft = HoldSamples; _gateGain = MathF.Min(1f, _gateGain + GateAttack); }
+                    else if (level >= _gateCloseLin && _holdLeft > 0) { _holdLeft--; _gateGain = MathF.Min(1f, _gateGain + GateAttack); }
+                    else if (_holdLeft > 0) _holdLeft--;
+                    else _gateGain = MathF.Max(0f, _gateGain - GateRelease);
+                    gain *= _gateGain;
+                }
+
+                if (compOn)
+                {
+                    float coeff = level > _compEnv ? CompAttackCoeff : CompReleaseCoeff;
+                    _compEnv = coeff * _compEnv + (1f - coeff) * level;
+                    if (_compEnv > 1e-6f)
+                    {
+                        float envDb = 20f * MathF.Log10(_compEnv);
+                        if (envDb > _compThreshDb)
+                        {
+                            float reductionDb = (envDb - _compThreshDb) * _compSlope;
+                            gain *= MathF.Pow(10f, -reductionDb / 20f);
+                        }
+                    }
+                }
+
+                buffer[offset + i] = l * gain;
+                buffer[offset + i + 1] = r * gain;
+            }
+            return read;
+        }
+    }
+
+    /// <summary>Szybki limiter (brickwall) po suwaku głośności — chroni przed przesterem.</summary>
+    private sealed class LimiterProvider(ISampleProvider source) : ISampleProvider
+    {
+        private volatile bool _enabled;
+        private float _ceiling = 0.89125f;
+        private float _gain = 1f;
+        private static readonly float ReleaseCoeff = MathF.Exp(-1f / (SampleRate * 0.050f));
+
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public void Configure(bool enabled, float ceilingDb)
+        {
+            _enabled = enabled;
+            _ceiling = MathF.Pow(10f, Math.Clamp(ceilingDb, -100f, 0f) / 20f);
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            if (!_enabled) return read;
+            float ceiling = _ceiling;
+            for (int i = 0; i + 1 < read; i += 2)
+            {
+                float l = buffer[offset + i], r = buffer[offset + i + 1];
+                float peak = MathF.Max(MathF.Abs(l), MathF.Abs(r));
+                float target = peak > ceiling ? ceiling / peak : 1f;
+                _gain = target < _gain ? target : ReleaseCoeff * _gain + (1f - ReleaseCoeff) * target;
+                buffer[offset + i] = l * _gain;
+                buffer[offset + i + 1] = r * _gain;
+            }
+            return read;
+        }
+    }
+
+    /// <summary>Stałe opóźnienie synchronizacji A/V (0..500 ms) w buforze kołowym, 0 alokacji w Read.</summary>
+    private sealed class DelayProvider(ISampleProvider source) : ISampleProvider
+    {
+        private const int MaxMs = 500;
+        private readonly float[] _ring = new float[(SampleRate * MaxMs / 1000 + 16) * Channels];
+        private int _writePos;
+        private volatile int _delaySamples;
+
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public void Configure(int delayMs)
+        {
+            int ms = Math.Clamp(delayMs, 0, MaxMs);
+            _delaySamples = (ms * SampleRate / 1000) * Channels;
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            int delay = _delaySamples;
+            if (delay <= 0 || read <= 0) return read;
+            int len = _ring.Length;
+            for (int i = 0; i < read; i++)
+            {
+                _ring[_writePos] = buffer[offset + i];
+                int rPos = _writePos - delay;
+                if (rPos < 0) rPos += len;
+                buffer[offset + i] = _ring[rPos];
+                if (++_writePos >= len) _writePos = 0;
+            }
+            return read;
+        }
+    }
+}

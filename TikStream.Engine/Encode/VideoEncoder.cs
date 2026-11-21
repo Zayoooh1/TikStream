@@ -1,0 +1,174 @@
+using FFmpeg.AutoGen;
+using TikStream.Capture;
+using TikStream.Core;
+using TikStream.Gpu;
+using D3D = Vortice.Direct3D11;
+using DXGIFormat = Vortice.DXGI.Format;
+
+namespace TikStream.Encode;
+
+/// <summary>
+/// H.264 przez NVENC, wejście: tekstury NV12 z puli D3D11 FFmpeg-a — kompozytor renderuje prosto w nie.
+/// Klatka nigdy nie opuszcza VRAM.
+/// </summary>
+public sealed record VideoEncoderOptions(int Fps, int Kbps, string Preset, string Profile, int KeyframeSec, int BFrames, bool SpatialAq, bool LookAhead, bool ZeroFpsImpact = false);
+
+public sealed unsafe class VideoEncoder : IDisposable
+{
+    private readonly D3D.ID3D11Device _dev;
+    private AVBufferRef* _hwDevice;
+    private AVBufferRef* _hwFrames;
+    private AVCodecContext* _ctx;
+    private readonly Dictionary<(IntPtr, int), (D3D.ID3D11Texture2D Tex, D3D.ID3D11RenderTargetView Y, D3D.ID3D11RenderTargetView UV)> _views = new();
+
+    public AVCodecContext* Context => _ctx;
+    public AVRational TimeBase => _ctx->time_base;
+    public string CodecName { get; }
+
+    public VideoEncoder(GpuDevice gpu, int width, int height, VideoEncoderOptions o, bool globalHeader)
+    {
+        _dev = gpu.Device;
+        int fps = o.Fps, kbps = o.Kbps;
+        string preset = o.Preset;
+
+        // --- urządzenie hw FFmpeg-a = NASZE urządzenie D3D11 (to samo, na którym renderujemy) ---
+        _hwDevice = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
+        var devCtx = (AVHWDeviceContext*)_hwDevice->data;
+        var d3dCtx = (AVD3D11VADeviceContext*)devCtx->hwctx;
+        gpu.Device.AddRef(); // FFmpeg zwolni tę referencję przy sprzątaniu
+        d3dCtx->device = (FFmpeg.AutoGen.ID3D11Device*)gpu.Device.NativePointer;
+        FF.Check(ffmpeg.av_hwdevice_ctx_init(_hwDevice), "av_hwdevice_ctx_init");
+
+        _hwFrames = ffmpeg.av_hwframe_ctx_alloc(_hwDevice);
+        var fc = (AVHWFramesContext*)_hwFrames->data;
+        fc->format = AVPixelFormat.AV_PIX_FMT_D3D11;
+        fc->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
+        fc->width = width;
+        fc->height = height;
+        fc->initial_pool_size = 0; // pojedyncze tekstury alokowane na żądanie i używane ponownie przez pulę
+        ((AVD3D11VAFramesContext*)fc->hwctx)->BindFlags = (uint)D3D.BindFlags.RenderTarget;
+        FF.Check(ffmpeg.av_hwframe_ctx_init(_hwFrames), "av_hwframe_ctx_init");
+
+        var codec = ffmpeg.avcodec_find_encoder_by_name("h264_nvenc");
+        if (codec == null) throw new InvalidOperationException("Brak enkodera h264_nvenc w FFmpeg.");
+        CodecName = "h264_nvenc";
+
+        _ctx = ffmpeg.avcodec_alloc_context3(codec);
+        _ctx->width = width;
+        _ctx->height = height;
+        _ctx->time_base = new AVRational { num = 1, den = fps };
+        _ctx->framerate = new AVRational { num = fps, den = 1 };
+        _ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_D3D11;
+        _ctx->hw_frames_ctx = ffmpeg.av_buffer_ref(_hwFrames);
+        _ctx->gop_size = fps * Math.Clamp(o.KeyframeSec, 1, 10); // TikTok/RTMP: keyframe co 2 s
+        _ctx->max_b_frames = Math.Clamp(o.BFrames, 0, 4);
+        _ctx->bit_rate = kbps * 1000L;
+        _ctx->rc_max_rate = kbps * 1000L;
+        _ctx->rc_buffer_size = kbps * 1000;  // bufor 1 s = stabilny CBR
+        _ctx->profile = o.Profile == "main" ? 77 : 100;
+        _ctx->color_range = AVColorRange.AVCOL_RANGE_MPEG;
+        _ctx->colorspace = AVColorSpace.AVCOL_SPC_BT709;
+        _ctx->color_primaries = AVColorPrimaries.AVCOL_PRI_BT709;
+        _ctx->color_trc = AVColorTransferCharacteristic.AVCOL_TRC_BT709;
+        _ctx->sample_aspect_ratio = new AVRational { num = 1, den = 1 };
+        if (globalHeader) _ctx->flags |= ffmpeg.AV_CODEC_FLAG_GLOBAL_HEADER;
+
+        AVDictionary* opts = null;
+        string effPreset = o.ZeroFpsImpact && preset is "p5" or "p6" or "p7" ? "p4" : preset;
+        bool effAq = !o.ZeroFpsImpact && o.SpatialAq;
+        bool effLookAhead = !o.ZeroFpsImpact && o.LookAhead;
+        ffmpeg.av_dict_set(&opts, "preset", effPreset, 0);
+        ffmpeg.av_dict_set(&opts, "tune", o.ZeroFpsImpact ? "ll" : "hq", 0);
+        if (o.ZeroFpsImpact)
+        {
+            ffmpeg.av_dict_set(&opts, "multipass", "disabled", 0);
+            ffmpeg.av_dict_set(&opts, "temporal-aq", "0", 0);
+        }
+        ffmpeg.av_dict_set(&opts, "profile", o.Profile == "main" ? "main" : "high", 0);
+        ffmpeg.av_dict_set(&opts, "rc", "cbr", 0);
+        ffmpeg.av_dict_set(&opts, "spatial-aq", effAq ? "1" : "0", 0);
+        if (effLookAhead) ffmpeg.av_dict_set(&opts, "rc-lookahead", "20", 0);
+        if (_ctx->max_b_frames == 0) ffmpeg.av_dict_set(&opts, "b_ref_mode", "disabled", 0);
+        else ffmpeg.av_dict_set(&opts, "b_ref_mode", "middle", 0);
+        ffmpeg.av_dict_set(&opts, "forced-idr", "1", 0);
+        int r = ffmpeg.avcodec_open2(_ctx, codec, &opts);
+        if (r < 0)
+        {
+            // starsze sterowniki / ograniczenia — spróbuj bez B-ramek
+            Log.Warn("NVENC z B-ramkami nie wystartował (" + FF.Err(r) + "), próbuję bez.");
+            ffmpeg.av_dict_free(&opts);
+            _ctx->max_b_frames = 0;
+            ffmpeg.av_dict_set(&opts, "preset", effPreset, 0);
+            ffmpeg.av_dict_set(&opts, "rc", "cbr", 0);
+            ffmpeg.av_dict_set(&opts, "forced-idr", "1", 0);
+            r = ffmpeg.avcodec_open2(_ctx, codec, &opts);
+        }
+        ffmpeg.av_dict_free(&opts);
+        FF.Check(r, "avcodec_open2(h264_nvenc)");
+        Log.Info($"NVENC: {width}x{height}@{fps}, {kbps} kb/s CBR, preset {effPreset}, profil {o.Profile}, keyframe {o.KeyframeSec}s, B-ramki {_ctx->max_b_frames}, AQ {effAq}, look-ahead {effLookAhead}{(o.ZeroFpsImpact ? " [Zero FPS Impact]" : "")}");
+    }
+
+    /// <summary>Bierze wolną teksturę z puli i zwraca widoki do renderowania (Y, UV).</summary>
+    public AVFrame* AcquireFrame(out D3D.ID3D11RenderTargetView yRtv, out D3D.ID3D11RenderTargetView uvRtv)
+    {
+        var f = ffmpeg.av_frame_alloc();
+        int r = ffmpeg.av_hwframe_get_buffer(_hwFrames, f, 0);
+        if (r < 0) { ffmpeg.av_frame_free(&f); throw new InvalidOperationException("av_hwframe_get_buffer: " + FF.Err(r)); }
+        var texPtr = (IntPtr)f->data[0];
+        int index = (int)(long)f->data[1];
+        if (!_views.TryGetValue((texPtr, index), out var v))
+        {
+            var tex = new D3D.ID3D11Texture2D(texPtr);
+            tex.AddRef(); // nasz wrapper trzyma własną referencję
+            var arr = tex.Description.ArraySize > 1;
+            D3D.RenderTargetViewDescription Desc(DXGIFormat fmt) => arr
+                ? new D3D.RenderTargetViewDescription(D3D.RenderTargetViewDimension.Texture2DArray, fmt, 0, (uint)index, 1)
+                : new D3D.RenderTargetViewDescription(D3D.RenderTargetViewDimension.Texture2D, fmt);
+            var y = _dev.CreateRenderTargetView(tex, Desc(DXGIFormat.R8_UNorm));
+            var uv = _dev.CreateRenderTargetView(tex, Desc(DXGIFormat.R8G8_UNorm));
+            v = (tex, y, uv);
+            _views[(texPtr, index)] = v;
+            if (_views.Count > 32) Log.Warn($"Pula NVENC urosła do {_views.Count} tekstur");
+        }
+        yRtv = v.Y;
+        uvRtv = v.UV;
+        return f;
+    }
+
+    /// <summary>Wysyła klatkę do enkodera (przejmuje ją) i oddaje gotowe pakiety.</summary>
+    public void Encode(AVFrame* frame, long pts, bool forceKeyframe, Action<IntPtr> onPacket)
+    {
+        if (frame != null)
+        {
+            frame->pts = pts;
+            frame->pict_type = forceKeyframe ? AVPictureType.AV_PICTURE_TYPE_I : AVPictureType.AV_PICTURE_TYPE_NONE;
+            if (forceKeyframe) frame->flags |= ffmpeg.AV_FRAME_FLAG_KEY;
+        }
+        int r = ffmpeg.avcodec_send_frame(_ctx, frame);
+        if (frame != null) ffmpeg.av_frame_free(&frame);
+        if (r < 0 && r != ffmpeg.AVERROR_EOF) { Log.Warn("NVENC send_frame: " + FF.Err(r)); return; }
+        Drain(onPacket);
+    }
+
+    private void Drain(Action<IntPtr> onPacket)
+    {
+        while (true)
+        {
+            var pkt = ffmpeg.av_packet_alloc();
+            int r = ffmpeg.avcodec_receive_packet(_ctx, pkt);
+            if (r < 0) { ffmpeg.av_packet_free(&pkt); return; }
+            onPacket((IntPtr)pkt);
+        }
+    }
+
+    public void Flush(Action<IntPtr> onPacket) => Encode(null, 0, false, onPacket);
+
+    public void Dispose()
+    {
+        foreach (var v in _views.Values) { v.Y.Dispose(); v.UV.Dispose(); v.Tex.Dispose(); }
+        _views.Clear();
+        fixed (AVCodecContext** c = &_ctx) ffmpeg.avcodec_free_context(c);
+        fixed (AVBufferRef** f = &_hwFrames) ffmpeg.av_buffer_unref(f);
+        fixed (AVBufferRef** d = &_hwDevice) ffmpeg.av_buffer_unref(d);
+    }
+}

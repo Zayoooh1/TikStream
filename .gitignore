@@ -1,0 +1,39 @@
+# Artefakty budowania i dystrybucji
+dist/
+ui/build/
+TikStream.Engine/bin/
+TikStream.Engine/obj/
+installer/stage/
+installer/*.msi
+installer/*.wixpdb
+chat/node_modules/
+
+# Duże binaria FFmpeg (przekraczają limit 100 MB GitHuba — dołączane w GitHub Releases / MSI)
+TikStream.Engine/native/av*.dll
+TikStream.Engine/native/sw*.dll
+TikStream.Engine/native/ffprobe.exe
+
+# Pliki prywatne, robocze, logi i nagrania
+CODEX_HANDOFF.md
+PRZEKAZANIE_*.md
+*.docx
+*.log
+*.mkv
+*.mp4
+*.mov
+*.tmp
+settings.json
+settings.*.json
+.env
+.env.*
+*cookies*
+*secret*
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
