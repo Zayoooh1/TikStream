@@ -65,8 +65,8 @@ public sealed record SourceDef
     public bool ShowGifts { get; set; } = true;
     public bool ShowTaps { get; set; } = true;
 
-    // browser source (OBS-style off-screen Chromium)
-    public string BrowserUrl { get; set; } = "https://obsproject.com/browser-source";
+    // browser source (off-screen Chromium)
+    public string BrowserUrl { get; set; } = "";
     public int BrowserWidth { get; set; } = 800;
     public int BrowserHeight { get; set; } = 600;
     public int BrowserFps { get; set; } = 30;

@@ -187,10 +187,30 @@ public sealed unsafe class BrowserCapture : IDisposable
         Task.Run(InitAsync);
     }
 
+    private static readonly string PlaceholderUrl = "data:text/html;charset=utf-8," + Uri.EscapeDataString("""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"><style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        html,body{width:100%;height:100%;background:radial-gradient(circle at 25% 20%,#232535 0%,#14151c 70%);font-family:'Segoe UI',system-ui,sans-serif;color:#eef0f7;display:flex;align-items:center;justify-content:center;overflow:hidden}
+        .card{width:86%;max-width:620px;padding:36px 32px;border-radius:18px;background:rgba(24,26,36,0.88);border:1px solid rgba(254,44,85,0.45);box-shadow:0 20px 50px rgba(0,0,0,0.45);text-align:center}
+        .badge{width:64px;height:64px;margin:0 auto 18px;border-radius:16px;background:#1b1c23;border:3px solid #fe2c55;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:800;color:#fff;text-shadow:3px 3px 0 #fe2c55}
+        h1{font-size:24px;font-weight:700;margin-bottom:10px;letter-spacing:0.2px}
+        p{font-size:15px;line-height:1.55;color:#a9afc4}
+        .pill{display:inline-block;margin-top:16px;padding:6px 14px;border-radius:999px;background:rgba(37,244,238,0.12);border:1px solid rgba(37,244,238,0.35);color:#25f4ee;font-size:13px;font-weight:600}
+        </style></head>
+        <body><div class="card">
+        <div class="badge">T</div>
+        <h1>TikStream Browser Source</h1>
+        <p>Enter a widget, alert, or webpage URL (StreamElements, Streamlabs, TikFinity) or pick a local HTML file in the source properties.</p>
+        <div class="pill">Transparent background supported</div>
+        </div></body></html>
+        """);
+
     private static string NormalizeUrl(string? url)
     {
         var u = (url ?? "").Trim();
-        if (string.IsNullOrEmpty(u)) return "about:blank";
+        if (string.IsNullOrEmpty(u)) return PlaceholderUrl;
         if (u.Contains("://", StringComparison.Ordinal) || u.StartsWith("about:", StringComparison.OrdinalIgnoreCase) || u.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
             return u;
         if (File.Exists(u)) return new Uri(Path.GetFullPath(u)).AbsoluteUri;
@@ -307,9 +327,9 @@ public sealed unsafe class BrowserCapture : IDisposable
 
     private void InjectCss(ChromiumWebBrowser browser)
     {
-        string css;
-        lock (_stateLock) css = _css;
-        if (string.IsNullOrWhiteSpace(css)) return;
+        string css, url;
+        lock (_stateLock) { css = _css; url = _url; }
+        if (string.IsNullOrWhiteSpace(css) || url == PlaceholderUrl) return;
         try
         {
             var jsCss = JsonSerializer.Serialize(css);

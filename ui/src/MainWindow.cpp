@@ -218,6 +218,158 @@ bool newCaptureOptions(QWidget *parent, const QString &type, const QJsonArray &t
     }
     return true;
 }
+
+bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &captureList, const QJsonObject &audioDevices, QJsonObject &options)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(sourceTypeInfo(type).name);
+    dialog.resize(type == "Browser" || type == "Text" ? 560 : 520, 0);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *f = new QFormLayout;
+    f->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    f->setHorizontalSpacing(12);
+    f->setVerticalSpacing(9);
+    f->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    layout->addLayout(f);
+
+    std::function<void()> collect;
+
+    if (type == "Browser") {
+        auto *urlRow = new QHBoxLayout;
+        auto *url = new QLineEdit;
+        url->setPlaceholderText("https://... or local HTML file (leave empty for preview card)");
+        auto *browse = new QPushButton("File…");
+        urlRow->addWidget(url, 1);
+        urlRow->addWidget(browse);
+        f->addRow("URL", urlRow);
+        QObject::connect(browse, &QPushButton::clicked, &dialog, [&dialog, url] {
+            const QString p = QFileDialog::getOpenFileName(&dialog, "Select HTML File", {}, "HTML Files (*.html *.htm);;All Files (*.*)");
+            if (!p.isEmpty()) url->setText(QUrl::fromLocalFile(p).toString());
+        });
+
+        auto *sizeRow = new QHBoxLayout;
+        auto *w = new PaddedSpinBox;
+        w->setRange(64, 3840); w->setSingleStep(10); w->setSuffix(" px"); w->setValue(800);
+        auto *h = new PaddedSpinBox;
+        h->setRange(64, 2160); h->setSingleStep(10); h->setSuffix(" px"); h->setValue(600);
+        sizeRow->addWidget(w, 1);
+        sizeRow->addWidget(new QLabel("×"));
+        sizeRow->addWidget(h, 1);
+        f->addRow("Size", sizeRow);
+
+        auto *fps = new PaddedSpinBox;
+        fps->setRange(1, 60); fps->setSuffix(" fps"); fps->setValue(30);
+        f->addRow("FPS", fps);
+
+        auto *css = new QPlainTextEdit("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+        css->setFixedHeight(84);
+        f->addRow("Custom CSS", css);
+
+        auto *muted = new QCheckBox("Mute browser audio");
+        f->addRow("", muted);
+        layout->addWidget(hintLabel("Renders web pages, alerts, and local HTML overlays off-screen with a transparent background."));
+
+        collect = [&] {
+            options["browserUrl"] = url->text().trimmed();
+            options["browserWidth"] = w->value();
+            options["browserHeight"] = h->value();
+            options["browserFps"] = fps->value();
+            options["browserCss"] = css->toPlainText();
+            options["browserMuted"] = muted->isChecked();
+            options["browserReloadNonce"] = 0;
+        };
+    } else if (type == "Screen") {
+        auto *combo = new QComboBox;
+        widenChoice(combo);
+        int primary = 0;
+        for (const auto &v : captureList) {
+            const auto c = v.toObject();
+            if (c["kind"].toString() != "Monitor") continue;
+            if (c["isPrimary"].toBool()) primary = combo->count();
+            combo->addItem(themedIcon("monitor"), c["label"].toString(), c["id"].toString());
+        }
+        if (combo->count() > 0) combo->setCurrentIndex(primary);
+        f->addRow("Display", combo);
+        auto *cursor = new QCheckBox("Show mouse cursor");
+        cursor->setChecked(true);
+        f->addRow("", cursor);
+        layout->addWidget(hintLabel("Captures the selected monitor directly from GPU memory via DXGI Desktop Duplication."));
+
+        collect = [&] {
+            options["captureId"] = combo->currentData().toString();
+            options["captureCursor"] = cursor->isChecked();
+        };
+    } else if (type == "Text") {
+        auto *txt = new QPlainTextEdit("My Stream!");
+        txt->setFixedHeight(80);
+        f->addRow("Text", txt);
+        auto *font = new QFontComboBox;
+        font->setCurrentFont(QFont("Segoe UI"));
+        f->addRow("Font", font);
+        auto *szRow = new QHBoxLayout;
+        auto *sz = new PaddedSpinBox;
+        sz->setRange(8, 400); sz->setSuffix(" px"); sz->setValue(72);
+        auto *bold = new QCheckBox("Bold");
+        bold->setChecked(true);
+        szRow->addWidget(sz, 1);
+        szRow->addWidget(bold);
+        f->addRow("Size", szRow);
+        auto *color = new ColorButton("Text Color");
+        color->setColor(Qt::white);
+        f->addRow("Color", color);
+        auto *outRow = new QHBoxLayout;
+        auto *outColor = new ColorButton("Outline");
+        outColor->setColor(Qt::black);
+        auto *outW = new PaddedSpinBox;
+        outW->setRange(0, 40); outW->setSuffix(" px"); outW->setValue(6);
+        outRow->addWidget(outColor, 1);
+        outRow->addWidget(outW);
+        f->addRow("Outline", outRow);
+        auto *bg = new ColorButton("Background");
+        bg->setColor(Qt::transparent);
+        f->addRow("Background", bg);
+
+        collect = [&] {
+            options["text"] = txt->toPlainText();
+            options["fontName"] = font->currentFont().family();
+            options["fontSize"] = sz->value();
+            options["bold"] = bold->isChecked();
+            options["colorArgb"] = double(qint32(color->color().rgba()));
+            options["outlineArgb"] = double(qint32(outColor->color().rgba()));
+            options["outlineWidth"] = outW->value();
+            options["backgroundArgb"] = double(qint32(bg->color().rgba()));
+        };
+    } else if (type == "AudioInput" || type == "AudioOutput") {
+        auto *combo = new QComboBox;
+        widenChoice(combo);
+        combo->addItem("System default device", "");
+        const QJsonArray devs = audioDevices[type == "AudioInput" ? "inputs" : "outputs"].toArray();
+        for (const auto &d : devs)
+            combo->addItem(d.toObject()["name"].toString(), d.toObject()["id"].toString());
+        f->addRow("Device", combo);
+        layout->addWidget(hintLabel(type == "AudioInput"
+            ? "Captures audio from the selected microphone or input device in this scene."
+            : "Captures audio playing through the selected speakers or headphones in this scene."));
+
+        collect = [&] {
+            options["deviceId"] = combo->currentData().toString();
+        };
+    } else {
+        return true;
+    }
+
+    auto *buttons = new QDialogButtonBox;
+    auto *add = buttons->addButton("Add Source", QDialogButtonBox::AcceptRole);
+    add->setObjectName("primary");
+    buttons->addButton("Cancel", QDialogButtonBox::RejectRole);
+    layout->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) return false;
+    if (collect) collect();
+    return true;
+}
 QRectF itemRect(const QJsonObject &i) { return QRectF(i["x"].toDouble(), i["y"].toDouble(), i["w"].toDouble(1), i["h"].toDouble(1)); }
 QColor argbOf(const QJsonValue &v, QColor def = Qt::white) { return v.isDouble() ? QColor::fromRgba(QRgb(quint32(qint64(v.toDouble())))) : def; }
 double argbVal(const QColor &c) { return double(qint32(c.rgba())); }
@@ -1928,7 +2080,7 @@ void MainWindow::loadProperties()
         m_mediaPath->setText(src["filePath"].toString());
         m_mediaLoop->setChecked(src["loop"].toBool(true));
     } else if (type == "Browser") {
-        m_browserUrl->setText(src["browserUrl"].toString("https://obsproject.com/browser-source"));
+        m_browserUrl->setText(src["browserUrl"].toString());
         m_browserWidth->setValue(src["browserWidth"].toInt(800));
         m_browserHeight->setValue(src["browserHeight"].toInt(600));
         m_browserFps->setValue(src["browserFps"].toInt(30));
@@ -2179,6 +2331,10 @@ void MainWindow::addSourceDialog()
     if (r.existingId.isEmpty() && (r.type == "Game" || r.type == "Window" || r.type == "AudioApplication")) {
         refreshCaptureList();
         if (!newCaptureOptions(this, r.type, m_captureList, options)) return;
+    } else if (r.existingId.isEmpty() && (r.type == "Browser" || r.type == "Screen" || r.type == "Text" || r.type == "AudioInput" || r.type == "AudioOutput")) {
+        if (r.type == "Screen") refreshCaptureList();
+        if (r.type == "AudioInput" || r.type == "AudioOutput") m_audioDevices = EngineHost::instance().callObj("listAudioDevices");
+        if (!newSourceOptions(this, r.type, m_captureList, m_audioDevices, options)) return;
     }
     const auto gameAudioProcess = options.take("gameAudioProcess").toString();
     const QString itemId = addSource(r.type, r.name, r.existingId, r.visible, options);
@@ -2216,7 +2372,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         }
         if (type == "Color") src["colorArgb"] = argbVal(QColor(0, 0, 0, 160));
         if (type == "Browser") {
-            src["browserUrl"] = "https://obsproject.com/browser-source";
+            src["browserUrl"] = "";
             src["browserWidth"] = 800;
             src["browserHeight"] = 600;
             src["browserFps"] = 30;
@@ -2254,6 +2410,13 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         item["x"] = 0.0; item["y"] = (1 - h) / 2; item["w"] = 1.0; item["h"] = h;
     } else if (type == "Color") {
         item["x"] = 0.0; item["y"] = 0.0; item["w"] = 1.0; item["h"] = 1.0;
+    } else if (type == "Browser") {
+        const auto sObj = sourceById(sourceId);
+        const double bw = std::max(64, sObj["browserWidth"].toInt(800));
+        const double bh = std::max(64, sObj["browserHeight"].toInt(600));
+        const double sc = std::min({1.0, 0.9 * cw / bw, 0.9 * ch / bh});
+        const double w = bw * sc / cw, h = bh * sc / ch;
+        item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
         const double scale = std::min(1.0, 0.8 * cw / sz.width());

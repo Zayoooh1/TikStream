@@ -4,7 +4,7 @@
 
   <Package Name="TikStream"
            Manufacturer="TikStream"
-           Version="1.2.1.0"
+           Version="1.2.2.0"
            UpgradeCode="7F8C3D21-6E94-4A1B-9C52-3E4A7B1D8F02"
            Language="1033"
            Codepage="1252"
