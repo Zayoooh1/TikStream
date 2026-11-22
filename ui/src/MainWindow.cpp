@@ -477,7 +477,7 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
         if (!m_alertQueue.isEmpty()) QTimer::singleShot(250, this, &MainWindow::showNextAlert);
     });
     m_alertAnimTimer = new QTimer(this);
-    m_alertAnimTimer->setInterval(25); // 40 FPS smooth alert animations
+    m_alertAnimTimer->setTimerType(Qt::PreciseTimer);
     connect(m_alertAnimTimer, &QTimer::timeout, this, [this] {
         if (m_alertKind.isEmpty()) { m_alertAnimTimer->stop(); return; }
         ++m_alertRevision;
@@ -2844,19 +2844,77 @@ void MainWindow::showNextAlert()
         if (maxDur <= 0) continue;
 
         if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
+        m_alertCachedImg = QImage();
+        auto scaleAlertImg = [this](const QImage &raw) -> QImage {
+            if (raw.isNull()) return {};
+            const int maxDim = std::min(560, std::max(360, std::min(m_canvasW, m_canvasH) / 2));
+            if (raw.width() > maxDim || raw.height() > maxDim)
+                return raw.scaled(maxDim, maxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (raw.width() < 260 && raw.height() < 260)
+                return raw.scaled(320, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            return raw.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        };
+
         if (!imagePath.isEmpty() && imagePath.endsWith(".gif", Qt::CaseInsensitive) && QFileInfo::exists(imagePath)) {
             m_alertMovie = new QMovie(imagePath, QByteArray(), this);
             if (m_alertMovie->isValid()) {
-                connect(m_alertMovie, &QMovie::frameChanged, this, [this] {
-                    ++m_alertRevision;
-                    updateAlertOverlays();
+                connect(m_alertMovie, &QMovie::frameChanged, this, [this, scaleAlertImg] {
+                    if (m_alertMovie) m_alertCachedImg = scaleAlertImg(m_alertMovie->currentImage());
                 });
                 m_alertMovie->start();
+                m_alertCachedImg = scaleAlertImg(m_alertMovie->currentImage());
             } else {
                 delete m_alertMovie;
                 m_alertMovie = nullptr;
             }
+        } else if (!imagePath.isEmpty()) {
+            m_alertCachedImg = scaleAlertImg(QImage(imagePath));
         }
+
+        // Pre-rasterize outlined bold text ONCE per alert (instead of every frame) so animations run at full 60+ FPS!
+        const QColor accent = ev.kind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
+        const int refW = m_alertCachedImg.isNull() ? 520 : std::clamp(m_alertCachedImg.width(), 360, 600);
+        m_alertScaleRef = refW / 520.0;
+        m_alertPad = std::max(36, int(44 * m_alertScaleRef));
+        m_alertGapAfterImg = m_alertCachedImg.isNull() ? 0 : std::max(14, int(20 * m_alertScaleRef));
+        m_alertLineGap = std::max(6, int(10 * m_alertScaleRef));
+
+        auto prerenderText = [](const QString &text, int pixelSize, const QColor &fillColor) -> QImage {
+            if (text.isEmpty()) return {};
+            QFont f("Segoe UI");
+            f.setPixelSize(pixelSize);
+            f.setWeight(QFont::Bold);
+            const QFontMetrics fm(f);
+            const qreal outlineW = std::max(4.5, pixelSize * 0.13);
+            const int margin = int(std::ceil(outlineW * 2.0)) + 8;
+            const int tw = fm.horizontalAdvance(text);
+            const int th = fm.height();
+            QImage out(tw + margin * 2, th + margin * 2, QImage::Format_ARGB32_Premultiplied);
+            out.fill(Qt::transparent);
+            QPainter p(&out);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setRenderHint(QPainter::TextAntialiasing, true);
+            QPainterPath path;
+            path.addText(margin, margin + fm.ascent(), f, text);
+            p.save();
+            p.translate(0, std::max(2.5, pixelSize * 0.06));
+            p.strokePath(path, QPen(QColor(0, 0, 0, 155), outlineW * 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.fillPath(path, QColor(0, 0, 0, 155));
+            p.restore();
+            p.strokePath(path, QPen(QColor(10, 12, 18, 245), outlineW, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.fillPath(path, fillColor);
+            return out;
+        };
+
+        m_alertUserImg = prerenderText(ev.user, std::max(38, int(54 * m_alertScaleRef)), accent);
+        m_alertDetailImg = prerenderText(ev.detail, std::max(26, int(36 * m_alertScaleRef)), Qt::white);
+
+        const int contentW = std::max({m_alertCachedImg.width(), m_alertUserImg.width(), m_alertDetailImg.width(), 180});
+        const int aw = contentW + m_alertPad * 2;
+        const int ah = m_alertPad + m_alertCachedImg.height() + m_alertGapAfterImg
+                     + m_alertUserImg.height() + (!m_alertUserImg.isNull() && !m_alertDetailImg.isNull() ? m_alertLineGap : 0)
+                     + m_alertDetailImg.height() + m_alertPad;
+        m_alertCanvas = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
 
         m_alertKind = ev.kind;
         m_alertUser = ev.user;
@@ -2867,6 +2925,8 @@ void MainWindow::showNextAlert()
         updateAlertOverlays();
         if (!soundPath.isEmpty())
             EngineHost::instance().call("playAlertSound", {{"sourceId", alertSourceId}, {"path", soundPath}, {"volume", volume}});
+        const int targetFps = std::clamp(m_s["fps"].toInt(60), 15, 120);
+        m_alertAnimTimer->setInterval(std::max(8, int(std::lround(1000.0 / targetFps))));
         m_alertAnimTimer->start();
         m_alertTimer->start(m_alertDurMs);
         return;
@@ -3033,56 +3093,9 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
-            if (!m_alertKind.isEmpty()) {
-                const QColor accent = m_alertKind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
-
-                // Load image or current animated GIF frame at its natural resolution
-                QImage iconImg;
-                if (m_alertMovie && m_alertMovie->state() == QMovie::Running) {
-                    iconImg = m_alertMovie->currentImage();
-                } else {
-                    QString imgPath = src[m_alertKind == "gift" ? "alertGiftImagePath" : "alertFollowImagePath"].toString();
-                    if (imgPath.isEmpty()) imgPath = src["alertImagePath"].toString();
-                    if (!imgPath.isEmpty()) iconImg = QImage(imgPath);
-                }
-
-                // Keep natural image aspect ratio; upscale tiny icons and cap huge images cleanly
-                QImage displayImg;
-                if (!iconImg.isNull()) {
-                    const int maxDim = std::max(720, std::min(m_canvasW, m_canvasH));
-                    if (iconImg.width() > maxDim || iconImg.height() > maxDim) {
-                        displayImg = iconImg.scaled(maxDim, maxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                    } else if (iconImg.width() < 320 && iconImg.height() < 320) {
-                        displayImg = iconImg.scaled(360, 360, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                    } else {
-                        displayImg = iconImg;
-                    }
-                }
-
-                // Scale typography cleanly relative to the image width (or sensible default when text-only)
-                const int refW = displayImg.isNull() ? 640 : std::clamp(displayImg.width(), 420, 1080);
-                const qreal sc = refW / 560.0;
-                const int pad = std::max(44, int(52 * sc)); // extra headroom for smooth float, pop-in, and gentle tilt
-                const int gapAfterImg = displayImg.isNull() ? 0 : std::max(18, int(24 * sc));
-                const int lineGap = std::max(8, int(12 * sc));
-
-                QFont userFont("Segoe UI");
-                userFont.setPixelSize(std::max(44, int(60 * sc)));
-                userFont.setWeight(QFont::Bold);
-                QFont detailFont("Segoe UI");
-                detailFont.setPixelSize(std::max(30, int(40 * sc)));
-                detailFont.setWeight(QFont::Bold);
-
-                const QFontMetrics ufm(userFont);
-                const QFontMetrics dfm(detailFont);
-                const int userW = m_alertUser.isEmpty() ? 0 : ufm.horizontalAdvance(m_alertUser);
-                const int detailW = m_alertDetail.isEmpty() ? 0 : dfm.horizontalAdvance(m_alertDetail);
-                const int userH = m_alertUser.isEmpty() ? 0 : ufm.height();
-                const int detailH = m_alertDetail.isEmpty() ? 0 : dfm.height();
-
-                const int contentW = std::max({displayImg.width(), userW, detailW, 200});
-                const int aw = contentW + pad * 2;
-                const int ah = pad + displayImg.height() + gapAfterImg + userH + (userH > 0 && detailH > 0 ? lineGap : 0) + detailH + pad;
+            if (!m_alertKind.isEmpty() && !m_alertCanvas.isNull()) {
+                const int aw = m_alertCanvas.width();
+                const qreal sc = m_alertScaleRef;
 
                 // Smooth easing helpers for entrance, idle motion, and exit
                 const double elapsedMs = std::max(0.0, double(QDateTime::currentMSecsSinceEpoch() - m_alertStartMs));
@@ -3104,69 +3117,46 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                 const double imgFloatY = std::sin(elapsedMs * 0.0042) * (7.0 * sc);
                 const double imgTiltDeg = std::sin(elapsedMs * 0.0028) * 2.6;
 
-                img = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
-                img.fill(Qt::transparent);
-
-                QPainter p(&img);
-                p.setRenderHint(QPainter::Antialiasing, true);
-                p.setRenderHint(QPainter::TextAntialiasing, true);
+                m_alertCanvas.fill(Qt::transparent);
+                QPainter p(&m_alertCanvas);
                 p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-                int y = pad;
-                if (!displayImg.isNull()) {
+                int y = m_alertPad;
+                if (!m_alertCachedImg.isNull()) {
                     p.save();
                     p.setOpacity(masterAlpha);
-                    const qreal cx = aw / 2.0;
-                    const qreal cy = y + displayImg.height() / 2.0 + imgFloatY;
-                    p.translate(cx, cy);
+                    p.translate(aw / 2.0, y + m_alertCachedImg.height() / 2.0 + imgFloatY);
                     p.rotate(imgTiltDeg);
                     p.scale(imgScale, imgScale);
-                    p.drawImage(-displayImg.width() / 2.0, -displayImg.height() / 2.0, displayImg);
+                    p.drawImage(-m_alertCachedImg.width() / 2.0, -m_alertCachedImg.height() / 2.0, m_alertCachedImg);
                     p.restore();
-                    y += displayImg.height() + gapAfterImg;
+                    y += m_alertCachedImg.height() + m_alertGapAfterImg;
                 }
 
-                auto drawBoldOutlined = [&](const QString &text, const QFont &f, const QFontMetrics &fm, int topY, const QColor &fillColor, double delayMs, double phase) {
-                    if (text.isEmpty()) return;
+                auto drawAnimText = [&](const QImage &txtImg, int topY, double delayMs, double phase) {
+                    if (txtImg.isNull()) return;
                     const double tIn = clamp01((elapsedMs - delayMs) / 420.0);
                     const double eIn = easeOutBack(tIn);
                     const double alpha = easeOutCubic(tIn) * fadeOut;
                     if (alpha <= 0.005) return;
-
                     const double slideY = (1.0 - easeOutCubic(tIn)) * (26.0 * sc) + std::sin(elapsedMs * 0.0045 + phase) * (3.0 * sc) - (1.0 - fadeOut) * (14.0 * sc);
                     const double txtScale = (0.82 + 0.18 * eIn) * (0.94 + 0.06 * fadeOut);
-
-                    const int tw = fm.horizontalAdvance(text);
-                    const qreal cx = aw / 2.0;
-                    const qreal cy = topY + fm.height() / 2.0 + slideY;
-
-                    QPainterPath path;
-                    path.addText(-tw / 2.0, fm.ascent() - fm.height() / 2.0, f, text);
-
                     p.save();
                     p.setOpacity(alpha);
-                    p.translate(cx, cy);
+                    p.translate(aw / 2.0, topY + txtImg.height() / 2.0 + slideY);
                     p.scale(txtScale, txtScale);
-
-                    const qreal outlineW = std::max(5.0, f.pixelSize() * 0.13);
-                    p.save();
-                    p.translate(0, std::max(3.0, f.pixelSize() * 0.07));
-                    p.strokePath(path, QPen(QColor(0, 0, 0, 155), outlineW * 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    p.fillPath(path, QColor(0, 0, 0, 155));
-                    p.restore();
-
-                    p.strokePath(path, QPen(QColor(10, 12, 18, 245), outlineW, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    p.fillPath(path, fillColor);
+                    p.drawImage(-txtImg.width() / 2.0, -txtImg.height() / 2.0, txtImg);
                     p.restore();
                 };
 
-                if (userH > 0) {
-                    drawBoldOutlined(m_alertUser, userFont, ufm, y, accent, 70.0, 0.0);
-                    y += userH + lineGap;
+                if (!m_alertUserImg.isNull()) {
+                    drawAnimText(m_alertUserImg, y, 70.0, 0.0);
+                    y += m_alertUserImg.height() + m_alertLineGap;
                 }
-                if (detailH > 0) {
-                    drawBoldOutlined(m_alertDetail, detailFont, dfm, y, Qt::white, 150.0, 1.1);
+                if (!m_alertDetailImg.isNull()) {
+                    drawAnimText(m_alertDetailImg, y, 150.0, 1.1);
                 }
+                img = m_alertCanvas;
             }
         } else {
             img = rasterizeSource(src);

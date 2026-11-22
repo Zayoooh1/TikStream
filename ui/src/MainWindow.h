@@ -191,6 +191,9 @@ private:
     int m_alertDurMs = 5000;
     quint64 m_alertRevision = 0;
     QMovie *m_alertMovie = nullptr;
+    QImage m_alertCachedImg, m_alertUserImg, m_alertDetailImg, m_alertCanvas;
+    int m_alertGapAfterImg = 0, m_alertLineGap = 0, m_alertPad = 48;
+    qreal m_alertScaleRef = 1.0;
     QSystemTrayIcon *m_tray = nullptr;
     QList<double> m_histFps, m_histRenderMs, m_histKbps;
     QPointer<QWidget> m_statsGraphWidget;
