@@ -81,6 +81,8 @@ public static class CefHost
                         LogFile = Path.Combine(logDir, "cef.log"),
                         WindowlessRenderingEnabled = true,
                     };
+                    settings.EnableAudio();
+                    settings.CefCommandLineArgs.Remove("mute-audio");
                     settings.CefCommandLineArgs["autoplay-policy"] = "no-user-gesture-required";
                     settings.CefCommandLineArgs["disable-gpu-vsync"] = "1";
                     settings.CefCommandLineArgs["enable-begin-frame-scheduling"] = "1";
