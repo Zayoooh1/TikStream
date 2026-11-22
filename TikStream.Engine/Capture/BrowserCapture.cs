@@ -1,9 +1,12 @@
 using System.Drawing;
+using System.Net.Http;
 using System.Text.Json;
 using CefSharp;
 using CefSharp.Enums;
+using CefSharp.Handler;
 using CefSharp.OffScreen;
 using CefSharp.Structs;
+using NAudio.Wave;
 using TikStream.Core;
 using TikStream.Gpu;
 using Vortice.Direct3D11;
@@ -239,8 +242,19 @@ public sealed unsafe class BrowserCapture : IDisposable
 
             var browser = new ChromiumWebBrowser(_url, bs, requestContext: null, automaticallyCreateBrowser: false);
             browser.RenderHandler = new RawBgraRenderHandler(browser, OnRawPaint);
+            browser.RequestHandler = new BrowserAudioRequestHandler();
             if (_onAudio != null) browser.AudioHandler = new BrowserAudioHandler(_onAudio);
             browser.Size = new System.Drawing.Size(_width, _height);
+            browser.ConsoleMessage += (_, e) =>
+            {
+                if (e.Level >= LogSeverity.Error)
+                    Log.Warn($"Browser JS [{e.Level}]: {e.Message}");
+            };
+            browser.FrameLoadStart += (_, e) =>
+            {
+                if (_disposed || !e.Frame.IsMain) return;
+                InjectAudioShim(browser);
+            };
             browser.BrowserInitialized += (_, _) =>
             {
                 if (_disposed) return;
@@ -259,6 +273,7 @@ public sealed unsafe class BrowserCapture : IDisposable
             {
                 if (_disposed || !e.Frame.IsMain) return;
                 _status = $"{_width}×{_height} • {_fps} fps";
+                InjectAudioShim(browser);
                 InjectCss(browser);
             };
             browser.LoadError += (_, e) =>
@@ -326,6 +341,28 @@ public sealed unsafe class BrowserCapture : IDisposable
             if (sizeChanged || fpsChanged) _status = $"{w}×{h} • {f} fps";
         }
         catch (Exception ex) { Log.Warn("BrowserCapture apply: " + ex.Message); }
+    }
+
+    private static void InjectAudioShim(ChromiumWebBrowser browser)
+    {
+        try
+        {
+            const string js = """
+                (function(){
+                  if (window.__tsAudioShim) return;
+                  window.__tsAudioShim = true;
+                  const orig = HTMLMediaElement.prototype.canPlayType;
+                  HTMLMediaElement.prototype.canPlayType = function(t) {
+                    const r = orig.call(this, t);
+                    if (r) return r;
+                    if (/audio\/(mpeg|mp3|mp4|aac|x-m4a|aacp)/i.test(t || '')) return 'probably';
+                    return r;
+                  };
+                })();
+                """;
+            browser.ExecuteScriptAsync(js);
+        }
+        catch { }
     }
 
     private void InjectCss(ChromiumWebBrowser browser)
@@ -496,6 +533,7 @@ public sealed unsafe class BrowserCapture : IDisposable
         public void OnAudioStreamStarted(IWebBrowser chromiumWebBrowser, IBrowser browser, AudioParameters parameters, int channels)
         {
             _channels = Math.Max(1, channels);
+            Log.Info($"Browser audio stream started ({parameters.SampleRate} Hz, {_channels} ch)");
         }
 
         public void OnAudioStreamPacket(IWebBrowser chromiumWebBrowser, IBrowser browser, IntPtr data, int noOfFrames, long pts)
@@ -523,5 +561,135 @@ public sealed unsafe class BrowserCapture : IDisposable
         }
 
         public void Dispose() => _disposed = true;
+    }
+
+    /// <summary>
+    /// Intercepts MP3/AAC/M4A audio requests in Browser Sources and transcodes them on-the-fly to PCM WAV via Windows Media Foundation,
+    /// enabling full audio playback (Tipply, StreamElements, Streamlabs, TTS) on standard open-source CEF builds without proprietary codecs.
+    /// </summary>
+    private sealed class BrowserAudioRequestHandler : RequestHandler
+    {
+        protected override IResourceRequestHandler? GetResourceRequestHandler(
+            IWebBrowser chromiumWebBrowser, IBrowser browser, IFrame frame, IRequest request,
+            bool isNavigation, bool isDownload, string requestInitiator, ref bool disableDefaultHandling)
+        {
+            if (isNavigation || isDownload || !string.Equals(request.Method, "GET", StringComparison.OrdinalIgnoreCase))
+                return null;
+            var url = request.Url ?? "";
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            bool likelyAudio = request.ResourceType == ResourceType.Media
+                || url.Contains(".mp3", StringComparison.OrdinalIgnoreCase)
+                || url.Contains(".m4a", StringComparison.OrdinalIgnoreCase)
+                || url.Contains(".aac", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("/tts", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("speech", StringComparison.OrdinalIgnoreCase);
+            return likelyAudio ? AudioTranscodeResourceRequestHandler.Instance : null;
+        }
+    }
+
+    private sealed class AudioTranscodeResourceRequestHandler : ResourceRequestHandler
+    {
+        public static readonly AudioTranscodeResourceRequestHandler Instance = new();
+
+        protected override IResourceHandler GetResourceHandler(IWebBrowser chromiumWebBrowser, IBrowser browser, IFrame frame, IRequest request)
+            => new AudioTranscodeResourceHandler();
+    }
+
+    private sealed class AudioTranscodeResourceHandler : ResourceHandler
+    {
+        private static readonly HttpClient Http = new(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+        };
+
+        public override CefReturnValue ProcessRequestAsync(IRequest request, ICallback callback)
+        {
+            var url = request.Url;
+            var reqHeaders = new List<(string K, string V)>();
+            try
+            {
+                var h = request.Headers;
+                if (h != null)
+                {
+                    foreach (string? key in h.AllKeys)
+                    {
+                        if (string.IsNullOrEmpty(key)) continue;
+                        if (key.Equals("Range", StringComparison.OrdinalIgnoreCase) || key.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
+                        var val = h[key];
+                        if (!string.IsNullOrEmpty(val)) reqHeaders.Add((key, val));
+                    }
+                }
+            }
+            catch { }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+                    foreach (var (k, v) in reqHeaders) msg.Headers.TryAddWithoutValidation(k, v);
+                    using var resp = Http.SendAsync(msg, HttpCompletionOption.ResponseContentRead).GetAwaiter().GetResult();
+                    var bytes = resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                    var ct = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+
+                    bool needsTranscode = resp.IsSuccessStatusCode && bytes.Length > 16 && (
+                        ct.Contains("mpeg", StringComparison.OrdinalIgnoreCase) ||
+                        ct.Contains("mp3", StringComparison.OrdinalIgnoreCase) ||
+                        ct.Contains("aac", StringComparison.OrdinalIgnoreCase) ||
+                        ct.Contains("m4a", StringComparison.OrdinalIgnoreCase) ||
+                        ct.Equals("audio/mp4", StringComparison.OrdinalIgnoreCase) ||
+                        (bytes[0] == (byte)'I' && bytes[1] == (byte)'D' && bytes[2] == (byte)'3') ||
+                        (bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0));
+
+                    if (needsTranscode && TryTranscodeToWav(bytes, out var wavBytes))
+                    {
+                        Stream = new MemoryStream(wavBytes, writable: false);
+                        MimeType = "audio/wav";
+                        StatusCode = 200;
+                        StatusText = "OK";
+                    }
+                    else
+                    {
+                        Stream = new MemoryStream(bytes, writable: false);
+                        MimeType = ct;
+                        StatusCode = (int)resp.StatusCode;
+                        StatusText = resp.ReasonPhrase ?? "OK";
+                    }
+                    AutoDisposeStream = true;
+                    Headers["Access-Control-Allow-Origin"] = "*";
+                    Headers["Cache-Control"] = "no-cache";
+                    callback.Continue();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("Browser audio fetch/transcode: " + ex.Message);
+                    callback.Cancel();
+                }
+            });
+            return CefReturnValue.ContinueAsync;
+        }
+
+        private static bool TryTranscodeToWav(byte[] encoded, out byte[] wavBytes)
+        {
+            wavBytes = Array.Empty<byte>();
+            try
+            {
+                using var src = new MemoryStream(encoded, writable: false);
+                using var reader = new StreamMediaFoundationReader(src);
+                var targetFmt = new WaveFormat(AudioEngine.SampleRate, 16, 2);
+                using var resampler = new MediaFoundationResampler(reader, targetFmt) { ResamplerQuality = 30 };
+                using var outMs = new MemoryStream(encoded.Length * 4);
+                WaveFileWriter.WriteWavFileToStream(outMs, resampler);
+                wavBytes = outMs.ToArray();
+                return wavBytes.Length > 44;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Browser audio transcode failed: " + ex.Message);
+                return false;
+            }
+        }
     }
 }

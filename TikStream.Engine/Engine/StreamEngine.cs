@@ -144,14 +144,14 @@ public sealed unsafe class StreamEngine : IDisposable
     public void ApplySettings(AppSettings s, AppSettings previous)
     {
         var copy = s.Clone();
-        if (Sig(copy.Sources.Where(x => !x.IsVisual || x.Type == SourceType.AlertBox)) != Sig(previous.Sources.Where(x => !x.IsVisual || x.Type == SourceType.AlertBox)) ||
+        if (Sig(copy.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) != Sig(previous.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) ||
             !AudibleDeviceIds(copy).SetEquals(AudibleDeviceIds(previous)))
             Audio.SyncDevices(copy);
-        var oldMedia = previous.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox).ToDictionary(x => x.Id);
-        foreach (var m in copy.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox))
+        var oldMedia = previous.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox or SourceType.Browser).ToDictionary(x => x.Id);
+        foreach (var m in copy.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox or SourceType.Browser))
         {
-            if (!oldMedia.TryGetValue(m.Id, out var old) || (m.Muted, m.Volume) != (old.Muted, old.Volume))
-                Audio.SetVolume(m.Id, m.Muted ? 0 : m.Volume);
+            if (!oldMedia.TryGetValue(m.Id, out var old) || (m.Muted, m.BrowserMuted, m.Volume) != (old.Muted, old.BrowserMuted, old.Volume))
+                Audio.SetVolume(m.Id, m.Muted || m.BrowserMuted ? 0 : m.Volume);
             Audio.SetFilters(m.Id, m);
         }
         if (copy.ProcessPriority != previous.ProcessPriority) ApplyPriority(copy.ProcessPriority);
