@@ -8,6 +8,7 @@ class PreviewWidget : public QWidget
 public:
     explicit PreviewWidget(QWidget *parent = nullptr);
     void setCanvasSize(int w, int h) { m_canvasW = w; m_canvasH = h; }
+    void emitSize();
     QPaintEngine *paintEngine() const override { return nullptr; }
 
     // normalized canvas coordinates (0..1) for a point in widget space
@@ -22,6 +23,7 @@ signals:
     void deletePressed();
 
 protected:
+    bool event(QEvent *e) override;
     void resizeEvent(QResizeEvent *) override;
     void showEvent(QShowEvent *) override;
     void paintEvent(QPaintEvent *) override {}
@@ -33,7 +35,6 @@ protected:
     void enterEvent(QEnterEvent *) override { setFocus(); }
 
 private:
-    void emitSize();
     int m_canvasW = 1080, m_canvasH = 1920;
     bool m_dragging = false;
 };

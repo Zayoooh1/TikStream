@@ -1,7 +1,9 @@
 #include "PreviewWidget.h"
 
+#include <QEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QTimer>
 #include <QWheelEvent>
 
 PreviewWidget::PreviewWidget(QWidget *parent) : QWidget(parent)
@@ -17,8 +19,19 @@ PreviewWidget::PreviewWidget(QWidget *parent) : QWidget(parent)
 
 void PreviewWidget::emitSize()
 {
+    if (!isVisible()) return;
     const qreal dpr = devicePixelRatioF();
-    emit nativeResized(qint64(winId()), qRound(width() * dpr), qRound(height() * dpr));
+    const int pw = std::max(2, qRound(width() * dpr));
+    const int ph = std::max(2, qRound(height() * dpr));
+    emit nativeResized(qint64(winId()), pw, ph);
+}
+
+bool PreviewWidget::event(QEvent *e)
+{
+    const bool r = QWidget::event(e);
+    if (e->type() == QEvent::WinIdChange || e->type() == QEvent::ParentChange)
+        QTimer::singleShot(0, this, &PreviewWidget::emitSize);
+    return r;
 }
 
 void PreviewWidget::resizeEvent(QResizeEvent *) { emitSize(); }

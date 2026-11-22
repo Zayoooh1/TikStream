@@ -930,6 +930,14 @@ void MainWindow::buildDocks()
     m_dualPreviewDock->setFloating(true);
     connect(m_dualPreviewDock, &QDockWidget::topLevelChanged, m_dualPreviewDock, [this](bool floating) {
         if (floating) QTimer::singleShot(0, m_dualPreviewDock, [this] { applyDarkTitleBar(m_dualPreviewDock); });
+        QTimer::singleShot(30, m_dualPreview, [this] {
+            if (m_dualPreviewDock && m_dualPreviewDock->isVisible() && m_dualPreview) m_dualPreview->emitSize();
+        });
+    });
+    connect(m_dualPreviewDock, &QDockWidget::dockLocationChanged, m_dualPreviewDock, [this](Qt::DockWidgetArea) {
+        QTimer::singleShot(30, m_dualPreview, [this] {
+            if (m_dualPreviewDock && m_dualPreviewDock->isVisible() && m_dualPreview) m_dualPreview->emitSize();
+        });
     });
     m_dualPreviewDock->hide();
     if (auto *pm = findChild<QMenu *>("panelsMenu")) {

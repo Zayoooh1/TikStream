@@ -1088,7 +1088,7 @@ public sealed unsafe class StreamEngine : IDisposable
         if (_previewEnabled && _previewHwnd != IntPtr.Zero)
             _comp.PresentPreview(_selection);
 
-        bool wantDualPreview = _previewEnabled && _dualPreviewHwnd != IntPtr.Zero && (s.DualCanvasEnabled || s.SecondStreamEnabled) && s.DualCanvasPreviewEnabled;
+        bool wantDualPreview = _previewEnabled && _dualPreviewHwnd != IntPtr.Zero;
         if (wantDualPreview)
         {
             int dw = Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096);
