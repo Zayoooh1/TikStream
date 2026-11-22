@@ -499,10 +499,36 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
         updateAlertOverlays();
     });
 
+    m_layoutSaveTimer = new QTimer(this);
+    m_layoutSaveTimer->setSingleShot(true);
+    m_layoutSaveTimer->setInterval(400);
+    connect(m_layoutSaveTimer, &QTimer::timeout, this, &MainWindow::saveDockLayout);
+
     QSettings qs("TikStream", "UI2");
-    restoreGeometry(qs.value("geometry").toByteArray());
-    restoreState(qs.value("state").toByteArray());
-    if (!qs.value("compactLayoutV1").toBool()) arrangeDocks(false);
+    const QByteArray savedGeo = qs.value("geometry").toByteArray();
+    const QByteArray savedState = qs.value("state").toByteArray();
+    if (!savedGeo.isEmpty()) restoreGeometry(savedGeo);
+    const bool hadState = !savedState.isEmpty() && restoreState(savedState);
+    if (!hadState && !qs.value("compactLayoutV1").toBool()) arrangeDocks(false);
+    if (hadState) m_dualDockPositioned = true;
+    for (auto *dock : findChildren<QDockWidget *>()) {
+        if (dock->isFloating()) {
+            const QByteArray dg = qs.value("dockGeo/" + dock->objectName()).toByteArray();
+            if (!dg.isEmpty()) dock->restoreGeometry(dg);
+        }
+        auto schedSave = [this] { if (m_layoutSaveTimer && !m_loading) m_layoutSaveTimer->start(); };
+        connect(dock, &QDockWidget::dockLocationChanged, this, [schedSave](Qt::DockWidgetArea) { schedSave(); });
+        connect(dock, &QDockWidget::topLevelChanged, this, [schedSave](bool) { schedSave(); });
+        connect(dock, &QDockWidget::visibilityChanged, this, [schedSave](bool) { schedSave(); });
+    }
+    QTimer::singleShot(0, this, [this] {
+        for (auto *dock : findChildren<QDockWidget *>()) {
+            if (dock->isFloating() && dock->isVisible()) {
+                ensureDockOnScreen(dock);
+                applyDarkTitleBar(dock);
+            }
+        }
+    });
 
     for (const auto &v : sources()) uploadRaster(v.toObject());
     refreshCaptureList();
@@ -932,7 +958,10 @@ void MainWindow::buildDocks()
         if (!vis) {
             EngineHost::instance().call("setDualPreview", QJsonObject{{"hwnd", 0}, {"w", 0}, {"h", 0}});
         } else if (m_dualPreview) {
-            if (m_dualPreviewDock->isFloating()) QTimer::singleShot(0, m_dualPreviewDock, [this] { applyDarkTitleBar(m_dualPreviewDock); });
+            if (m_dualPreviewDock->isFloating()) {
+                ensureDockOnScreen(m_dualPreviewDock);
+                QTimer::singleShot(0, m_dualPreviewDock, [this] { applyDarkTitleBar(m_dualPreviewDock); });
+            }
             const qreal dpr = m_dualPreview->devicePixelRatioF();
             EngineHost::instance().call("setDualPreview", QJsonObject{
                 {"hwnd", qint64(m_dualPreview->winId())},
@@ -4327,6 +4356,46 @@ void MainWindow::openStatsGraphDialog()
     dlg->show();
 }
 
+void MainWindow::ensureDockOnScreen(QDockWidget *dock)
+{
+    if (!dock || !dock->isFloating()) return;
+    if (dock->width() < 200 || dock->height() < 120) {
+        if (dock == m_dualPreviewDock) dock->resize(560, 360);
+        else dock->resize(std::max(dock->width(), 280), std::max(dock->height(), 220));
+    }
+    const QRect g = dock->frameGeometry();
+    bool onAnyScreen = false;
+    for (QScreen *scr : QGuiApplication::screens()) {
+        const QRect inter = g.intersected(scr->availableGeometry());
+        if (inter.width() >= 80 && inter.height() >= 48) { onAnyScreen = true; break; }
+    }
+    if (!onAnyScreen) {
+        QScreen *target = screen() ? screen() : QGuiApplication::primaryScreen();
+        if (target) {
+            const QRect av = target->availableGeometry();
+            const int w = std::min(dock->width(), av.width() - 40);
+            const int h = std::min(dock->height(), av.height() - 40);
+            dock->resize(w, h);
+            dock->move(av.center().x() - w / 2, av.center().y() - h / 2);
+        }
+    }
+}
+
+void MainWindow::saveDockLayout()
+{
+    if (QCoreApplication::arguments().contains("--test")) return;
+    QSettings qs("TikStream", "UI2");
+    qs.setValue("geometry", saveGeometry());
+    qs.setValue("state", saveState());
+    qs.setValue("compactLayoutV1", true);
+    for (auto *dock : findChildren<QDockWidget *>()) {
+        if (dock->objectName().isEmpty()) continue;
+        if (dock->isFloating()) qs.setValue("dockGeo/" + dock->objectName(), dock->saveGeometry());
+        else qs.remove("dockGeo/" + dock->objectName());
+    }
+    qs.sync();
+}
+
 void MainWindow::syncDualPreviewDock()
 {
     if (!m_dualPreviewDock || !m_dualPreview) return;
@@ -4337,10 +4406,15 @@ void MainWindow::syncDualPreviewDock()
         if (!m_dualDockPositioned && m_dualPreviewDock->isFloating()) {
             m_dualDockPositioned = true;
             m_dualPreviewDock->resize(560, 360);
-            const QRect fg = frameGeometry();
-            m_dualPreviewDock->move(fg.right() + 6, fg.top());
+            QScreen *target = screen() ? screen() : QGuiApplication::primaryScreen();
+            const QRect av = target ? target->availableGeometry() : QRect(80, 80, 1280, 720);
+            m_dualPreviewDock->move(av.right() - 580, av.top() + 60);
         }
         m_dualPreviewDock->show();
+        if (m_dualPreviewDock->isFloating()) {
+            ensureDockOnScreen(m_dualPreviewDock);
+            m_dualPreviewDock->raise();
+        }
     } else {
         m_dualPreviewDock->hide();
     }
@@ -4349,6 +4423,7 @@ void MainWindow::syncDualPreviewDock()
 void MainWindow::closeEvent(QCloseEvent *e)
 {
     if (!m_reallyQuit && m_s["minimizeToTray"].toBool(false) && m_tray && m_tray->isVisible()) {
+        saveDockLayout();
         hide();
         e->ignore();
         return;
@@ -4363,9 +4438,6 @@ void MainWindow::closeEvent(QCloseEvent *e)
     m_statsTimer->stop();
     m_levelsTimer->stop();
     pushSettings();
-    QSettings qs("TikStream", "UI2");
-    qs.setValue("geometry", saveGeometry());
-    qs.setValue("state", saveState());
-    qs.setValue("compactLayoutV1", true);
+    saveDockLayout();
     e->accept();
 }

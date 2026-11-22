@@ -153,6 +153,8 @@ private:
     void importSceneCollection();
     void openStatsGraphDialog();
     void syncDualPreviewDock();
+    void saveDockLayout();
+    void ensureDockOnScreen(QDockWidget *dock);
     void pollStats();
     void pollLevels();
     void updateLiveButtons();
@@ -185,7 +187,7 @@ private:
     QRectF m_startRect;
     double m_startCropL = 0, m_startCropR = 0, m_startCropT = 0, m_startCropB = 0;
 
-    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr, *m_alertAnimTimer = nullptr;
+    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr, *m_alertAnimTimer = nullptr, *m_layoutSaveTimer = nullptr;
     bool m_updateCheckPending = false;
     bool m_reallyQuit = false;
     QString m_skippedUpdateVersion;
