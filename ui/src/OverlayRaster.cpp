@@ -58,17 +58,21 @@ QImage rasterizeSource(const QJsonObject &o)
     }
     const QRectF b = path.boundingRect().isEmpty() ? QRectF(0, 0, 10, fm.height()) : path.boundingRect();
     const double pad = ow + (bg.alpha() > 0 ? font.pixelSize() * 0.35 : 6.0);
-    const int w = std::clamp(int(std::ceil(b.width() + pad * 2)), 4, 4096);
-    const int h = std::clamp(int(std::ceil(b.height() + pad * 2)), 4, 4096);
+    const double rawW = std::max(4.0, std::ceil(b.width() + pad * 2));
+    const double rawH = std::max(4.0, std::ceil(b.height() + pad * 2));
+    const double fitScale = std::min({1.0, 4096.0 / rawW, 4096.0 / rawH});
+    const int w = std::clamp(int(std::ceil(rawW * fitScale)), 4, 4096);
+    const int h = std::clamp(int(std::ceil(rawH * fitScale)), 4, 4096);
 
     QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
     p.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+    p.scale(fitScale, fitScale);
     if (bg.alpha() > 0) {
         p.setPen(Qt::NoPen);
         p.setBrush(bg);
-        p.drawRoundedRect(QRectF(0, 0, w, h), std::min(w, h) * 0.22, std::min(w, h) * 0.22);
+        p.drawRoundedRect(QRectF(0, 0, rawW, rawH), std::min(rawW, rawH) * 0.22, std::min(rawW, rawH) * 0.22);
     }
     p.translate(pad - b.x(), pad - b.y());
     if (ow > 0 && outline.alpha() > 0) p.strokePath(path, QPen(outline, ow * 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));

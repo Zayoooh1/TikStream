@@ -72,7 +72,7 @@ public sealed class AudioEngine : IDisposable
                     _inputs.Remove(d.Id);
                     cur = null;
                 }
-                // unavailable device (e.g. unplugged headset) — retry at most every 5 s, not on every settings change
+                // unavailable device (e.g. unplugged headset) at most every 5 s, not on every settings change
                 if (cur == null && (!_failed.TryGetValue(d.Id, out var f) || f.Key != key || DateTime.UtcNow >= f.Retry))
                 {
                     try
