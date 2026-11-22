@@ -633,48 +633,95 @@ public sealed unsafe class StreamEngine : IDisposable
         ffmpeg.av_packet_free(&pkt);
     }
 
-    /// <summary>Audio pump: runs continuously (for mixer meters), encodes only while an output is active.</summary>
+    /// <summary>Audio pump: runs at 10 ms (480-sample) cadence for low mic latency and 1:1 RNNoise alignment, encoding 1024-sample AAC frames when active.</summary>
     private void AudioLoop()
     {
         uint idx = 0;
         var mm = Native.AvSetMmThreadCharacteristicsW("Pro Audio", ref idx);
         try
         {
-            const int n = 1024;
-            var buf = new float[n * AudioEngine.Channels];
+            const int step = 480;     // 10.0 ms @ 48 kHz (exact RNNoise/Speex frame size)
+            const int encFrame = 1024; // AAC-LC frame size
+            const int ch = AudioEngine.Channels;
+            var stepBuf = new float[step * ch];
+            var encRing = new float[(encFrame + step) * ch];
+            var encOut = new float[encFrame * ch];
+            int encFill = 0;
+
+            Dictionary<string, float[]>? lastExtraMap = null;
+            var extraRings = new List<float[]>();
+            var extraOut = new float[encFrame * ch];
+
             long freq = Stopwatch.Frequency;
             long produced = (long)((double)_clock.ElapsedTicks * AudioEngine.SampleRate / freq);
             while (_run)
             {
                 long target = (long)((double)_clock.ElapsedTicks * AudioEngine.SampleRate / freq);
-                if (target - produced > AudioEngine.SampleRate) produced = target - n;
-                while (produced + n <= target && _run)
+                if (target - produced > AudioEngine.SampleRate)
+                {
+                    produced = target - step;
+                    encFill = 0;
+                }
+                while (produced + step <= target && _run)
                 {
                     var extraMap = _extraAudioMap;
-                    Audio.Read(buf, n, extraMap);
+                    Audio.Read(stepBuf, step, extraMap);
+                    Array.Copy(stepBuf, 0, encRing, encFill * ch, step * ch);
+
                     lock (_audioEncLock)
                     {
-                        var aenc = _aenc;
-                        if (aenc != null && _encRun)
+                        if (!ReferenceEquals(extraMap, lastExtraMap))
                         {
-                            long pts = produced - _encStartSamples;
-                            if (pts >= 0)
+                            lastExtraMap = extraMap;
+                            extraRings.Clear();
+                            if (extraMap != null)
                             {
-                                aenc.Encode(buf, pts, p => Deliver(p, StreamOutput.AudioIndex));
-                                if (extraMap != null && _extraAudio.Count > 0)
+                                for (int i = 0; i < _extraAudio.Count; i++)
+                                    extraRings.Add(new float[(encFrame + step) * ch]);
+                            }
+                        }
+                        if (extraMap != null && extraRings.Count == _extraAudio.Count)
+                        {
+                            for (int i = 0; i < _extraAudio.Count; i++)
+                                Array.Copy(_extraAudio[i].Buf, 0, extraRings[i], encFill * ch, step * ch);
+                        }
+
+                        encFill += step;
+                        produced += step;
+
+                        while (encFill >= encFrame)
+                        {
+                            long pts = (produced - encFill) - _encStartSamples;
+                            var aenc = _aenc;
+                            if (aenc != null && _encRun && pts >= 0)
+                            {
+                                Array.Copy(encRing, 0, encOut, 0, encFrame * ch);
+                                aenc.Encode(encOut, pts, p => Deliver(p, StreamOutput.AudioIndex));
+                                if (extraMap != null && extraRings.Count == _extraAudio.Count && _extraAudio.Count > 0)
                                 {
                                     for (int i = 0; i < _extraAudio.Count; i++)
                                     {
+                                        Array.Copy(extraRings[i], 0, extraOut, 0, encFrame * ch);
                                         int streamIdx = StreamOutput.AudioIndex + 1 + i;
-                                        _extraAudio[i].Enc.Encode(_extraAudio[i].Buf, pts, p => DeliverToFile(p, streamIdx));
+                                        _extraAudio[i].Enc.Encode(extraOut, pts, p => DeliverToFile(p, streamIdx));
                                     }
                                 }
                             }
+                            int rem = encFill - encFrame;
+                            if (rem > 0)
+                            {
+                                Array.Copy(encRing, encFrame * ch, encRing, 0, rem * ch);
+                                if (extraMap != null && extraRings.Count == _extraAudio.Count)
+                                {
+                                    for (int i = 0; i < extraRings.Count; i++)
+                                        Array.Copy(extraRings[i], encFrame * ch, extraRings[i], 0, rem * ch);
+                                }
+                            }
+                            encFill = rem;
                         }
                     }
-                    produced += n;
                 }
-                Thread.Sleep(5);
+                Thread.Sleep(1);
             }
         }
         catch (Exception ex) { Log.Error("Audio thread", ex); }

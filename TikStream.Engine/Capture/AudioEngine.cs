@@ -78,7 +78,7 @@ public sealed class AudioEngine : IDisposable
                     try
                     {
                         var cap = CreateCapture(d.Type, target);
-                        if (cap != null) { _inputs[d.Id] = Input.FromDevice(d.Name, key, cap, _mixer); _failed.Remove(d.Id); }
+                        if (cap != null) { _inputs[d.Id] = Input.FromDevice(d.Name, key, cap, _mixer, d.Type == SourceType.AudioInput ? 16 : 35); _failed.Remove(d.Id); }
                         else _failed[d.Id] = (key, DateTime.UtcNow.AddSeconds(5));
                     }
                     catch (Exception ex)
@@ -131,7 +131,9 @@ public sealed class AudioEngine : IDisposable
         using var en = new MMDeviceEnumerator();
         using var device = en.GetDevice(target);
         if (device.State != DeviceState.Active) return null;
-        return type == SourceType.AudioOutput ? new WasapiLoopbackCapture(device) : new WasapiCapture(device, true, 20);
+        if (type == SourceType.AudioOutput) return new WasapiLoopbackCapture(device);
+        try { return new WasapiCapture(device, true, 10); }
+        catch { return new WasapiCapture(device, false, 20); }
     }
 
     /// <summary>Programmatically fed input (media file audio): 48 kHz interleaved stereo float.</summary>
@@ -220,8 +222,8 @@ public sealed class AudioEngine : IDisposable
         {
             if (_monitorOut == null)
             {
-                _monitorBuf = new BufferedWaveProvider(MixFormat) { BufferDuration = TimeSpan.FromMilliseconds(300), DiscardOnBufferOverflow = true, ReadFully = true };
-                _monitorOut = new WasapiOut(AudioClientShareMode.Shared, 40);
+                _monitorBuf = new BufferedWaveProvider(MixFormat) { BufferDuration = TimeSpan.FromMilliseconds(200), DiscardOnBufferOverflow = true, ReadFully = true };
+                _monitorOut = new WasapiOut(AudioClientShareMode.Shared, 15);
                 _monitorOut.Init(_monitorBuf);
                 _monitorOut.Play();
             }
@@ -230,9 +232,21 @@ public sealed class AudioEngine : IDisposable
                 float v = _monitorMix[i];
                 if (v > 1f) _monitorMix[i] = 1f; else if (v < -1f) _monitorMix[i] = -1f;
             }
+            int maxMonBytes = MixFormat.AverageBytesPerSecond / 40; // keep monitoring latency <= 25 ms
+            if (_monitorBuf!.BufferedBytes > maxMonBytes)
+            {
+                int excess = _monitorBuf.BufferedBytes - maxMonBytes;
+                excess -= excess % MixFormat.BlockAlign;
+                if (excess > 0)
+                {
+                    if (_monitorBytes.Length < excess) _monitorBytes = new byte[excess];
+                    _monitorBuf.Read(_monitorBytes, 0, excess);
+                }
+            }
             int byteCount = samples * 4;
+            if (_monitorBytes.Length < byteCount) _monitorBytes = new byte[byteCount];
             Buffer.BlockCopy(_monitorMix, 0, _monitorBytes, 0, byteCount);
-            _monitorBuf!.AddSamples(_monitorBytes, 0, byteCount);
+            _monitorBuf.AddSamples(_monitorBytes, 0, byteCount);
         }
         catch (Exception ex)
         {
@@ -358,6 +372,9 @@ public sealed class AudioEngine : IDisposable
         private readonly TapSampleProvider _tap;
         private readonly ISampleProvider _chainOut;
         private readonly bool _trim;
+        private readonly int _maxBufferMs;
+        private volatile int _lastPacketBytes;
+        private byte[] _trimBuf = new byte[4096];
         public string Name { get; }
         public string Key { get; private init; } = "";
         public bool IsDevice => _capture != null;
@@ -372,11 +389,12 @@ public sealed class AudioEngine : IDisposable
             _tap.SuppressOutput = mode == "MonitorOnly";
         }
 
-        private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer)
+        private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer, int maxBufferMs = 35)
         {
             Name = name;
             _capture = capture;
             _trim = trim;
+            _maxBufferMs = Math.Clamp(maxBufferMs, 12, 100);
             _buffer = new BufferedWaveProvider(fmt)
             {
                 BufferDuration = TimeSpan.FromSeconds(trim ? 1 : 16),
@@ -393,14 +411,18 @@ public sealed class AudioEngine : IDisposable
             _volume = new VolumeSampleProvider(_dynamics);
             _limiter = new LimiterProvider(_volume);
             _delay = new DelayProvider(_limiter);
-            var meter = new MeteringSampleProvider(_delay, SampleRate / 20);
+            var meter = new MeteringSampleProvider(_delay, SampleRate / 60);
             meter.StreamVolume += (_, e) => Peak = e.MaxSampleValues.Length > 0 ? e.MaxSampleValues.Max() : 0;
             _tap = new TapSampleProvider(meter);
             _chainOut = _tap;
             mixer.AddMixerInput(_chainOut);
             if (capture != null)
             {
-                capture.DataAvailable += (_, e) => _buffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                capture.DataAvailable += (_, e) =>
+                {
+                    if (e.BytesRecorded > 0) _lastPacketBytes = e.BytesRecorded;
+                    _buffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                };
                 capture.RecordingStopped += (_, e) => {
                     Stopped = true;
                     if (e.Exception != null) Log.Error($"Audio '{name}' stopped", e.Exception);
@@ -416,8 +438,8 @@ public sealed class AudioEngine : IDisposable
             }
         }
 
-        public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer)
-            => new(name, cap, cap.WaveFormat, true, mixer) { Key = key };
+        public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer, int maxBufferMs = 35)
+            => new(name, cap, cap.WaveFormat, true, mixer, maxBufferMs) { Key = key };
 
         public static Input FromPush(string name, MixingSampleProvider mixer, bool isAlert = false)
             => new(name, null, MixFormat, false, mixer) { Key = "push", IsAlert = isAlert };
@@ -443,16 +465,19 @@ public sealed class AudioEngine : IDisposable
             _buffer.AddSamples(bytes, 0, bytes.Length);
         }
 
-        /// <summary>Device clock drifts relative to ours — keep latency from growing.</summary>
+        /// <summary>Device clock drifts relative to ours — adapt cap to device packet size (wired / 2.4 GHz / Bluetooth) so latency stays minimal without choppy audio.</summary>
         public void TrimLatency()
         {
             if (!_trim) return;
-            var max = _buffer.WaveFormat.AverageBytesPerSecond / 25; // 40 ms (lower latency vs video)
+            int minBytes = _buffer.WaveFormat.AverageBytesPerSecond * _maxBufferMs / 1000;
+            int pktCap = Math.Min(_buffer.WaveFormat.AverageBytesPerSecond / 12, _lastPacketBytes * 2); // cap <= 83 ms even on bursty Bluetooth HFP
+            int max = Math.Max(minBytes, pktCap);
             int excess = _buffer.BufferedBytes - max;
             if (excess <= 0) return;
             excess -= excess % _buffer.WaveFormat.BlockAlign;
-            var tmp = new byte[excess];
-            _buffer.Read(tmp, 0, excess);
+            if (excess <= 0) return;
+            if (_trimBuf.Length < excess) _trimBuf = new byte[excess];
+            _buffer.Read(_trimBuf, 0, excess);
         }
 
         public void CopyLastSamples(float[] dst, int count) => _tap.CopyLast(dst, count);
