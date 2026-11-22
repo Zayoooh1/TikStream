@@ -1803,15 +1803,15 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
             connect(s, &QSlider::valueChanged, &dlg, [=](int val) {
                 vLbl->setText(QString("%1%").arg(val));
                 updateItem([this, key, val](QJsonObject &i) {
-                    if (!i["hasDualLayout"].toBool()) {
+                    if (!i.value("hasDualLayout").toBool()) {
                         const QRectF dr = displayRectFor(i, true);
                         i["hasDualLayout"] = true;
-                        i["dualFit"] = i["fit"].toString("Free");
+                        i["dualFit"] = i.value("fit").toString("Free");
                         i["dualX"] = dr.x(); i["dualY"] = dr.y(); i["dualW"] = dr.width(); i["dualH"] = dr.height();
-                        i["dualCropLeft"] = i["cropLeft"].toDouble();
-                        i["dualCropRight"] = i["cropRight"].toDouble();
-                        i["dualCropTop"] = i["cropTop"].toDouble();
-                        i["dualCropBottom"] = i["cropBottom"].toDouble();
+                        i["dualCropLeft"] = i.value("cropLeft").toDouble();
+                        i["dualCropRight"] = i.value("cropRight").toDouble();
+                        i["dualCropTop"] = i.value("cropTop").toDouble();
+                        i["dualCropBottom"] = i.value("cropBottom").toDouble();
                     }
                     i[key] = val / 100.0;
                 });
@@ -2791,7 +2791,8 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         sourceId = src["id"].toString();
     }
     QJsonObject item{{"id", newId()}, {"sourceId", sourceId}, {"visible", visible}, {"fit", "Free"},
-                     {"zoom", 1.0}, {"panX", 0.0}, {"panY", 0.0}, {"mirror", false}, {"corner", 0.0}, {"opacity", 1.0}};
+                     {"zoom", 1.0}, {"panX", 0.0}, {"panY", 0.0}, {"mirror", false}, {"corner", 0.0}, {"opacity", 1.0},
+                     {"cropLeft", 0.0}, {"cropRight", 0.0}, {"cropTop", 0.0}, {"cropBottom", 0.0}, {"hasDualLayout", false}};
     const double cw = m_canvasW, ch = m_canvasH;
     if (sourceTypeInfo(type).audio) {
         item["w"] = 0.0; item["h"] = 0.0;
@@ -2834,10 +2835,10 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         // image/text: size determined after rasterization (w = 0 -> automatic)
         item["x"] = 0.1; item["y"] = 0.42; item["w"] = 0.0; item["h"] = 0.0;
     }
-    if (!sourceTypeInfo(type).audio && !item["hasDualLayout"].toBool() && item["w"].toDouble() > 0) {
+    if (!sourceTypeInfo(type).audio && !item.value("hasDualLayout").toBool() && item.value("w").toDouble() > 0) {
         const QRectF dr = displayRectFor(item, true);
         item["hasDualLayout"] = true;
-        item["dualFit"] = item["fit"].toString("Free");
+        item["dualFit"] = item.value("fit").toString("Free");
         item["dualX"] = dr.x(); item["dualY"] = dr.y(); item["dualW"] = dr.width(); item["dualH"] = dr.height();
         item["dualCropLeft"] = 0.0; item["dualCropRight"] = 0.0; item["dualCropTop"] = 0.0; item["dualCropBottom"] = 0.0;
     }
@@ -3365,15 +3366,22 @@ void MainWindow::uploadRaster(const QJsonObject &src)
             QJsonObject it = items[k].toObject();
             if (it["sourceId"].toString() != id || it["fit"].toString("Free") != "Free") continue;
             double scale;
-            if (it["w"].toDouble() <= 0) {
+            if (it.value("w").toDouble() <= 0) {
                 const double cx = 0.5;
-                const double cy = type == "AlertBox" ? 0.28 : std::clamp(it["y"].toDouble(0.42), 0.0, 1.0);
+                const double cy = type == "AlertBox" ? 0.28 : std::clamp(it.value("y").toDouble(0.42), 0.0, 1.0);
                 scale = std::min({1.0, (type == "AlertBox" ? 0.65 : 0.8) * m_canvasW / sz.width(), 0.55 * m_canvasH / sz.height()});
                 const double w = sz.width() * scale / m_canvasW, h = sz.height() * scale / m_canvasH;
                 it["x"] = std::clamp(cx - w / 2.0, 0.0, std::max(0.0, 1.0 - w));
                 it["y"] = std::clamp(cy - h / 2.0, 0.0, std::max(0.0, 1.0 - h));
                 it["w"] = w;
                 it["h"] = h;
+                if (!it.value("hasDualLayout").toBool()) {
+                    const QRectF dr = displayRectFor(it, true);
+                    it["hasDualLayout"] = true;
+                    it["dualFit"] = "Free";
+                    it["dualX"] = dr.x(); it["dualY"] = dr.y(); it["dualW"] = dr.width(); it["dualH"] = dr.height();
+                    it["dualCropLeft"] = 0.0; it["dualCropRight"] = 0.0; it["dualCropTop"] = 0.0; it["dualCropBottom"] = 0.0;
+                }
                 items[k] = it;
                 changed = true;
                 continue;
@@ -3491,24 +3499,24 @@ QRectF MainWindow::displayRectFor(const QJsonObject &item, bool dual) const
 QJsonObject MainWindow::makeFree(QJsonObject item, bool dual) const
 {
     if (item.isEmpty()) return item;
-    if (!item["hasDualLayout"].toBool()) {
+    if (!item.value("hasDualLayout").toBool()) {
         const QRectF dr = displayRectFor(item, true);
         item["hasDualLayout"] = true;
-        item["dualFit"] = dual ? QStringLiteral("Free") : item["fit"].toString("Free");
+        item["dualFit"] = dual ? QStringLiteral("Free") : item.value("fit").toString("Free");
         item["dualX"] = dr.x(); item["dualY"] = dr.y(); item["dualW"] = dr.width(); item["dualH"] = dr.height();
-        item["dualCropLeft"] = item["cropLeft"].toDouble();
-        item["dualCropRight"] = item["cropRight"].toDouble();
-        item["dualCropTop"] = item["cropTop"].toDouble();
-        item["dualCropBottom"] = item["cropBottom"].toDouble();
+        item["dualCropLeft"] = item.value("cropLeft").toDouble();
+        item["dualCropRight"] = item.value("cropRight").toDouble();
+        item["dualCropTop"] = item.value("cropTop").toDouble();
+        item["dualCropBottom"] = item.value("cropBottom").toDouble();
     }
     if (dual) {
-        if (item["dualFit"].toString("Free") == "Free") return item;
+        if (item.value("dualFit").toString("Free") == "Free") return item;
         const QRectF r = displayRectFor(item, true);
         item["dualFit"] = "Free";
         item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = r.width(); item["dualH"] = r.height();
         return item;
     }
-    if (item["fit"].toString("Free") == "Free") return item;
+    if (item.value("fit").toString("Free") == "Free") return item;
     const QRectF r = displayRect(item);
     item["fit"] = "Free";
     item["x"] = r.x(); item["y"] = r.y(); item["w"] = r.width(); item["h"] = r.height();
