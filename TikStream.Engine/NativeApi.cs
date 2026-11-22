@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using TikStream.Capture;
 using TikStream.Core;
 using TikStream.Engine;
+using TikStream.TikTok;
 
 namespace TikStream;
 
@@ -19,6 +20,7 @@ public static unsafe class NativeApi
     private static Timer? _saveTimer;
     private static readonly object Lock = new();
     private static readonly TikTokLogin TikTok = new();
+    private static readonly TikTokAuthService TikTokAuth = new();
     private static JsonSerializerOptions Json => AppSettings.JsonOpts;
 
     [UnmanagedCallersOnly]
@@ -34,7 +36,9 @@ public static unsafe class NativeApi
             if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection"
                   or "setDualItemTransform" or "setDualSelection" or "setItemCrop"
                   or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion"
-                  or "browserFrame" or "browserInteract" or "playAlertSound")
+                  or "browserFrame" or "browserInteract" or "playAlertSound"
+                  or "tiktokAccountStatus" or "tiktokQrBegin" or "tiktokQrPoll" or "tiktokQrCancel"
+                  or "tiktokImportStudio" or "tiktokLogout" or "tiktokCheckCreateInfo")
                 result = Dispatch(m, a);
             else lock (Lock) result = Dispatch(m, a);
         }
@@ -92,8 +96,11 @@ public static unsafe class NativeApi
                 var node = JsonSerializer.SerializeToNode(_settings, Json)!.AsObject();
                 node.Remove("streamKeyProtected");
                 node.Remove("secondStreamKeyProtected");
+                node.Remove("tikTokSignerKeyProtected");
+                node.Remove("tikTokSessionProtected");
                 node["streamKey"] = _settings.StreamKey;
                 node["secondStreamKey"] = _settings.SecondStreamKey;
+                node["tikTokSignerKey"] = _settings.TikTokSignerKey;
                 return node.ToJsonString();
             }
 
@@ -102,6 +109,8 @@ public static unsafe class NativeApi
                 var s = JsonSerializer.Deserialize<AppSettings>(args, Json) ?? new AppSettings();
                 s.StreamKey = j["streamKey"]?.GetValue<string>() ?? _settings.StreamKey;
                 s.SecondStreamKey = j["secondStreamKey"]?.GetValue<string>() ?? _settings.SecondStreamKey;
+                s.TikTokSignerKey = j["tikTokSignerKey"]?.GetValue<string>() ?? _settings.TikTokSignerKey;
+                s.TikTokSessionProtected = _settings.TikTokSessionProtected;
                 if (s.Scenes.Count == 0) s.Scenes = _settings.Scenes; // guard against empty state
                 s.NormalizeVideo();
                 Engine().ApplySettings(s, _settings);
@@ -208,6 +217,87 @@ public static unsafe class NativeApi
                 return Ok(TikTok.Configure(j["key"]?.GetValue<string>() ?? "", j["secret"]?.GetValue<string>() ?? ""));
             case "tiktokLoginStatus": return Ok(TikTok.Status());
             case "clearTikTokLogin": TikTok.Clear(); return Ok();
+
+            case "tiktokAccountStatus":
+            {
+                TikTokSessionData? sess;
+                string signerKey, signerUrl;
+                lock (Lock)
+                {
+                    sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
+                    signerKey = _settings.TikTokSignerKey;
+                    signerUrl = _settings.TikTokSignerUrl;
+                }
+                var signerConfigured = new RapidApiTikTokSigner(signerKey, signerUrl).IsConfigured;
+                return Ok(new
+                {
+                    account = TikTokAuthService.FormatAccount(sess),
+                    signerConfigured,
+                });
+            }
+
+            case "tiktokQrBegin":
+            {
+                string signerKey = j["signerKey"]?.GetValue<string>() ?? "";
+                string signerUrl = j["signerUrl"]?.GetValue<string>() ?? "";
+                lock (Lock)
+                {
+                    if (string.IsNullOrWhiteSpace(signerKey)) signerKey = _settings.TikTokSignerKey;
+                    if (string.IsNullOrWhiteSpace(signerUrl)) signerUrl = _settings.TikTokSignerUrl;
+                }
+                return Ok(TikTokAuth.BeginQrLogin(signerKey, signerUrl, SaveTikTokSession));
+            }
+
+            case "tiktokQrPoll":
+                return Ok(TikTokAuth.PollQrStatus(SaveTikTokSession));
+
+            case "tiktokQrCancel":
+                TikTokAuth.CancelQrLogin();
+                return Ok();
+
+            case "tiktokImportStudio":
+            {
+                var accounts = TikTokStudioImporter.ReadAccounts();
+                var chosen = accounts[0];
+                var sess = TikTokStudioImporter.ToSession(chosen);
+                SaveTikTokSession(sess);
+                return Ok(new
+                {
+                    ok = true,
+                    account = TikTokAuthService.FormatAccount(sess),
+                    totalFound = accounts.Count,
+                });
+            }
+
+            case "tiktokLogout":
+                TikTokAuth.CancelQrLogin();
+                lock (Lock)
+                {
+                    _settings.TikTokSessionJson = "";
+                    ScheduleSave();
+                }
+                return Ok();
+
+            case "tiktokCheckCreateInfo":
+            {
+                TikTokSessionData? sess;
+                string signerKey = j["signerKey"]?.GetValue<string>() ?? "";
+                string signerUrl = j["signerUrl"]?.GetValue<string>() ?? "";
+                lock (Lock)
+                {
+                    sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
+                    if (string.IsNullOrWhiteSpace(signerKey)) signerKey = _settings.TikTokSignerKey;
+                    if (string.IsNullOrWhiteSpace(signerUrl)) signerUrl = _settings.TikTokSignerUrl;
+                }
+                if (sess == null || !sess.HasSessionCookie)
+                    return JsonSerializer.Serialize(new { ok = false, error = "Brak zalogowanego konta TikTok." }, Json);
+                var task = TikTokAuthService.CheckCreateInfoAsync(sess, signerKey, signerUrl);
+                if (!task.Wait(30000))
+                    return JsonSerializer.Serialize(new { ok = false, error = "Przekroczono czas oczekiwania na webcast/room/create_info/." }, Json);
+                var res = task.Result;
+                if (res.Ok) SaveTikTokSession(sess); // persist discovered webcast host
+                return JsonSerializer.Serialize(res, Json);
+            }
             case "startStream": return Result(Engine().StartStreamAsync());
             case "stopStream": return Result(Engine().StopStreamAsync());
             case "startRecord": return Result(Engine().StartRecordAsync());
@@ -291,6 +381,7 @@ public static unsafe class NativeApi
 
             case "shutdown":
                 TikTok.Clear();
+                TikTokAuth.CancelQrLogin();
                 _saveTimer?.Dispose();
                 _settings.Save();
                 _engine?.Dispose();
@@ -300,6 +391,17 @@ public static unsafe class NativeApi
 
             default:
                 throw new InvalidOperationException("Unknown method: " + method);
+        }
+    }
+
+    private static void SaveTikTokSession(TikTokSessionData session)
+    {
+        lock (Lock)
+        {
+            _settings.TikTokSessionJson = session.ToJson();
+            if (!string.IsNullOrWhiteSpace(session.Username))
+                _settings.TikTokUsername = session.Username;
+            ScheduleSave();
         }
     }
 

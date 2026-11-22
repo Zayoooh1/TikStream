@@ -48,6 +48,7 @@ private:
     QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr, *m_snapSources = nullptr, *m_autoUpdate = nullptr, *m_minToTray = nullptr;
     // stream
     QLineEdit *m_server = nullptr, *m_key = nullptr;
+    QLineEdit *m_signerKey = nullptr, *m_signerUrl = nullptr;
     QCheckBox *m_secondEnabled = nullptr;
     QLineEdit *m_secondName = nullptr, *m_secondServer = nullptr, *m_secondKey = nullptr;
     // output

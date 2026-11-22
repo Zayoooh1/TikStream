@@ -172,6 +172,9 @@ public sealed class AppSettings
     public string ServerUrl { get; set; } = "";
     public string StreamKeyProtected { get; set; } = "";
     public string TikTokUsername { get; set; } = "";
+    public string TikTokSignerUrl { get; set; } = "https://tiktok-live-studio-api-signer1.p.rapidapi.com/";
+    public string TikTokSignerKeyProtected { get; set; } = "";
+    public string TikTokSessionProtected { get; set; } = "";
     public bool SecondStreamEnabled { get; set; }
     public string SecondStreamName { get; set; } = "Second Channel";
     public string SecondServerUrl { get; set; } = "";
@@ -250,6 +253,20 @@ public sealed class AppSettings
     {
         get => UnprotectSecret(SecondStreamKeyProtected);
         set => SecondStreamKeyProtected = ProtectSecret(value);
+    }
+
+    [JsonIgnore]
+    public string TikTokSignerKey
+    {
+        get => UnprotectSecret(TikTokSignerKeyProtected);
+        set => TikTokSignerKeyProtected = ProtectSecret(value);
+    }
+
+    [JsonIgnore]
+    public string TikTokSessionJson
+    {
+        get => UnprotectSecret(TikTokSessionProtected);
+        set => TikTokSessionProtected = ProtectSecret(value);
     }
 
     private static string UnprotectSecret(string protectedB64)

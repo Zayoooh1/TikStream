@@ -17,6 +17,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPixmap>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QSettings>
@@ -24,6 +26,7 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -296,6 +299,191 @@ QWidget *SettingsDialog::pageStream()
     connect(m_secondEnabled, &QCheckBox::toggled, this, updateSecondEnabled);
     m_secondEnabled->setEnabled(!m_live);
     updateSecondEnabled(m_secondEnabled->isChecked());
+
+    // ---------- TikTok LIVE Native Account (QR + LIVE Studio Import + Signer) ----------
+    QFormLayout *ttForm;
+    v->addWidget(card(w, &ttForm, "Konto TikTok LIVE (QR / LIVE Studio)",
+        "Zaloguj się przez kod QR lub zaimportuj sesję z TikTok LIVE Studio. Klucz signera i sesja są szyfrowane lokalnie (DPAPI)."));
+
+    m_signerKey = track(new QLineEdit(m_s["tikTokSignerKey"].toString()));
+    m_signerKey->setEchoMode(QLineEdit::Password);
+    m_signerKey->setPlaceholderText("Klucz X-RapidAPI-Key (tiktok-live-studio-api-signer1)");
+    auto *signerRow = new QHBoxLayout;
+    signerRow->addWidget(m_signerKey, 1);
+    auto *showSigner = new QToolButton;
+    showSigner->setText("Pokaż");
+    showSigner->setCheckable(true);
+    connect(showSigner, &QToolButton::toggled, m_signerKey, [this, showSigner](bool on) {
+        m_signerKey->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
+        showSigner->setText(on ? "Ukryj" : "Pokaż");
+    });
+    signerRow->addWidget(showSigner);
+    ttForm->addRow("Klucz Signera", signerRow);
+
+    const QString defaultSignerUrl = QStringLiteral("https://tiktok-live-studio-api-signer1.p.rapidapi.com/");
+    m_signerUrl = track(new QLineEdit(m_s["tikTokSignerUrl"].toString(defaultSignerUrl)));
+    m_signerUrl->setPlaceholderText(defaultSignerUrl);
+    ttForm->addRow("URL Signera", m_signerUrl);
+
+    auto *ttAccountLabel = hint("Sprawdzanie statusu konta…");
+    ttAccountLabel->setTextFormat(Qt::PlainText);
+    auto *ttStatusLabel = hint("");
+    ttStatusLabel->setTextFormat(Qt::PlainText);
+    ttStatusLabel->setWordWrap(true);
+
+    auto *qrImageLabel = new QLabel;
+    qrImageLabel->setAlignment(Qt::AlignCenter);
+    qrImageLabel->setFixedSize(224, 224);
+    qrImageLabel->setStyleSheet("background: #ffffff; border-radius: 8px; padding: 6px;");
+    qrImageLabel->setVisible(false);
+
+    auto *btnQr = new QPushButton("Zaloguj przez kod QR");
+    auto *btnQrCancel = new QPushButton("Anuluj QR");
+    btnQrCancel->setVisible(false);
+    auto *btnImport = new QPushButton("Importuj z LIVE Studio");
+    auto *btnCheckLive = new QPushButton("Sprawdź dostęp LIVE");
+    auto *btnLogout = new QPushButton("Wyloguj");
+
+    auto *ttBtnRow = new QHBoxLayout;
+    ttBtnRow->addWidget(btnQr);
+    ttBtnRow->addWidget(btnQrCancel);
+    ttBtnRow->addWidget(btnImport);
+    ttBtnRow->addWidget(btnCheckLive);
+    ttBtnRow->addWidget(btnLogout);
+    ttBtnRow->addStretch();
+
+    ttForm->addRow("Konto", ttAccountLabel);
+    ttForm->addRow(ttBtnRow);
+    ttForm->addRow("", qrImageLabel);
+    ttForm->addRow("", ttStatusLabel);
+
+    auto *qrTimer = new QTimer(w);
+    auto qrRendered = std::make_shared<QString>();
+
+    auto refreshTikTokAccount = [ttAccountLabel, btnCheckLive, btnLogout, btnQr, btnImport, qrTimer] {
+        const auto info = EngineHost::instance().callObj("tiktokAccountStatus");
+        const auto acct = info["account"].toObject();
+        const bool loggedIn = acct["loggedIn"].toBool();
+        const bool qrActive = qrTimer->isActive();
+        if (loggedIn) {
+            const QString name = acct["displayName"].toString();
+            const QString src = acct["source"].toString() == "live_studio" ? "LIVE Studio" : "QR";
+            const QString reg = acct["region"].toString();
+            QString text = QString("Zalogowano: %1 (sesja: %2)").arg(name.isEmpty() ? acct["userId"].toString() : name, src);
+            if (!reg.isEmpty()) text += " · region: " + reg;
+            ttAccountLabel->setText(text);
+        } else {
+            ttAccountLabel->setText("Nie zalogowano.");
+        }
+        btnCheckLive->setEnabled(loggedIn && !qrActive);
+        btnLogout->setVisible(loggedIn);
+        btnQr->setEnabled(!qrActive);
+        btnImport->setEnabled(!qrActive);
+    };
+
+    auto stopQrUi = [qrTimer, qrImageLabel, btnQrCancel, qrRendered, refreshTikTokAccount] {
+        qrTimer->stop();
+        qrImageLabel->clear();
+        qrImageLabel->setVisible(false);
+        btnQrCancel->setVisible(false);
+        qrRendered->clear();
+        refreshTikTokAccount();
+    };
+
+    connect(qrTimer, &QTimer::timeout, w, [ttStatusLabel, qrImageLabel, qrRendered, stopQrUi] {
+        const auto st = EngineHost::instance().callObj("tiktokQrPoll");
+        const QString status = st["status"].toString();
+        const QString text = st["statusText"].toString();
+        if (!text.isEmpty()) ttStatusLabel->setText(text);
+
+        const QString b64 = st["qrcodeB64"].toString();
+        if (!b64.isEmpty() && b64 != *qrRendered) {
+            QPixmap px;
+            if (px.loadFromData(QByteArray::fromBase64(b64.toLatin1()))) {
+                qrImageLabel->setPixmap(px.scaled(210, 210, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                qrImageLabel->setVisible(true);
+                *qrRendered = b64;
+            }
+        }
+
+        if (status == "confirmed" || status == "expired" || status == "error" || status == "idle") {
+            if (status == "error" && st.contains("error"))
+                ttStatusLabel->setText("Błąd: " + st["error"].toString());
+            stopQrUi();
+        }
+    });
+
+    connect(btnQr, &QPushButton::clicked, w, [this, ttStatusLabel, btnQrCancel, qrTimer, qrRendered, refreshTikTokAccount] {
+        const auto res = EngineHost::instance().callObj("tiktokQrBegin", {
+            {"signerKey", m_signerKey->text().trimmed()},
+            {"signerUrl", m_signerUrl->text().trimmed()},
+        });
+        if (res.contains("error")) {
+            ttStatusLabel->setText("Błąd: " + res["error"].toString());
+            return;
+        }
+        qrRendered->clear();
+        ttStatusLabel->setText(res["statusText"].toString("Generowanie kodu QR…"));
+        btnQrCancel->setVisible(true);
+        qrTimer->start(2000);
+        refreshTikTokAccount();
+    });
+
+    connect(btnQrCancel, &QPushButton::clicked, w, [ttStatusLabel, stopQrUi] {
+        EngineHost::instance().callObj("tiktokQrCancel");
+        ttStatusLabel->setText("Anulowano logowanie QR.");
+        stopQrUi();
+    });
+
+    connect(btnImport, &QPushButton::clicked, w, [ttStatusLabel, refreshTikTokAccount] {
+        const auto res = EngineHost::instance().callObj("tiktokImportStudio");
+        if (res.contains("error")) {
+            ttStatusLabel->setText("Błąd importu: " + res["error"].toString());
+        } else {
+            const auto acct = res["account"].toObject();
+            ttStatusLabel->setText("Zaimportowano sesję LIVE Studio: " + acct["displayName"].toString());
+        }
+        refreshTikTokAccount();
+    });
+
+    connect(btnLogout, &QPushButton::clicked, w, [ttStatusLabel, stopQrUi] {
+        EngineHost::instance().callObj("tiktokLogout");
+        ttStatusLabel->setText("Wylogowano z konta TikTok.");
+        stopQrUi();
+    });
+
+    connect(btnCheckLive, &QPushButton::clicked, w, [this, w, btnCheckLive, ttStatusLabel] {
+        btnCheckLive->setEnabled(false);
+        ttStatusLabel->setText("Sprawdzanie webcast/room/create_info/…");
+        const QString sk = m_signerKey->text().trimmed();
+        const QString su = m_signerUrl->text().trimmed();
+        QPointer<QWidget> guard(w);
+        auto *th = QThread::create([sk, su, guard, btnCheckLive, ttStatusLabel] {
+            const auto res = EngineHost::instance().callObj("tiktokCheckCreateInfo", {
+                {"signerKey", sk},
+                {"signerUrl", su},
+            });
+            if (!guard) return;
+            QMetaObject::invokeMethod(guard, [res, guard, btnCheckLive, ttStatusLabel] {
+                if (!guard) return;
+                btnCheckLive->setEnabled(true);
+                if (res["ok"].toBool())
+                    ttStatusLabel->setText("OK: " + res["message"].toString());
+                else
+                    ttStatusLabel->setText("Błąd: " + res["error"].toString("Nieznany błąd create_info."));
+            }, Qt::QueuedConnection);
+        });
+        connect(th, &QThread::finished, th, &QObject::deleteLater);
+        th->start();
+    });
+
+    connect(this, &QDialog::finished, w, [qrTimer] {
+        if (qrTimer->isActive()) {
+            qrTimer->stop();
+            EngineHost::instance().callObj("tiktokQrCancel");
+        }
+    });
+    refreshTikTokAccount();
 
     QFormLayout *loginForm;
     v->addWidget(card(w, &loginForm, "TikTok · Sandbox", "Sign in via browser to verify connection with a Sandbox test account."));
@@ -748,6 +936,8 @@ QJsonObject SettingsDialog::result() const
 
     s["serverUrl"] = m_server->text().trimmed();
     s["streamKey"] = m_key->text().trimmed();
+    s["tikTokSignerKey"] = m_signerKey->text().trimmed();
+    s["tikTokSignerUrl"] = m_signerUrl->text().trimmed();
     s["secondStreamEnabled"] = m_secondEnabled->isChecked();
     s["secondStreamName"] = m_secondName->text().trimmed();
     s["secondServerUrl"] = m_secondServer->text().trimmed();
