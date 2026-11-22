@@ -139,7 +139,7 @@ public sealed unsafe class StreamEngine : IDisposable
     private static string Sig(IEnumerable<SourceDef> list) => System.Text.Json.JsonSerializer.Serialize(list, AppSettings.JsonOpts);
 
     private static HashSet<string> AudibleDeviceIds(AppSettings s) =>
-        s.ActiveScene?.Items.Where(i => i.Visible).Select(i => i.SourceId).ToHashSet() ?? new HashSet<string>();
+        s.ActiveScene?.Items.Where(i => i.Visible || i.EffectiveDualVisible).Select(i => i.SourceId).ToHashSet() ?? new HashSet<string>();
 
     public void ApplySettings(AppSettings s, AppSettings previous)
     {
@@ -863,7 +863,7 @@ public sealed unsafe class StreamEngine : IDisposable
 
         foreach (var item in scene.Items)
         {
-            if (!item.Visible || !_sources.TryGetValue(item.SourceId, out var rt) || !rt.Ready) continue;
+            if (!item.EffectiveDualVisible || !_sources.TryGetValue(item.SourceId, out var rt) || !rt.Ready) continue;
             float sw = rt.Width, sh = rt.Height;
             var cmd = new DrawCmd { Srv = rt.Srv!, Srv2 = rt.Srv2, Yuv = rt.Yuv, Hdr = rt.IsHdr, Opacity = Math.Clamp(item.Opacity, 0, 1), Darken = 1, Opaque = rt.Croppable && !rt.PreserveAlpha };
             float zoom = Math.Clamp(item.Zoom, 1f, 4f);

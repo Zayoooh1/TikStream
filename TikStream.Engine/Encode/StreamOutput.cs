@@ -124,6 +124,10 @@ public sealed unsafe class StreamOutput : IDisposable
             {
                 ffmpeg.av_dict_set(&o, "rw_timeout", "15000000", 0); // 15 s without progress = disconnected
                 ffmpeg.av_dict_set(&o, "tcp_nodelay", "1", 0);
+                if (_url.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase))
+                    ffmpeg.av_dict_set(&o, "rtmp_live", "live", 0);
+                if (_url.StartsWith("rtmps://", StringComparison.OrdinalIgnoreCase))
+                    ffmpeg.av_dict_set(&o, "tls_verify", "0", 0);
             }
             r = ffmpeg.avio_open2(&oc->pb, _url, ffmpeg.AVIO_FLAG_WRITE, &oc->interrupt_callback, &o);
             ffmpeg.av_dict_free(&o);

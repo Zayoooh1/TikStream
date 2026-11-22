@@ -22,7 +22,7 @@ public sealed record TikTokCreateInfoResult(
 /// </summary>
 public sealed class TikTokAuthService
 {
-    private const string DefaultLiveStudioVersion = "0.80.2";
+    private const string DefaultLiveStudioVersion = "1.40.2";
     private const string PassportWebSdkVersion = "2.1.9";
     private const string PassportAppKey = "884c28a44b61b78f9d837fc8b0967178";
     private const string TicketGuardPublicKey = "BHTyDu4GfY+Se8QoOlL22ARkOv4aLE5LBCk8eSiJ6K5N5m8Wg3cPeVYWVYNDrJ3hsRmaVCgNl/AKbMW67VBievw=";
@@ -489,7 +489,7 @@ public sealed class TikTokAuthService
                     lastError = $"TikTok status_code={statusCode}" + (string.IsNullOrEmpty(prompt) ? "" : $": {prompt}");
                     Log.Warn($"TikTok create_info rejected on {host}: {lastError}");
                     // 20003 / 20006 / 4003088 etc. are account-level responses, no need to retry other regions if clear message
-                    if (statusCode is "20003" or "4003088" or "4003025")
+                    if (statusCode is "20003" or "4003088" or "4003025" or "4014257")
                         return new TikTokCreateInfoResult(false, false, statusCode, "", host, prompt, lastError);
                     continue;
                 }

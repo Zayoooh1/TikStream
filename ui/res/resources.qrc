@@ -34,5 +34,9 @@
   <file>icons/text.svg</file>
   <file>icons/trash.svg</file>
   <file>icons/up.svg</file>
+  <file>icons/vis-h-off.svg</file>
+  <file>icons/vis-h.svg</file>
+  <file>icons/vis-v-off.svg</file>
+  <file>icons/vis-v.svg</file>
   <file>icons/window.svg</file>
 </qresource></RCC>

@@ -140,16 +140,28 @@ QListWidget::item:selected {
     background: #3d5afe;
     color: #ffffff;
 }
-#sourceList::indicator, #filterList::indicator {
+#filterList::indicator {
     width: 18px;
     height: 18px;
     margin-right: 4px;
 }
-#sourceList::indicator:checked, #filterList::indicator:checked {
+#filterList::indicator:checked {
     image: url(:/icons/eye.svg);
 }
-#sourceList::indicator:unchecked, #filterList::indicator:unchecked {
+#filterList::indicator:unchecked {
     image: url(:/icons/eye-off.svg);
+}
+#sourceList::item {
+    padding: 0px 2px;
+}
+#sourceVisBtn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 1px;
+}
+#sourceVisBtn:hover {
+    background: rgba(255, 255, 255, 0.14);
 }
 
 #liveChatTaps {

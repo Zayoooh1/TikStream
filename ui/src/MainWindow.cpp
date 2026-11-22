@@ -836,16 +836,6 @@ void MainWindow::buildDocks()
         loadProperties();
         updateSelection();
     });
-    connect(m_sourceList, &QListWidget::itemChanged, this, [this](QListWidgetItem *it) {
-        if (m_loading) return;
-        QJsonObject item = itemById(it->data(Qt::UserRole).toString());
-        if (item.isEmpty()) return;
-        item["visible"] = it->checkState() == Qt::Checked;
-        setItem(item);
-        rebuildMixer();
-        updateSelection();
-        applySoon();
-    });
     connect(m_sourceList, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         QMenu m(this);
         m.addAction(themedIcon("plus"), "Add Source…", this, &MainWindow::addSourceDialog);
@@ -2306,6 +2296,11 @@ void MainWindow::rebuildScenes()
     m_loading = false;
 }
 
+static bool itemDualVisible(const QJsonObject &item)
+{
+    return item.contains("dualVisible") ? item["dualVisible"].toBool(true) : item["visible"].toBool(true);
+}
+
 void MainWindow::rebuildSourceList()
 {
     m_loading = true;
@@ -2315,15 +2310,96 @@ void MainWindow::rebuildSourceList()
     // list order: top layer first (like OBS)
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto item = items[i].toObject();
+        const QString itemId = item["id"].toString();
         const auto src = sourceById(item["sourceId"].toString());
+        const auto info = sourceTypeInfo(src["type"].toString());
+        const bool visV = item["visible"].toBool(true);
+        const bool visH = itemDualVisible(item);
         const QString label = (item["locked"].toBool() ? QStringLiteral("🔒 ") : QString()) + src["name"].toString();
-        auto *it = new QListWidgetItem(themedIcon(sourceTypeInfo(src["type"].toString()).icon), label, m_sourceList);
-        it->setData(Qt::UserRole, item["id"].toString());
-        it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
-        it->setCheckState(item["visible"].toBool(true) ? Qt::Checked : Qt::Unchecked);
-        if (sourceTypeInfo(src["type"].toString()).audio) it->setToolTip("Eye icon enables or mutes this audio source in the scene.");
+
+        auto *it = new QListWidgetItem(m_sourceList);
+        it->setData(Qt::UserRole, itemId);
         it->setSizeHint(QSize(0, 34));
-        if (item["id"].toString() == m_selItem) sel = it;
+
+        auto *row = new QWidget;
+        row->setStyleSheet("background: transparent;");
+        auto *hl = new QHBoxLayout(row);
+        hl->setContentsMargins(6, 0, 6, 0);
+        hl->setSpacing(4);
+
+        auto makeVisBtn = [&](const QString &iconName, const QString &tip) {
+            auto *b = new QToolButton(row);
+            b->setObjectName("sourceVisBtn");
+            b->setAutoRaise(true);
+            b->setFixedSize(20, 20);
+            b->setIconSize(QSize(16, 16));
+            b->setIcon(themedIcon(iconName));
+            b->setToolTip(tip);
+            b->setFocusPolicy(Qt::NoFocus);
+            b->setCursor(Qt::PointingHandCursor);
+            return b;
+        };
+
+        if (!info.audio) {
+            auto *btnV = makeVisBtn(visV ? "vis-v" : "vis-v-off", "Pokaż / ukryj na Vertical Preview (9:16)");
+            auto *btnH = makeVisBtn(visH ? "vis-h" : "vis-h-off", "Pokaż / ukryj na Horizontal Preview (16:9)");
+            connect(btnV, &QToolButton::clicked, this, [this, itemId, btnV] {
+                QJsonObject cur = itemById(itemId);
+                if (cur.isEmpty()) return;
+                const bool next = !cur["visible"].toBool(true);
+                cur["visible"] = next;
+                if (!cur.contains("dualVisible")) cur["dualVisible"] = !next;
+                setItem(cur);
+                btnV->setIcon(themedIcon(next ? "vis-v" : "vis-v-off"));
+                rebuildMixer();
+                updateSelection();
+                applySoon();
+            });
+            connect(btnH, &QToolButton::clicked, this, [this, itemId, btnH] {
+                QJsonObject cur = itemById(itemId);
+                if (cur.isEmpty()) return;
+                const bool next = !itemDualVisible(cur);
+                cur["dualVisible"] = next;
+                setItem(cur);
+                btnH->setIcon(themedIcon(next ? "vis-h" : "vis-h-off"));
+                rebuildMixer();
+                updateSelection();
+                applySoon();
+            });
+            hl->addWidget(btnV);
+            hl->addWidget(btnH);
+        } else {
+            auto *btnA = makeVisBtn(visV ? "eye" : "eye-off", "Włącz / wycisz źródło audio w scenie");
+            connect(btnA, &QToolButton::clicked, this, [this, itemId, btnA] {
+                QJsonObject cur = itemById(itemId);
+                if (cur.isEmpty()) return;
+                const bool next = !cur["visible"].toBool(true);
+                cur["visible"] = next;
+                cur["dualVisible"] = next;
+                setItem(cur);
+                btnA->setIcon(themedIcon(next ? "eye" : "eye-off"));
+                rebuildMixer();
+                updateSelection();
+                applySoon();
+            });
+            hl->addWidget(btnA);
+            hl->addSpacing(24);
+        }
+
+        auto *typeIcon = new QLabel(row);
+        typeIcon->setPixmap(themedIcon(info.icon).pixmap(18, 18));
+        typeIcon->setFixedSize(20, 20);
+        typeIcon->setAlignment(Qt::AlignCenter);
+        typeIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
+        hl->addWidget(typeIcon);
+
+        auto *nameLbl = new QLabel(label, row);
+        nameLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
+        nameLbl->setStyleSheet("background: transparent; color: #e6e8f0;");
+        hl->addWidget(nameLbl, 1);
+
+        m_sourceList->setItemWidget(it, row);
+        if (itemId == m_selItem) sel = it;
     }
     if (sel) m_sourceList->setCurrentItem(sel);
     else m_selItem.clear();
@@ -2495,7 +2571,7 @@ void MainWindow::rebuildMixer()
     for (const auto &v : activeScene()["items"].toArray()) {
         const auto item = v.toObject();
         const auto id = item["sourceId"].toString();
-        sceneAudio[id] = sceneAudio.value(id) || item["visible"].toBool(true);
+        sceneAudio[id] = sceneAudio.value(id) || item["visible"].toBool(true) || itemDualVisible(item);
     }
     QList<QJsonObject> audio;
     for (const auto &v : sources()) {
@@ -2790,7 +2866,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         m_s["sources"] = arr;
         sourceId = src["id"].toString();
     }
-    QJsonObject item{{"id", newId()}, {"sourceId", sourceId}, {"visible", visible}, {"fit", "Free"},
+    QJsonObject item{{"id", newId()}, {"sourceId", sourceId}, {"visible", visible}, {"dualVisible", visible}, {"fit", "Free"},
                      {"zoom", 1.0}, {"panX", 0.0}, {"panY", 0.0}, {"mirror", false}, {"corner", 0.0}, {"opacity", 1.0},
                      {"cropLeft", 0.0}, {"cropRight", 0.0}, {"cropTop", 0.0}, {"cropBottom", 0.0}, {"hasDualLayout", false}};
     const double cw = m_canvasW, ch = m_canvasH;
@@ -3539,10 +3615,11 @@ void MainWindow::updateSelection()
 {
     const QJsonObject item = selectedItem();
     const bool visual = !sourceTypeInfo(selectedSource()["type"].toString()).audio;
-    const bool show = !item.isEmpty() && visual && item["visible"].toBool(true);
-    EngineHost::instance().call("setSelection", show ? rectObj(displayRectFor(item, false)) : QJsonObject{});
+    const bool showVert = !item.isEmpty() && visual && item["visible"].toBool(true);
+    const bool showDual = !item.isEmpty() && visual && itemDualVisible(item);
+    EngineHost::instance().call("setSelection", showVert ? rectObj(displayRectFor(item, false)) : QJsonObject{});
     if (m_dualPreviewDock && m_dualPreviewDock->isVisible())
-        EngineHost::instance().call("setDualSelection", show ? rectObj(displayRectFor(item, true)) : QJsonObject{});
+        EngineHost::instance().call("setDualSelection", showDual ? rectObj(displayRectFor(item, true)) : QJsonObject{});
 }
 
 double MainWindow::snap(double v, const QList<double> &targets, double tol, double *delta) const
@@ -3572,7 +3649,8 @@ void MainWindow::onCanvasPressedAt(QPointF p, bool dual)
 
     // 1. selected item: Alt + edge = crop, otherwise corner handle = resize
     const QJsonObject sel = selectedItem();
-    if (!sel.isEmpty() && sel["visible"].toBool(true) && !sel["locked"].toBool() && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
+    const bool selVis = dual ? itemDualVisible(sel) : sel["visible"].toBool(true);
+    if (!sel.isEmpty() && selVis && !sel["locked"].toBool() && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
         const QRectF r = displayRectFor(sel, dual);
         if (altHeld) {
             const double cTolX = tolX * 1.4, cTolY = tolY * 1.4;
@@ -3612,7 +3690,8 @@ void MainWindow::onCanvasPressedAt(QPointF p, bool dual)
     const QJsonArray items = activeScene()["items"].toArray();
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto it = items[i].toObject();
-        if (!it["visible"].toBool(true) || sourceTypeInfo(sourceById(it["sourceId"].toString())["type"].toString()).audio) continue;
+        const bool itVis = dual ? itemDualVisible(it) : it["visible"].toBool(true);
+        if (!itVis || sourceTypeInfo(sourceById(it["sourceId"].toString())["type"].toString()).audio) continue;
         const QRectF r = displayRectFor(it, dual);
         if (!r.contains(p)) continue;
         if (it["id"].toString() != m_selItem) selectItem(it["id"].toString());
@@ -3641,7 +3720,8 @@ void MainWindow::onCanvasDragged(QPointF p)
     if (snapSources) {
         for (const auto &v : activeScene()["items"].toArray()) {
             const auto other = v.toObject();
-            if (other["id"].toString() == m_selItem || !other["visible"].toBool(true)) continue;
+            const bool otherVis = m_dragDual ? itemDualVisible(other) : other["visible"].toBool(true);
+            if (other["id"].toString() == m_selItem || !otherVis) continue;
             if (sourceTypeInfo(sourceById(other["sourceId"].toString())["type"].toString()).audio) continue;
             const QRectF orr = displayRectFor(other, m_dragDual);
             targetsX << orr.left() << orr.center().x() << orr.right();

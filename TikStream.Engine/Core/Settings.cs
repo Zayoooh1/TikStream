@@ -112,6 +112,9 @@ public sealed class SceneItem
     public string Id { get; set; } = SourceDef.NewId();
     public string SourceId { get; set; } = "";
     public bool Visible { get; set; } = true;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? DualVisible { get; set; }
+    [JsonIgnore] public bool EffectiveDualVisible => DualVisible ?? Visible;
     public bool Locked { get; set; }
     public float X { get; set; }
     public float Y { get; set; }
@@ -324,8 +327,16 @@ public sealed class AppSettings
     private static string CombineRtmp(string serverUrl, string streamKey)
     {
         var server = (serverUrl ?? "").Trim();
-        var key = (streamKey ?? "").Trim();
+        var key = (streamKey ?? "").Trim().TrimStart('/');
         if (server.Length == 0) return "";
+        // Kick / AWS IVS ingest URLs require the /app RTMP application path (e.g. rtmps://<id>.global-contribute.live-video.net:443/app/<key>)
+        if (Uri.TryCreate(server, UriKind.Absolute, out var uri) &&
+            uri.Host.EndsWith(".live-video.net", StringComparison.OrdinalIgnoreCase) &&
+            (string.IsNullOrEmpty(uri.AbsolutePath) || uri.AbsolutePath == "/"))
+        {
+            int port = uri.Port > 0 ? uri.Port : (uri.Scheme.Equals("rtmps", StringComparison.OrdinalIgnoreCase) ? 443 : 1935);
+            server = $"{uri.Scheme}://{uri.Host}:{port}/app";
+        }
         return key.Length == 0 ? server : server.TrimEnd('/') + "/" + key;
     }
 
