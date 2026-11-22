@@ -180,13 +180,15 @@ private:
     QPointF m_dragStart, m_anchor;
     QRectF m_startRect;
 
-    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr;
+    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr, *m_alertAnimTimer = nullptr;
     bool m_updateCheckPending = false;
     bool m_reallyQuit = false;
     QString m_skippedUpdateVersion;
     struct AlertEvent { QString kind, user, detail; };
     QQueue<AlertEvent> m_alertQueue;
     QString m_alertKind, m_alertUser, m_alertDetail;
+    qint64 m_alertStartMs = 0;
+    int m_alertDurMs = 5000;
     quint64 m_alertRevision = 0;
     QMovie *m_alertMovie = nullptr;
     QSystemTrayIcon *m_tray = nullptr;

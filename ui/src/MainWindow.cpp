@@ -467,6 +467,7 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     m_alertTimer = new QTimer(this);
     m_alertTimer->setSingleShot(true);
     connect(m_alertTimer, &QTimer::timeout, this, [this] {
+        if (m_alertAnimTimer) m_alertAnimTimer->stop();
         if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
         m_alertKind.clear();
         m_alertUser.clear();
@@ -474,6 +475,13 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
         ++m_alertRevision;
         updateAlertOverlays();
         if (!m_alertQueue.isEmpty()) QTimer::singleShot(250, this, &MainWindow::showNextAlert);
+    });
+    m_alertAnimTimer = new QTimer(this);
+    m_alertAnimTimer->setInterval(25); // 40 FPS smooth alert animations
+    connect(m_alertAnimTimer, &QTimer::timeout, this, [this] {
+        if (m_alertKind.isEmpty()) { m_alertAnimTimer->stop(); return; }
+        ++m_alertRevision;
+        updateAlertOverlays();
     });
 
     QSettings qs("TikStream", "UI2");
@@ -2853,11 +2861,14 @@ void MainWindow::showNextAlert()
         m_alertKind = ev.kind;
         m_alertUser = ev.user;
         m_alertDetail = ev.detail;
+        m_alertStartMs = QDateTime::currentMSecsSinceEpoch();
+        m_alertDurMs = maxDur * 1000;
         ++m_alertRevision;
         updateAlertOverlays();
         if (!soundPath.isEmpty())
             EngineHost::instance().call("playAlertSound", {{"sourceId", alertSourceId}, {"path", soundPath}, {"volume", volume}});
-        m_alertTimer->start(maxDur * 1000);
+        m_alertAnimTimer->start();
+        m_alertTimer->start(m_alertDurMs);
         return;
     }
 }
@@ -3051,7 +3062,7 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                 // Scale typography cleanly relative to the image width (or sensible default when text-only)
                 const int refW = displayImg.isNull() ? 640 : std::clamp(displayImg.width(), 420, 1080);
                 const qreal sc = refW / 560.0;
-                const int pad = std::max(24, int(28 * sc));
+                const int pad = std::max(44, int(52 * sc)); // extra headroom for smooth float, pop-in, and gentle tilt
                 const int gapAfterImg = displayImg.isNull() ? 0 : std::max(18, int(24 * sc));
                 const int lineGap = std::max(8, int(12 * sc));
 
@@ -3073,6 +3084,26 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                 const int aw = contentW + pad * 2;
                 const int ah = pad + displayImg.height() + gapAfterImg + userH + (userH > 0 && detailH > 0 ? lineGap : 0) + detailH + pad;
 
+                // Smooth easing helpers for entrance, idle motion, and exit
+                const double elapsedMs = std::max(0.0, double(QDateTime::currentMSecsSinceEpoch() - m_alertStartMs));
+                const double durMs = std::max(1000.0, double(m_alertDurMs));
+                const double remainMs = std::max(0.0, durMs - elapsedMs);
+                auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
+                auto easeOutCubic = [](double t) { return 1.0 - std::pow(1.0 - t, 3.0); };
+                auto easeOutBack = [](double t) {
+                    const double c1 = 1.70158, c3 = c1 + 1.0;
+                    return 1.0 + c3 * std::pow(t - 1.0, 3.0) + c1 * std::pow(t - 1.0, 2.0);
+                };
+
+                const double fadeIn = easeOutCubic(clamp01(elapsedMs / 360.0));
+                const double fadeOut = easeOutCubic(clamp01(remainMs / 420.0));
+                const double masterAlpha = fadeIn * fadeOut;
+
+                const double imgPop = easeOutBack(clamp01(elapsedMs / 480.0));
+                const double imgScale = (0.55 + 0.45 * imgPop) * (0.88 + 0.12 * fadeOut);
+                const double imgFloatY = std::sin(elapsedMs * 0.0042) * (7.0 * sc);
+                const double imgTiltDeg = std::sin(elapsedMs * 0.0028) * 2.6;
+
                 img = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
                 img.fill(Qt::transparent);
 
@@ -3083,18 +3114,39 @@ void MainWindow::uploadRaster(const QJsonObject &src)
 
                 int y = pad;
                 if (!displayImg.isNull()) {
-                    p.drawImage((aw - displayImg.width()) / 2, y, displayImg);
+                    p.save();
+                    p.setOpacity(masterAlpha);
+                    const qreal cx = aw / 2.0;
+                    const qreal cy = y + displayImg.height() / 2.0 + imgFloatY;
+                    p.translate(cx, cy);
+                    p.rotate(imgTiltDeg);
+                    p.scale(imgScale, imgScale);
+                    p.drawImage(-displayImg.width() / 2.0, -displayImg.height() / 2.0, displayImg);
+                    p.restore();
                     y += displayImg.height() + gapAfterImg;
                 }
 
-                auto drawBoldOutlined = [&](const QString &text, const QFont &f, const QFontMetrics &fm, int topY, const QColor &fillColor) {
+                auto drawBoldOutlined = [&](const QString &text, const QFont &f, const QFontMetrics &fm, int topY, const QColor &fillColor, double delayMs, double phase) {
                     if (text.isEmpty()) return;
+                    const double tIn = clamp01((elapsedMs - delayMs) / 420.0);
+                    const double eIn = easeOutBack(tIn);
+                    const double alpha = easeOutCubic(tIn) * fadeOut;
+                    if (alpha <= 0.005) return;
+
+                    const double slideY = (1.0 - easeOutCubic(tIn)) * (26.0 * sc) + std::sin(elapsedMs * 0.0045 + phase) * (3.0 * sc) - (1.0 - fadeOut) * (14.0 * sc);
+                    const double txtScale = (0.82 + 0.18 * eIn) * (0.94 + 0.06 * fadeOut);
+
                     const int tw = fm.horizontalAdvance(text);
-                    const qreal x = (aw - tw) / 2.0;
-                    const qreal baseline = topY + fm.ascent();
+                    const qreal cx = aw / 2.0;
+                    const qreal cy = topY + fm.height() / 2.0 + slideY;
 
                     QPainterPath path;
-                    path.addText(x, baseline, f, text);
+                    path.addText(-tw / 2.0, fm.ascent() - fm.height() / 2.0, f, text);
+
+                    p.save();
+                    p.setOpacity(alpha);
+                    p.translate(cx, cy);
+                    p.scale(txtScale, txtScale);
 
                     const qreal outlineW = std::max(5.0, f.pixelSize() * 0.13);
                     p.save();
@@ -3105,14 +3157,15 @@ void MainWindow::uploadRaster(const QJsonObject &src)
 
                     p.strokePath(path, QPen(QColor(10, 12, 18, 245), outlineW, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
                     p.fillPath(path, fillColor);
+                    p.restore();
                 };
 
                 if (userH > 0) {
-                    drawBoldOutlined(m_alertUser, userFont, ufm, y, accent);
+                    drawBoldOutlined(m_alertUser, userFont, ufm, y, accent, 70.0, 0.0);
                     y += userH + lineGap;
                 }
                 if (detailH > 0) {
-                    drawBoldOutlined(m_alertDetail, detailFont, dfm, y, Qt::white);
+                    drawBoldOutlined(m_alertDetail, detailFont, dfm, y, Qt::white, 150.0, 1.1);
                 }
             }
         } else {
@@ -3142,14 +3195,26 @@ void MainWindow::uploadRaster(const QJsonObject &src)
             QJsonObject it = items[k].toObject();
             if (it["sourceId"].toString() != id || it["fit"].toString("Free") != "Free") continue;
             double scale;
-            if (it["w"].toDouble() <= 0 || type == "AlertBox") {
-                const double cx = it["w"].toDouble() > 0 ? it["x"].toDouble() + it["w"].toDouble() / 2.0 : 0.5;
-                const double cy = it["h"].toDouble() > 0 ? it["y"].toDouble() + it["h"].toDouble() / 2.0 : 0.28;
-                scale = std::min({1.0, 0.78 * m_canvasW / sz.width(), 0.55 * m_canvasH / sz.height()});
+            if (it["w"].toDouble() <= 0) {
+                const double cx = 0.5;
+                const double cy = type == "AlertBox" ? 0.28 : std::clamp(it["y"].toDouble(0.42), 0.0, 1.0);
+                scale = std::min({1.0, (type == "AlertBox" ? 0.65 : 0.8) * m_canvasW / sz.width(), 0.55 * m_canvasH / sz.height()});
                 const double w = sz.width() * scale / m_canvasW, h = sz.height() * scale / m_canvasH;
                 it["x"] = std::clamp(cx - w / 2.0, 0.0, std::max(0.0, 1.0 - w));
                 it["y"] = std::clamp(cy - h / 2.0, 0.0, std::max(0.0, 1.0 - h));
                 it["w"] = w;
+                it["h"] = h;
+                items[k] = it;
+                changed = true;
+                continue;
+            } else if (type == "AlertBox") {
+                // Keep the user's chosen width and center when switching between Gift and Follow alerts!
+                const double cx = it["x"].toDouble() + it["w"].toDouble() / 2.0;
+                const double cy = it["y"].toDouble() + it["h"].toDouble() / 2.0;
+                const double w = it["w"].toDouble();
+                const double h = w * m_canvasW * (double(sz.height()) / std::max(1, sz.width())) / m_canvasH;
+                it["x"] = std::clamp(cx - w / 2.0, 0.0, std::max(0.0, 1.0 - w));
+                it["y"] = std::clamp(cy - h / 2.0, 0.0, std::max(0.0, 1.0 - h));
                 it["h"] = h;
                 items[k] = it;
                 changed = true;
