@@ -149,6 +149,7 @@ private:
     void exportSceneCollection();
     void importSceneCollection();
     void openStatsGraphDialog();
+    void syncDualPreviewDock();
     void pollStats();
     void pollLevels();
     void updateLiveButtons();
@@ -193,7 +194,9 @@ private:
     QPointer<QWidget> m_statsGraphWidget;
     Hotkeys *m_hotkeys = nullptr;
 
-    PreviewWidget *m_preview = nullptr;
+    PreviewWidget *m_preview = nullptr, *m_dualPreview = nullptr;
+    QDockWidget *m_dualPreviewDock = nullptr;
+    bool m_dualDockPositioned = false;
     QStackedWidget *m_previewStack = nullptr;
     QListWidget *m_sceneList = nullptr, *m_sourceList = nullptr;
     QToolButton *m_btnRemove = nullptr, *m_btnUp = nullptr, *m_btnDown = nullptr, *m_btnLock = nullptr;

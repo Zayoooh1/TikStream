@@ -274,7 +274,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         f->addRow("", muted);
         layout->addWidget(hintLabel("Renders web pages, alerts, and local HTML overlays off-screen with a transparent background."));
 
-        collect = [&] {
+        collect = [&options, url, w, h, fps, css, muted] {
             options["browserUrl"] = url->text().trimmed();
             options["browserWidth"] = w->value();
             options["browserHeight"] = h->value();
@@ -300,7 +300,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         f->addRow("", cursor);
         layout->addWidget(hintLabel("Captures the selected monitor directly from GPU memory via DXGI Desktop Duplication."));
 
-        collect = [&] {
+        collect = [&options, combo, cursor] {
             options["captureId"] = combo->currentData().toString();
             options["captureCursor"] = cursor->isChecked();
         };
@@ -334,7 +334,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         bg->setColor(Qt::transparent);
         f->addRow("Background", bg);
 
-        collect = [&] {
+        collect = [&options, txt, font, sz, bold, color, outColor, outW, bg] {
             options["text"] = txt->toPlainText();
             options["fontName"] = font->currentFont().family();
             options["fontSize"] = sz->value();
@@ -356,7 +356,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
             ? "Captures audio from the selected microphone or input device in this scene."
             : "Captures audio playing through the selected speakers or headphones in this scene."));
 
-        collect = [&] {
+        collect = [&options, combo] {
             options["deviceId"] = combo->currentData().toString();
         };
     } else if (type == "AlertBox") {
@@ -396,7 +396,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         f->addRow("Sound Volume", vol);
         layout->addWidget(hintLabel("Plays animated GIFs / images and MP3/WAV sounds in real time when someone follows or sends a gift on TikTok LIVE."));
 
-        collect = [&] {
+        collect = [&options, onGift, gImg, gSnd, onFollow, fImg, fSnd, dur, vol] {
             options["alertOnGift"] = onGift->isChecked();
             options["alertGiftImagePath"] = gImg->text().trimmed();
             options["alertGiftSoundPath"] = gSnd->text().trimmed();
@@ -405,6 +405,8 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
             options["alertFollowSoundPath"] = fSnd->text().trimmed();
             options["alertDurationSec"] = dur->value();
             options["alertVolume"] = vol->value() / 100.0;
+            options["volume"] = vol->value() / 100.0;
+            options["monitorMode"] = "MonitorAndOutput";
         };
     } else {
         return true;
@@ -487,6 +489,7 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     applyHotkeys();
     if (m_sourceList->count() > 0) m_sourceList->setCurrentRow(m_sourceList->count() - 1);
     loadProperties();
+    syncDualPreviewDock();
 
     m_statsTimer = new QTimer(this);
     connect(m_statsTimer, &QTimer::timeout, this, &MainWindow::pollStats);
@@ -862,6 +865,39 @@ void MainWindow::buildDocks()
 
     splitDockWidget(dProps, dMix, Qt::Vertical);
     splitDockWidget(dMix, dCtl, Qt::Vertical);
+
+    // ---------- Detached Horizontal Dual-Canvas Preview Dock ----------
+    m_dualPreview = new PreviewWidget;
+    m_dualPreview->setCanvasSize(m_s["dualCanvasWidth"].toInt(1920), m_s["dualCanvasHeight"].toInt(1080));
+    m_dualPreview->setMinimumSize(360, 220);
+    m_dualPreviewDock = new QDockWidget("Horizontal Preview (Dual-Canvas)", this);
+    m_dualPreviewDock->setObjectName("dockDualPreview");
+    m_dualPreviewDock->setWidget(m_dualPreview);
+    m_dualPreviewDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable | QDockWidget::DockWidgetClosable);
+    addDockWidget(Qt::RightDockWidgetArea, m_dualPreviewDock);
+    m_dualPreviewDock->setFloating(true);
+    m_dualPreviewDock->hide();
+    if (auto *pm = findChild<QMenu *>("panelsMenu")) {
+        auto *act = m_dualPreviewDock->toggleViewAction();
+        act->setText("Horizontal Preview Dock (Dual-Canvas)");
+        pm->addAction(act);
+    }
+    connect(m_dualPreview, &PreviewWidget::nativeResized, this, [this](qint64 hwnd, int w, int h) {
+        if (m_dualPreviewDock && m_dualPreviewDock->isVisible())
+            EngineHost::instance().call("setDualPreview", QJsonObject{{"hwnd", hwnd}, {"w", w}, {"h", h}});
+    });
+    connect(m_dualPreviewDock, &QDockWidget::visibilityChanged, this, [this](bool vis) {
+        if (!vis) {
+            EngineHost::instance().call("setDualPreview", QJsonObject{{"hwnd", 0}, {"w", 0}, {"h", 0}});
+        } else if (m_dualPreview) {
+            const qreal dpr = m_dualPreview->devicePixelRatioF();
+            EngineHost::instance().call("setDualPreview", QJsonObject{
+                {"hwnd", qint64(m_dualPreview->winId())},
+                {"w", std::max(2, int(std::lround(m_dualPreview->width() * dpr)))},
+                {"h", std::max(2, int(std::lround(m_dualPreview->height() * dpr)))},
+            });
+        }
+    });
 }
 
 void MainWindow::arrangeDocks(bool horizontal)
@@ -2314,7 +2350,7 @@ void MainWindow::rebuildMixer()
         const auto id = s["id"].toString();
         const bool sceneDevice = sourceTypeInfo(t).audio && !s["globalAudio"].toBool();
         if (sceneDevice && !sceneAudio.contains(id)) continue;
-        if (sourceTypeInfo(t).audio || t == "Media") {
+        if (sourceTypeInfo(t).audio || t == "Media" || t == "AlertBox") {
             audio << s;
             sig << s["id"].toString() + s["name"].toString() + s["deviceId"].toString() + (s["muted"].toBool() ? "m" : "")
                 + (sceneDevice && !sceneAudio.value(id) ? "h" : "");
@@ -2348,6 +2384,8 @@ void MainWindow::rebuildMixer()
         const auto application = s["deviceId"].toString();
         if (type == "AudioApplication" && !application.isEmpty() && !channelName.contains(application, Qt::CaseInsensitive))
             channelName += " · " + application;
+        else if (type == "AlertBox")
+            channelName = channelName.isEmpty() ? "Alert Sounds" : channelName + " · Alert Sounds";
         auto *name = new QLabel(channelName);
         name->setWordWrap(true);
         name->setObjectName("channelName");
@@ -2582,6 +2620,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             src["alertDurationSec"] = 5;
             src["alertOnGift"] = true;
             src["alertOnFollow"] = true;
+            src["monitorMode"] = "MonitorAndOutput";
         }
         if (type == "Image" || type == "Media") {
             const QString filter = type == "Image" ? "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
@@ -2774,7 +2813,7 @@ void MainWindow::showNextAlert()
     while (!m_alertQueue.isEmpty()) {
         const auto ev = m_alertQueue.dequeue();
         int maxDur = 0;
-        QString soundPath, imagePath;
+        QString soundPath, imagePath, alertSourceId;
         double volume = 1.0;
         for (const auto &v : sources()) {
             const auto s = v.toObject();
@@ -2783,6 +2822,7 @@ void MainWindow::showNextAlert()
             if (ev.kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
             maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
             volume = s["alertVolume"].toDouble(1.0);
+            if (alertSourceId.isEmpty()) alertSourceId = s["id"].toString();
             if (soundPath.isEmpty()) {
                 soundPath = s[ev.kind == "gift" ? "alertGiftSoundPath" : "alertFollowSoundPath"].toString();
                 if (soundPath.isEmpty()) soundPath = s["alertSoundPath"].toString();
@@ -2815,7 +2855,7 @@ void MainWindow::showNextAlert()
         ++m_alertRevision;
         updateAlertOverlays();
         if (!soundPath.isEmpty())
-            EngineHost::instance().call("playAlertSound", {{"path", soundPath}, {"volume", volume}});
+            EngineHost::instance().call("playAlertSound", {{"sourceId", alertSourceId}, {"path", soundPath}, {"volume", volume}});
         m_alertTimer->start(maxDur * 1000);
         return;
     }
@@ -3535,6 +3575,7 @@ void MainWindow::openSettings()
         m_mixerSignature.clear();
         rebuildMixer();
         loadProperties();
+        syncDualPreviewDock();
     });
     dlg.exec();
 }
@@ -3861,6 +3902,25 @@ void MainWindow::openStatsGraphDialog()
     m_statsGraphWidget = gw;
     v->addWidget(gw, 1);
     dlg->show();
+}
+
+void MainWindow::syncDualPreviewDock()
+{
+    if (!m_dualPreviewDock || !m_dualPreview) return;
+    const bool dualActive = m_s["dualCanvasEnabled"].toBool(false) || m_s["secondStreamEnabled"].toBool(false);
+    const bool showDock = dualActive && m_s["dualCanvasPreviewEnabled"].toBool(true) && !QCoreApplication::arguments().contains("--test");
+    m_dualPreview->setCanvasSize(m_s["dualCanvasWidth"].toInt(1920), m_s["dualCanvasHeight"].toInt(1080));
+    if (showDock) {
+        if (!m_dualDockPositioned && m_dualPreviewDock->isFloating()) {
+            m_dualDockPositioned = true;
+            m_dualPreviewDock->resize(560, 360);
+            const QRect fg = frameGeometry();
+            m_dualPreviewDock->move(fg.right() + 6, fg.top());
+        }
+        m_dualPreviewDock->show();
+    } else {
+        m_dualPreviewDock->hide();
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *e)

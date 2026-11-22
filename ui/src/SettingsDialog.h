@@ -57,7 +57,7 @@ private:
     QLineEdit *m_folder = nullptr;
     // video
     QSpinBox *m_videoWidth = nullptr, *m_videoHeight = nullptr, *m_fps = nullptr, *m_transitionMs = nullptr, *m_dualW = nullptr, *m_dualH = nullptr;
-    QCheckBox *m_dualCanvas = nullptr;
+    QCheckBox *m_dualCanvas = nullptr, *m_dualPreview = nullptr;
     // audio
     QComboBox *m_desktopDev = nullptr, *m_micDev = nullptr;
     // hotkeys

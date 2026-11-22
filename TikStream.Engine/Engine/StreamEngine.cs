@@ -78,6 +78,9 @@ public sealed unsafe class StreamEngine : IDisposable
     private IntPtr _previewHwnd;
     private int _previewW, _previewH;
     private bool _previewDirty;
+    private IntPtr _dualPreviewHwnd;
+    private int _dualPreviewW, _dualPreviewH;
+    private bool _dualPreviewDirty;
     private volatile bool _previewEnabled = true;
     public NRect? Selection { get; set; }
 
@@ -140,11 +143,11 @@ public sealed unsafe class StreamEngine : IDisposable
     public void ApplySettings(AppSettings s, AppSettings previous)
     {
         var copy = s.Clone();
-        if (Sig(copy.Sources.Where(x => !x.IsVisual)) != Sig(previous.Sources.Where(x => !x.IsVisual)) ||
+        if (Sig(copy.Sources.Where(x => !x.IsVisual || x.Type == SourceType.AlertBox)) != Sig(previous.Sources.Where(x => !x.IsVisual || x.Type == SourceType.AlertBox)) ||
             !AudibleDeviceIds(copy).SetEquals(AudibleDeviceIds(previous)))
             Audio.SyncDevices(copy);
-        var oldMedia = previous.Sources.Where(x => x.Type == SourceType.Media).ToDictionary(x => x.Id);
-        foreach (var m in copy.Sources.Where(x => x.Type == SourceType.Media))
+        var oldMedia = previous.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox).ToDictionary(x => x.Id);
+        foreach (var m in copy.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox))
         {
             if (!oldMedia.TryGetValue(m.Id, out var old) || (m.Muted, m.Volume) != (old.Muted, old.Volume))
                 Audio.SetVolume(m.Id, m.Muted ? 0 : m.Volume);
@@ -242,6 +245,9 @@ public sealed unsafe class StreamEngine : IDisposable
 
     public void SetPreviewWindow(IntPtr hwnd, int w, int h)
         => _cmds.Enqueue(() => { Log.Info($"Preview: window 0x{hwnd.ToInt64():X} {w}x{h}"); _previewHwnd = hwnd; _previewW = w; _previewH = h; _previewDirty = true; });
+
+    public void SetDualPreviewWindow(IntPtr hwnd, int w, int h)
+        => _cmds.Enqueue(() => { _dualPreviewHwnd = hwnd; _dualPreviewW = w; _dualPreviewH = h; _dualPreviewDirty = true; });
 
     /// <summary>Image/text pixels (premultiplied BGRA) are rasterized by the Qt UI.</summary>
     public void SetSourcePixels(string id, int w, int h, byte[] bgra)
@@ -462,8 +468,11 @@ public sealed unsafe class StreamEngine : IDisposable
                 _recVenc.Dispose();
                 _recVenc = null;
             }
-            _dualComp?.Dispose();
-            _dualComp = null;
+            if (_dualPreviewHwnd == IntPtr.Zero)
+            {
+                _dualComp?.Dispose();
+                _dualComp = null;
+            }
             lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
         }
         if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o);
@@ -820,7 +829,7 @@ public sealed unsafe class StreamEngine : IDisposable
             }
         }
 
-        // 4. preview
+        // 4. preview (main + optional horizontal Dual-Canvas dock preview)
         if (_previewDirty)
         {
             _previewDirty = false;
@@ -829,6 +838,38 @@ public sealed unsafe class StreamEngine : IDisposable
         }
         if (_previewEnabled && _previewHwnd != IntPtr.Zero)
             _comp.PresentPreview(_selection);
+
+        bool wantDualPreview = _previewEnabled && _dualPreviewHwnd != IntPtr.Zero && (s.DualCanvasEnabled || s.SecondStreamEnabled) && s.DualCanvasPreviewEnabled;
+        if (wantDualPreview)
+        {
+            int dw = Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096);
+            int dh = Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096);
+            if (_dualComp == null || (_recVenc == null && (_dualComp.Width != dw || _dualComp.Height != dh)))
+            {
+                _dualComp?.Dispose();
+                _dualComp = new Compositor(Gpu, dw, dh);
+                _dualPreviewDirty = true;
+            }
+            if (_dualPreviewDirty)
+            {
+                _dualPreviewDirty = false;
+                try { _dualComp.SetPreviewTarget(_dualPreviewHwnd, _dualPreviewW, _dualPreviewH); }
+                catch (Exception ex) { Log.Warn("Dual preview: " + ex.Message); }
+            }
+            if (_recVenc == null)
+                _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
+            _dualComp.PresentPreview(null);
+        }
+        else if (_dualPreviewDirty)
+        {
+            _dualPreviewDirty = false;
+            try { _dualComp?.SetPreviewTarget(IntPtr.Zero, 0, 0); } catch { }
+            if (_recVenc == null && _dualComp != null)
+            {
+                _dualComp.Dispose();
+                _dualComp = null;
+            }
+        }
     }
 
     private static Vector4 CoverCrop(float sw, float sh, float dw, float dh, float zoom, float panX, float panY)
@@ -852,6 +893,7 @@ public sealed unsafe class StreamEngine : IDisposable
         _sources.Clear();
         CefHost.Shutdown();
         Audio.Dispose();
+        _dualComp?.Dispose();
         _comp.Dispose();
         Gpu.Dispose();
         Native.timeEndPeriod(1);

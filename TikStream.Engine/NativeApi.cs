@@ -174,6 +174,10 @@ public static unsafe class NativeApi
                 Engine().SetPreviewWindow(new IntPtr(j["hwnd"]!.GetValue<long>()), j["w"]!.GetValue<int>(), j["h"]!.GetValue<int>());
                 return Ok();
 
+            case "setDualPreview":
+                Engine().SetDualPreviewWindow(new IntPtr(j["hwnd"]!.GetValue<long>()), j["w"]!.GetValue<int>(), j["h"]!.GetValue<int>());
+                return Ok();
+
             case "setSelection":
                 Engine().SetSelection(j.ContainsKey("x") ? ReadRect(j) : null);
                 return Ok();
@@ -262,9 +266,10 @@ public static unsafe class NativeApi
 
             case "playAlertSound":
             {
+                var sourceId = j["sourceId"]?.GetValue<string>() ?? "";
                 var path = j["path"]?.GetValue<string>() ?? "";
                 var vol = j["volume"]?.GetValue<float>() ?? 1f;
-                Engine().Audio.PlayAlertSound(path, vol);
+                Engine().Audio.PlayAlertSound(sourceId, path, vol);
                 return Ok();
             }
 

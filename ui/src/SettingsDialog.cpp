@@ -603,6 +603,9 @@ QWidget *SettingsDialog::pageVideo()
     m_dualCanvas = track(new QCheckBox("Enable Dual-Canvas recording output"));
     m_dualCanvas->setChecked(m_s["dualCanvasEnabled"].toBool(false));
     fd->addRow("", m_dualCanvas);
+    m_dualPreview = track(new QCheckBox("Show horizontal Dual-Canvas preview in detached side dock"));
+    m_dualPreview->setChecked(m_s["dualCanvasPreviewEnabled"].toBool(true));
+    fd->addRow("", m_dualPreview);
     auto *dualRow = new QHBoxLayout();
     m_dualW = track(new PaddedSpinBox);
     m_dualW->setRange(128, 4096); m_dualW->setSingleStep(2); m_dualW->setSuffix(" px"); m_dualW->setValue(m_s["dualCanvasWidth"].toInt(1920));
@@ -612,10 +615,17 @@ QWidget *SettingsDialog::pageVideo()
     dualRow->addWidget(new QLabel("×"));
     dualRow->addWidget(m_dualH, 1);
     fd->addRow("Recording Canvas", dualRow);
-    auto updateDual = [this](bool on) { m_dualW->setEnabled(!m_live && on); m_dualH->setEnabled(!m_live && on); };
-    connect(m_dualCanvas, &QCheckBox::toggled, this, updateDual);
+    auto updateDual = [this] {
+        const bool dualOn = m_dualCanvas->isChecked();
+        const bool anyDual = dualOn || (m_secondEnabled && m_secondEnabled->isChecked());
+        m_dualW->setEnabled(!m_live && dualOn);
+        m_dualH->setEnabled(!m_live && dualOn);
+        m_dualPreview->setEnabled(anyDual);
+    };
+    connect(m_dualCanvas, &QCheckBox::toggled, this, [updateDual](bool) { updateDual(); });
+    if (m_secondEnabled) connect(m_secondEnabled, &QCheckBox::toggled, this, [updateDual](bool) { updateDual(); });
     m_dualCanvas->setEnabled(!m_live);
-    updateDual(m_dualCanvas->isChecked());
+    updateDual();
 
     for (QWidget *field : std::initializer_list<QWidget *>{preset, m_videoWidth, m_videoHeight, m_fps})
         field->setEnabled(!m_live);
@@ -752,6 +762,7 @@ QJsonObject SettingsDialog::result() const
     s["fps"] = m_fps->value();
     s["sceneTransitionMs"] = m_transitionMs->value();
     s["dualCanvasEnabled"] = m_dualCanvas->isChecked();
+    s["dualCanvasPreviewEnabled"] = m_dualPreview->isChecked();
     s["dualCanvasWidth"] = m_dualW->value() & ~1;
     s["dualCanvasHeight"] = m_dualH->value() & ~1;
 

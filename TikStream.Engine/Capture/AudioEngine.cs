@@ -95,6 +95,24 @@ public sealed class AudioEngine : IDisposable
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
                 }
             }
+            foreach (var d in settings.Sources.Where(x => x.Type == SourceType.AlertBox))
+            {
+                if (!_inputs.TryGetValue(d.Id, out var inp))
+                {
+                    inp = Input.FromPush(d.Name, _mixer, isAlert: true);
+                    _inputs[d.Id] = inp;
+                }
+                inp.SetVolume(!d.Muted ? d.Volume : 0);
+                inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
+                inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
+                    d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+            }
+            var alertIds = settings.Sources.Where(x => x.Type == SourceType.AlertBox).Select(x => x.Id).ToHashSet();
+            foreach (var id in _inputs.Where(kv => kv.Value.IsAlert && !alertIds.Contains(kv.Key)).Select(kv => kv.Key).ToList())
+            {
+                _inputs[id].Dispose(_mixer);
+                _inputs.Remove(id);
+            }
         }
     }
 
@@ -232,10 +250,10 @@ public sealed class AudioEngine : IDisposable
     }
 
     /// <summary>
-    /// Plays an alert sound file (.mp3/.wav) into BOTH the live stream/recording mix and the local default headphones.
-    /// Runs decoding off the render/UI thread.
+    /// Plays an alert sound file (.mp3/.wav). When routed through the AlertBox's registered mixer channel,
+    /// its volume, mute, level meter, filters, and headphone monitoring are all controlled directly from the Audio Mixer.
     /// </summary>
-    public void PlayAlertSound(string path, float volume = 1f)
+    public void PlayAlertSound(string sourceId, string path, float volume = 1f)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
         float vol = Math.Clamp(volume, 0f, 2f);
@@ -243,7 +261,7 @@ public sealed class AudioEngine : IDisposable
         {
             try
             {
-                // 1. Decode to 48 kHz stereo float and mix into the live output stream
+                float[] samples;
                 using (var reader = new AudioFileReader(path))
                 {
                     ISampleProvider sp = reader;
@@ -255,20 +273,28 @@ public sealed class AudioEngine : IDisposable
                     var pcm = new List<float>(SampleRate * Channels * 4);
                     var tmp = new float[4096];
                     int n;
-                    int maxSamples = SampleRate * Channels * 15; // cap at 15 s
+                    int maxSamples = SampleRate * Channels * 15;
                     while ((n = sp.Read(tmp, 0, tmp.Length)) > 0 && pcm.Count < maxSamples)
                     {
                         for (int i = 0; i < n && pcm.Count < maxSamples; i++) pcm.Add(tmp[i]);
                     }
-                    if (pcm.Count > 0)
-                    {
-                        var samples = pcm.ToArray();
-                        var prov = new OneShotSampleProvider(samples, MixFormat);
-                        lock (_lock) _mixer.AddMixerInput(prov);
-                    }
+                    samples = pcm.ToArray();
+                }
+                if (samples.Length == 0) return;
+
+                Input? target = null;
+                lock (_lock)
+                {
+                    if (!string.IsNullOrEmpty(sourceId)) _inputs.TryGetValue(sourceId, out target);
+                }
+                if (target != null)
+                {
+                    target.Push(samples, samples.Length);
+                    return;
                 }
 
-                // 2. Also play locally on default playback device so the streamer hears the alert
+                // Fallback when no dedicated AlertBox channel is registered
+                lock (_lock) _mixer.AddMixerInput(new OneShotSampleProvider(samples, MixFormat));
                 using var localReader = new AudioFileReader(path) { Volume = Math.Clamp(vol, 0f, 1f) };
                 using var wo = new WasapiOut(AudioClientShareMode.Shared, 60);
                 using var done = new ManualResetEventSlim(false);
@@ -335,6 +361,7 @@ public sealed class AudioEngine : IDisposable
         public string Name { get; }
         public string Key { get; private init; } = "";
         public bool IsDevice => _capture != null;
+        public bool IsAlert { get; private init; }
         public bool IsMonitored { get; private set; }
         public volatile bool Stopped;
         public float Peak;
@@ -352,7 +379,7 @@ public sealed class AudioEngine : IDisposable
             _trim = trim;
             _buffer = new BufferedWaveProvider(fmt)
             {
-                BufferDuration = TimeSpan.FromSeconds(trim ? 1 : 3),
+                BufferDuration = TimeSpan.FromSeconds(trim ? 1 : 16),
                 DiscardOnBufferOverflow = true,
                 ReadFully = true,
             };
@@ -392,8 +419,8 @@ public sealed class AudioEngine : IDisposable
         public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer)
             => new(name, cap, cap.WaveFormat, true, mixer) { Key = key };
 
-        public static Input FromPush(string name, MixingSampleProvider mixer)
-            => new(name, null, MixFormat, false, mixer) { Key = "push" };
+        public static Input FromPush(string name, MixingSampleProvider mixer, bool isAlert = false)
+            => new(name, null, MixFormat, false, mixer) { Key = "push", IsAlert = isAlert };
 
         public void SetVolume(float v)
         {

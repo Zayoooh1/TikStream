@@ -103,7 +103,7 @@ public sealed record SourceDef
     public static string NewId() => Guid.NewGuid().ToString("N");
 
     [JsonIgnore] public bool IsVisual => Type is not (SourceType.AudioInput or SourceType.AudioOutput or SourceType.AudioApplication);
-    [JsonIgnore] public bool HasAudio => !IsVisual || Type == SourceType.Media;
+    [JsonIgnore] public bool HasAudio => !IsVisual || Type is SourceType.Media or SourceType.AlertBox;
 }
 
 /// <summary>Source instance inside a scene: position, size, fit mode, and GPU effects.</summary>
@@ -172,6 +172,7 @@ public sealed class AppSettings
     public string RecordFormat { get; set; } = "mkv";
     public string RecordCodec { get; set; } = "h264";
     public bool DualCanvasEnabled { get; set; }
+    public bool DualCanvasPreviewEnabled { get; set; } = true;
     public int DualCanvasWidth { get; set; } = 1920;
     public int DualCanvasHeight { get; set; } = 1080;
     public bool MultiTrackAudio { get; set; }

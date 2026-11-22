@@ -199,13 +199,18 @@ public static class AutoUpdater
 
         try
         {
+            var exePath = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+                exePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "TikStream", "TikStream.exe");
+
             Process.Start(new ProcessStartInfo
             {
-                FileName = "msiexec.exe",
-                Arguments = $"/i \"{path}\" /passive",
-                UseShellExecute = true,
+                FileName = "cmd.exe",
+                Arguments = $"/c msiexec.exe /i \"{path}\" /passive && start \"\" \"{exePath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
             });
-            Log.Info($"Launched update installer: {path}");
+            Log.Info($"Launched update installer with auto-relaunch: {path} -> {exePath}");
             return null;
         }
         catch (Exception ex)
