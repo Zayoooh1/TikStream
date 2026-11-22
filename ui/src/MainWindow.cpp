@@ -2661,8 +2661,8 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double w = bw * sc / cw, h = bh * sc / ch;
         item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
     } else if (type == "AlertBox") {
-        const double w = 0.86, h = w * cw / ch * (9.0 / 16.0);
-        item["x"] = (1.0 - w) / 2.0; item["y"] = 0.12; item["w"] = w; item["h"] = h;
+        // Dimensions are determined dynamically once an alert image/GIF + text is rendered.
+        item["x"] = 0.5; item["y"] = 0.25; item["w"] = 0.0; item["h"] = 0.0;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
         const double scale = std::min(1.0, 0.8 * cw / sz.width());
@@ -3022,18 +3022,10 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
-            const int aw = std::max(1920, std::max(m_canvasW, m_canvasH));
-            const int ah = (aw * 9) / 16;
-            const qreal sc = aw / 1080.0;
-            img = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
-            img.fill(Qt::transparent);
             if (!m_alertKind.isEmpty()) {
-                QPainter p(&img);
-                p.setRenderHint(QPainter::Antialiasing, true);
-                p.setRenderHint(QPainter::TextAntialiasing, true);
-                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 const QColor accent = m_alertKind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
 
+                // Load image or current animated GIF frame at its natural resolution
                 QImage iconImg;
                 if (m_alertMovie && m_alertMovie->state() == QMovie::Running) {
                     iconImg = m_alertMovie->currentImage();
@@ -3043,44 +3035,85 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                     if (!imgPath.isEmpty()) iconImg = QImage(imgPath);
                 }
 
-                int textTop = int(140 * sc);
+                // Keep natural image aspect ratio; upscale tiny icons and cap huge images cleanly
+                QImage displayImg;
                 if (!iconImg.isNull()) {
-                    const int maxIcon = int(310 * sc);
-                    const QImage scaled = iconImg.scaled(maxIcon, maxIcon, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                    const int ix = (aw - scaled.width()) / 2;
-                    const int iy = int(16 * sc) + (maxIcon - scaled.height()) / 2;
-                    p.drawImage(ix, iy, scaled);
-                    textTop = int(344 * sc);
+                    const int maxDim = std::max(720, std::min(m_canvasW, m_canvasH));
+                    if (iconImg.width() > maxDim || iconImg.height() > maxDim) {
+                        displayImg = iconImg.scaled(maxDim, maxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    } else if (iconImg.width() < 320 && iconImg.height() < 320) {
+                        displayImg = iconImg.scaled(360, 360, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    } else {
+                        displayImg = iconImg;
+                    }
                 }
 
-                auto drawBoldOutlined = [&](const QString &text, int pixelSize, int centerY, const QColor &fillColor) {
+                // Scale typography cleanly relative to the image width (or sensible default when text-only)
+                const int refW = displayImg.isNull() ? 640 : std::clamp(displayImg.width(), 420, 1080);
+                const qreal sc = refW / 560.0;
+                const int pad = std::max(24, int(28 * sc));
+                const int gapAfterImg = displayImg.isNull() ? 0 : std::max(18, int(24 * sc));
+                const int lineGap = std::max(8, int(12 * sc));
+
+                QFont userFont("Segoe UI");
+                userFont.setPixelSize(std::max(44, int(60 * sc)));
+                userFont.setWeight(QFont::Bold);
+                QFont detailFont("Segoe UI");
+                detailFont.setPixelSize(std::max(30, int(40 * sc)));
+                detailFont.setWeight(QFont::Bold);
+
+                const QFontMetrics ufm(userFont);
+                const QFontMetrics dfm(detailFont);
+                const int userW = m_alertUser.isEmpty() ? 0 : ufm.horizontalAdvance(m_alertUser);
+                const int detailW = m_alertDetail.isEmpty() ? 0 : dfm.horizontalAdvance(m_alertDetail);
+                const int userH = m_alertUser.isEmpty() ? 0 : ufm.height();
+                const int detailH = m_alertDetail.isEmpty() ? 0 : dfm.height();
+
+                const int contentW = std::max({displayImg.width(), userW, detailW, 200});
+                const int aw = contentW + pad * 2;
+                const int ah = pad + displayImg.height() + gapAfterImg + userH + (userH > 0 && detailH > 0 ? lineGap : 0) + detailH + pad;
+
+                img = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
+                img.fill(Qt::transparent);
+
+                QPainter p(&img);
+                p.setRenderHint(QPainter::Antialiasing, true);
+                p.setRenderHint(QPainter::TextAntialiasing, true);
+                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+                int y = pad;
+                if (!displayImg.isNull()) {
+                    p.drawImage((aw - displayImg.width()) / 2, y, displayImg);
+                    y += displayImg.height() + gapAfterImg;
+                }
+
+                auto drawBoldOutlined = [&](const QString &text, const QFont &f, const QFontMetrics &fm, int topY, const QColor &fillColor) {
                     if (text.isEmpty()) return;
-                    QFont f("Segoe UI");
-                    f.setPixelSize(std::max(18, int(pixelSize * sc)));
-                    f.setWeight(QFont::Bold);
-                    const QFontMetrics fm(f);
-                    const QString elided = fm.elidedText(text, Qt::ElideRight, aw - int(60 * sc));
-                    const int tw = fm.horizontalAdvance(elided);
+                    const int tw = fm.horizontalAdvance(text);
                     const qreal x = (aw - tw) / 2.0;
-                    const qreal baseline = centerY + (fm.ascent() - fm.descent()) / 2.0;
+                    const qreal baseline = topY + fm.ascent();
 
                     QPainterPath path;
-                    path.addText(x, baseline, f, elided);
+                    path.addText(x, baseline, f, text);
 
-                    // 1. Soft drop shadow underneath
+                    const qreal outlineW = std::max(5.0, f.pixelSize() * 0.13);
                     p.save();
-                    p.translate(0, 5.0 * sc);
-                    p.strokePath(path, QPen(QColor(0, 0, 0, 150), 11.0 * sc, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    p.fillPath(path, QColor(0, 0, 0, 150));
+                    p.translate(0, std::max(3.0, f.pixelSize() * 0.07));
+                    p.strokePath(path, QPen(QColor(0, 0, 0, 155), outlineW * 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.fillPath(path, QColor(0, 0, 0, 155));
                     p.restore();
 
-                    // 2. Crisp dark outline UNDER the fill, then vibrant fill ON TOP (never obscured by stroke)
-                    p.strokePath(path, QPen(QColor(10, 12, 18, 245), 8.0 * sc, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.strokePath(path, QPen(QColor(10, 12, 18, 245), outlineW, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
                     p.fillPath(path, fillColor);
                 };
 
-                drawBoldOutlined(m_alertUser, 78, textTop + int(48 * sc), accent);
-                drawBoldOutlined(m_alertDetail, 52, textTop + int(134 * sc), Qt::white);
+                if (userH > 0) {
+                    drawBoldOutlined(m_alertUser, userFont, ufm, y, accent);
+                    y += userH + lineGap;
+                }
+                if (detailH > 0) {
+                    drawBoldOutlined(m_alertDetail, detailFont, dfm, y, Qt::white);
+                }
             }
         } else {
             img = rasterizeSource(src);
@@ -3109,11 +3142,18 @@ void MainWindow::uploadRaster(const QJsonObject &src)
             QJsonObject it = items[k].toObject();
             if (it["sourceId"].toString() != id || it["fit"].toString("Free") != "Free") continue;
             double scale;
-            if (it["w"].toDouble() <= 0) {
-                scale = std::min(1.0, 0.8 * m_canvasW / sz.width());
+            if (it["w"].toDouble() <= 0 || type == "AlertBox") {
+                const double cx = it["w"].toDouble() > 0 ? it["x"].toDouble() + it["w"].toDouble() / 2.0 : 0.5;
+                const double cy = it["h"].toDouble() > 0 ? it["y"].toDouble() + it["h"].toDouble() / 2.0 : 0.28;
+                scale = std::min({1.0, 0.78 * m_canvasW / sz.width(), 0.55 * m_canvasH / sz.height()});
                 const double w = sz.width() * scale / m_canvasW, h = sz.height() * scale / m_canvasH;
-                it["x"] = (1 - w) / 2;
-                it["y"] = std::clamp(it["y"].toDouble(0.42), 0.0, std::max(0.0, 1 - h));
+                it["x"] = std::clamp(cx - w / 2.0, 0.0, std::max(0.0, 1.0 - w));
+                it["y"] = std::clamp(cy - h / 2.0, 0.0, std::max(0.0, 1.0 - h));
+                it["w"] = w;
+                it["h"] = h;
+                items[k] = it;
+                changed = true;
+                continue;
             } else {
                 if (oldSize.isEmpty()) continue;
                 scale = it["w"].toDouble() * m_canvasW / oldSize.width();
