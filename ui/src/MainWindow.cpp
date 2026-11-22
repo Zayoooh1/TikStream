@@ -2845,14 +2845,33 @@ void MainWindow::showNextAlert()
 
         if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
         m_alertCachedImg = QImage();
-        auto scaleAlertImg = [this](const QImage &raw) -> QImage {
+        auto trimAlpha = [](const QImage &srcImg) -> QImage {
+            if (srcImg.isNull()) return {};
+            const QImage img = srcImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            int minX = img.width(), minY = img.height(), maxX = -1, maxY = -1;
+            for (int y = 0; y < img.height(); ++y) {
+                const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+                for (int x = 0; x < img.width(); ++x) {
+                    if (qAlpha(line[x]) > 10) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            if (maxX < minX || maxY < minY) return img;
+            return img.copy(minX, minY, maxX - minX + 1, maxY - minY + 1);
+        };
+        auto scaleAlertImg = [this, trimAlpha](const QImage &raw) -> QImage {
             if (raw.isNull()) return {};
-            const int maxDim = std::min(560, std::max(360, std::min(m_canvasW, m_canvasH) / 2));
-            if (raw.width() > maxDim || raw.height() > maxDim)
-                return raw.scaled(maxDim, maxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-            if (raw.width() < 260 && raw.height() < 260)
-                return raw.scaled(320, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-            return raw.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            const QImage trimmed = trimAlpha(raw);
+            const int maxDim = std::min(520, std::max(340, std::min(m_canvasW, m_canvasH) / 2));
+            if (trimmed.width() > maxDim || trimmed.height() > maxDim)
+                return trimmed.scaled(maxDim, maxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (trimmed.width() < 260 && trimmed.height() < 260)
+                return trimmed.scaled(300, 300, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            return trimmed;
         };
 
         if (!imagePath.isEmpty() && imagePath.endsWith(".gif", Qt::CaseInsensitive) && QFileInfo::exists(imagePath)) {
@@ -2873,11 +2892,11 @@ void MainWindow::showNextAlert()
 
         // Pre-rasterize outlined bold text ONCE per alert (instead of every frame) so animations run at full 60+ FPS!
         const QColor accent = ev.kind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
-        const int refW = m_alertCachedImg.isNull() ? 520 : std::clamp(m_alertCachedImg.width(), 360, 600);
-        m_alertScaleRef = refW / 520.0;
-        m_alertPad = std::max(36, int(44 * m_alertScaleRef));
-        m_alertGapAfterImg = m_alertCachedImg.isNull() ? 0 : std::max(14, int(20 * m_alertScaleRef));
-        m_alertLineGap = std::max(6, int(10 * m_alertScaleRef));
+        const int refW = m_alertCachedImg.isNull() ? 500 : std::clamp(m_alertCachedImg.width(), 340, 560);
+        m_alertScaleRef = refW / 500.0;
+        m_alertPad = std::max(26, int(30 * m_alertScaleRef));
+        m_alertGapAfterImg = m_alertCachedImg.isNull() ? 0 : std::max(10, int(12 * m_alertScaleRef));
+        m_alertLineGap = 0;
 
         auto prerenderText = [](const QString &text, int pixelSize, const QColor &fillColor) -> QImage {
             if (text.isEmpty()) return {};
@@ -2886,7 +2905,7 @@ void MainWindow::showNextAlert()
             f.setWeight(QFont::Bold);
             const QFontMetrics fm(f);
             const qreal outlineW = std::max(4.5, pixelSize * 0.13);
-            const int margin = int(std::ceil(outlineW * 2.0)) + 8;
+            const int margin = int(std::ceil(outlineW)) + 4;
             const int tw = fm.horizontalAdvance(text);
             const int th = fm.height();
             QImage out(tw + margin * 2, th + margin * 2, QImage::Format_ARGB32_Premultiplied);
