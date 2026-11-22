@@ -215,7 +215,10 @@ QWidget *SettingsDialog::pageGeneral()
     v->addWidget(card(w, &f2, "Preview", "How items behave when dragging them with the mouse."));
     m_snapping = track(new QCheckBox("Snap to screen edges and center"));
     m_snapping->setChecked(m_s["snapping"].toBool(true));
+    m_snapSources = track(new QCheckBox("Snap sources to other sources' edges and centers"));
+    m_snapSources->setChecked(m_s["snapToSources"].toBool(true));
     f2->addRow(m_snapping);
+    f2->addRow(m_snapSources);
 
     QFormLayout *f3;
     v->addWidget(card(w, &f3, "Updates", "Checks GitHub Releases for newer TikStream versions."));
@@ -606,6 +609,12 @@ QWidget *SettingsDialog::pageVideo()
     m_dualPreview = track(new QCheckBox("Show horizontal Dual-Canvas preview in detached side dock"));
     m_dualPreview->setChecked(m_s["dualCanvasPreviewEnabled"].toBool(true));
     fd->addRow("", m_dualPreview);
+    m_dualRecordTarget = track(new QComboBox);
+    m_dualRecordTarget->addItem("Horizontal only (Dual-Canvas)", "Horizontal");
+    m_dualRecordTarget->addItem("Vertical only (main canvas)", "Vertical");
+    m_dualRecordTarget->addItem("Both Vertical & Horizontal simultaneously", "Both");
+    m_dualRecordTarget->setCurrentIndex(std::max(0, m_dualRecordTarget->findData(m_s["dualRecordTarget"].toString("Horizontal"))));
+    fd->addRow("Record View", m_dualRecordTarget);
     auto *dualRow = new QHBoxLayout();
     m_dualW = track(new PaddedSpinBox);
     m_dualW->setRange(128, 4096); m_dualW->setSingleStep(2); m_dualW->setSuffix(" px"); m_dualW->setValue(m_s["dualCanvasWidth"].toInt(1920));
@@ -620,6 +629,7 @@ QWidget *SettingsDialog::pageVideo()
         const bool anyDual = dualOn || (m_secondEnabled && m_secondEnabled->isChecked());
         m_dualW->setEnabled(!m_live && dualOn);
         m_dualH->setEnabled(!m_live && dualOn);
+        m_dualRecordTarget->setEnabled(!m_live && dualOn);
         m_dualPreview->setEnabled(anyDual);
     };
     connect(m_dualCanvas, &QCheckBox::toggled, this, [updateDual](bool) { updateDual(); });
@@ -733,6 +743,7 @@ QJsonObject SettingsDialog::result() const
     s["recordToFile"] = m_autoRecord->isChecked();
     s["minimizeToTray"] = m_minToTray->isChecked();
     s["snapping"] = m_snapping->isChecked();
+    s["snapToSources"] = m_snapSources->isChecked();
     s["autoUpdateEnabled"] = m_autoUpdate->isChecked();
 
     s["serverUrl"] = m_server->text().trimmed();
@@ -763,6 +774,7 @@ QJsonObject SettingsDialog::result() const
     s["sceneTransitionMs"] = m_transitionMs->value();
     s["dualCanvasEnabled"] = m_dualCanvas->isChecked();
     s["dualCanvasPreviewEnabled"] = m_dualPreview->isChecked();
+    s["dualRecordTarget"] = m_dualRecordTarget->currentData().toString();
     s["dualCanvasWidth"] = m_dualW->value() & ~1;
     s["dualCanvasHeight"] = m_dualH->value() & ~1;
 

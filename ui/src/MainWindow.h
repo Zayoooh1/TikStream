@@ -129,12 +129,15 @@ private:
     // ---------- preview ----------
     QSizeF naturalSize(const QString &sourceId) const;
     QRectF displayRect(const QJsonObject &item) const;
+    QRectF displayRectFor(const QJsonObject &item, bool dual) const;
     bool croppable(const QString &type) const;
     void updateSelection();
     void onCanvasPressed(QPointF p);
+    void onCanvasPressedAt(QPointF p, bool dual);
     void onCanvasDragged(QPointF p);
     void onCanvasWheel(int delta);
-    QJsonObject makeFree(QJsonObject item) const;
+    void onCanvasWheelAt(int delta, bool dual);
+    QJsonObject makeFree(QJsonObject item, bool dual = false) const;
     double snap(double v, const QList<double> &targets, double tol, double *delta = nullptr) const;
 
     // ---------- live ----------
@@ -173,12 +176,14 @@ private:
     bool m_forceAudioDeviceRefresh = false;
     QString m_mixerSignature;
 
-    enum class Drag { None, Move, Resize };
+    enum class Drag { None, Move, Resize, CropLeft, CropRight, CropTop, CropBottom };
     Drag m_drag = Drag::None;
+    bool m_dragDual = false;
     QTimer *m_dragTimer = nullptr;
     bool m_dragChanged = false;
     QPointF m_dragStart, m_anchor;
     QRectF m_startRect;
+    double m_startCropL = 0, m_startCropR = 0, m_startCropT = 0, m_startCropB = 0;
 
     QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr, *m_alertAnimTimer = nullptr;
     bool m_updateCheckPending = false;

@@ -137,6 +137,25 @@ public sealed class SceneItem
     public int ChromaKeyArgb { get; set; } = unchecked((int)0xFF00FF00);
     public float ChromaKeySimilarity { get; set; } = 0.25f;
     public float ChromaKeySmoothness { get; set; } = 0.08f;
+
+    // GPU drop shadow (analytical SDF for opaque sources, 9-tap alpha shadow for PNG/GIF/alerts)
+    public bool ShadowEnabled { get; set; }
+    public float ShadowOffsetX { get; set; } = 0.01f;
+    public float ShadowOffsetY { get; set; } = 0.015f;
+    public float ShadowBlur { get; set; } = 0.03f;
+    public float ShadowIntensity { get; set; } = 0.65f;
+
+    // independent layout & crop for Horizontal Dual-Canvas preview/recording
+    public bool HasDualLayout { get; set; }
+    public float DualX { get; set; }
+    public float DualY { get; set; }
+    public float DualW { get; set; } = 1;
+    public float DualH { get; set; } = 1;
+    public FitMode DualFit { get; set; } = FitMode.Free;
+    public float DualCropLeft { get; set; }
+    public float DualCropRight { get; set; }
+    public float DualCropTop { get; set; }
+    public float DualCropBottom { get; set; }
 }
 
 public sealed class Scene
@@ -173,6 +192,7 @@ public sealed class AppSettings
     public string RecordCodec { get; set; } = "h264";
     public bool DualCanvasEnabled { get; set; }
     public bool DualCanvasPreviewEnabled { get; set; } = true;
+    public string DualRecordTarget { get; set; } = "Horizontal"; // "Vertical" | "Horizontal" | "Both"
     public int DualCanvasWidth { get; set; } = 1920;
     public int DualCanvasHeight { get; set; } = 1080;
     public bool MultiTrackAudio { get; set; }
@@ -189,6 +209,7 @@ public sealed class AppSettings
     public bool ConfirmStreamStop { get; set; } = true;
     public bool RecordToFile { get; set; }          // automatically record while streaming
     public bool Snapping { get; set; } = true;
+    public bool SnapToSources { get; set; } = true;
 
     // ---------- Advanced ----------
     public bool PreviewEnabled { get; set; } = true;

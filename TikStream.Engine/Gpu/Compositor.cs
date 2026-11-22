@@ -30,6 +30,11 @@ public struct DrawCmd
     public float ChromaKeySimilarity;
     public float ChromaKeySmoothness;
     public bool Hdr;               // scRGB R16G16B16A16_Float texture -> HDR-to-SDR tone mapping
+    public bool ShadowEnabled;
+    public float ShadowOffsetX;    // normalized canvas offset (-0.1..0.1)
+    public float ShadowOffsetY;
+    public float ShadowBlur;       // normalized spread/blur (0.002..0.12)
+    public float ShadowIntensity;  // opacity (0..1)
 }
 
 /// <summary>
@@ -164,6 +169,48 @@ float4 PSUV(VO i) : SV_Target
     float v = dot(c, float3(0.5, -0.454153, -0.045847));
     return float4(128.0 / 255.0 + u * (224.0 / 255.0), 128.0 / 255.0 + v * (224.0 / 255.0), 0, 1);
 }
+
+// Lightweight GPU drop shadow:
+// - Opaque sources (camera/game/window): 100% analytical rounded-box SDF (0 texture reads)
+// - Alpha sources (PNG/GIF/alerts/text): 9-tap alpha silhouette blur in a single pass
+float4 PSShadow(VO i) : SV_Target
+{
+    float intensity = p0.x;
+    float r = p0.y;
+    float isOpaque = p0.z;
+    float blurPx = max(1.0, p0.w);
+    float padPx = p1.z;
+    if (isOpaque > 0.5)
+    {
+        float2 hs = max(float2(1, 1), (p1.xy - 2.0 * padPx) * 0.5);
+        float2 q = abs(i.local - p1.xy * 0.5) - (hs - r);
+        float d = length(max(q, 0)) + min(max(q.x, q.y), 0) - r;
+        float a = smoothstep(blurPx, -blurPx * 0.35, d) * intensity;
+        return float4(0, 0, 0, a);
+    }
+    // Map expanded quad local coordinates back to [0..1] source UV
+    float2 innerSize = max(float2(1, 1), p1.xy - 2.0 * padPx);
+    float2 norm = (i.local - padPx) / innerSize;
+    float2 radUv = (blurPx * 0.45) / innerSize;
+    float acc = 0;
+    float2 dirs[9] = {
+        float2(0, 0),
+        float2(1, 0), float2(-1, 0), float2(0, 1), float2(0, -1),
+        float2(0.707, 0.707), float2(-0.707, 0.707), float2(0.707, -0.707), float2(-0.707, -0.707)
+    };
+    float weights[9] = { 0.24, 0.11, 0.11, 0.11, 0.11, 0.08, 0.08, 0.08, 0.08 };
+    [unroll] for (int k = 0; k < 9; k++)
+    {
+        float2 n = norm + dirs[k] * radUv;
+        if (n.x >= 0 && n.x <= 1 && n.y >= 0 && n.y <= 1)
+        {
+            float2 uv = lerp(src.xy, src.zw, n);
+            acc += tex.SampleLevel(smp, uv, 0).a * weights[k];
+        }
+    }
+    float a = saturate(acc * 1.15) * intensity;
+    return float4(0, 0, 0, a);
+}
 ";
 
     [StructLayout(LayoutKind.Sequential)]
@@ -175,7 +222,7 @@ float4 PSUV(VO i) : SV_Target
     private readonly ID3D11Device _dev;
     private readonly ID3D11DeviceContext _ctx;
     private readonly ID3D11VertexShader _vs;
-    private readonly ID3D11PixelShader _psLayer, _psBlur, _psY, _psUV;
+    private readonly ID3D11PixelShader _psLayer, _psBlur, _psY, _psUV, _psShadow;
     private readonly ID3D11Buffer _cb;
     private readonly ID3D11SamplerState _linear;
     private readonly ID3D11BlendState _alphaBlend, _opaque;
@@ -219,6 +266,7 @@ float4 PSUV(VO i) : SV_Target
         _psBlur = _dev.CreatePixelShader(Compile("PSBlur", "ps_5_0").Span);
         _psY = _dev.CreatePixelShader(Compile("PSY", "ps_5_0").Span);
         _psUV = _dev.CreatePixelShader(Compile("PSUV", "ps_5_0").Span);
+        _psShadow = _dev.CreatePixelShader(Compile("PSShadow", "ps_5_0").Span);
 
         _cb = _dev.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<Cb>(), BindFlags.ConstantBuffer, ResourceUsage.Dynamic, CpuAccessFlags.Write));
         _linear = _dev.CreateSamplerState(SamplerDescription.LinearClamp);
@@ -350,6 +398,23 @@ float4 PSUV(VO i) : SV_Target
 
     private void DrawLayer(in DrawCmd c, float targetW, float targetH)
     {
+        if (c.ShadowEnabled && c.ShadowIntensity > 0.005f && c.Opacity > 0.005f)
+        {
+            float blurPx = Math.Clamp(c.ShadowBlur, 0.002f, 0.12f) * MathF.Min(targetW, targetH);
+            float padPx = blurPx * 1.4f;
+            float padX = padPx / targetW;
+            float padY = padPx / targetH;
+            var shDst = new Vector4(
+                c.Dst.X + c.ShadowOffsetX - padX,
+                c.Dst.Y + c.ShadowOffsetY - padY,
+                c.Dst.W + padX * 2f,
+                c.Dst.H + padY * 2f);
+            _ctx.PSSetShader(_psShadow);
+            DrawQuad(c.Srv, shDst, c.SrcUv,
+                new Vector4(Math.Clamp(c.ShadowIntensity, 0f, 1f) * c.Opacity, c.RadiusPx, c.Opaque ? 1 : 0, blurPx),
+                new Vector4(shDst.Z * targetW, shDst.W * targetH, padPx, 0));
+            _ctx.PSSetShader(_psLayer);
+        }
         _ctx.PSSetShaderResource(1, c.Yuv ? c.Srv2! : null!);
         DrawQuad(c.Srv,
             new Vector4(c.Dst.X, c.Dst.Y, c.Dst.W, c.Dst.H),
@@ -491,6 +556,6 @@ float4 PSUV(VO i) : SV_Target
         _prevCanvasSrv.Dispose(); _prevCanvas.Dispose();
         CanvasSrv.Dispose(); CanvasRtv.Dispose(); Canvas.Dispose();
         _raster.Dispose(); _opaque.Dispose(); _alphaBlend.Dispose(); _linear.Dispose(); _cb.Dispose();
-        _psUV.Dispose(); _psY.Dispose(); _psBlur.Dispose(); _psLayer.Dispose(); _vs.Dispose();
+        _psShadow.Dispose(); _psUV.Dispose(); _psY.Dispose(); _psBlur.Dispose(); _psLayer.Dispose(); _vs.Dispose();
     }
 }

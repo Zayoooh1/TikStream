@@ -45,7 +45,7 @@ private:
     QPushButton *m_apply = nullptr;
 
     // general
-    QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr, *m_autoUpdate = nullptr, *m_minToTray = nullptr;
+    QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr, *m_snapSources = nullptr, *m_autoUpdate = nullptr, *m_minToTray = nullptr;
     // stream
     QLineEdit *m_server = nullptr, *m_key = nullptr;
     QCheckBox *m_secondEnabled = nullptr;
@@ -58,6 +58,7 @@ private:
     // video
     QSpinBox *m_videoWidth = nullptr, *m_videoHeight = nullptr, *m_fps = nullptr, *m_transitionMs = nullptr, *m_dualW = nullptr, *m_dualH = nullptr;
     QCheckBox *m_dualCanvas = nullptr, *m_dualPreview = nullptr;
+    QComboBox *m_dualRecordTarget = nullptr;
     // audio
     QComboBox *m_desktopDev = nullptr, *m_micDev = nullptr;
     // hotkeys

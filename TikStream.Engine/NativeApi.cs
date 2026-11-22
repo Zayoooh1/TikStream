@@ -32,6 +32,7 @@ public static unsafe class NativeApi
         {
             // Read-only queries and render-queue commands do not wait on settings saves or output operations.
             if (m is "listCameras" or "listAudioDevices" or "levels" or "stats" or "setItemTransform" or "setSelection"
+                  or "setDualItemTransform" or "setDualSelection" or "setItemCrop"
                   or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion"
                   or "browserFrame" or "browserInteract" or "playAlertSound")
                 result = Dispatch(m, a);
@@ -182,9 +183,24 @@ public static unsafe class NativeApi
                 Engine().SetSelection(j.ContainsKey("x") ? ReadRect(j) : null);
                 return Ok();
 
+            case "setDualSelection":
+                Engine().SetDualSelection(j.ContainsKey("x") ? ReadRect(j) : null);
+                return Ok();
+
             case "setItemTransform":
                 Engine().SetItemTransform(j["sceneId"]!.GetValue<string>(), j["itemId"]!.GetValue<string>(), ReadRect(j),
                     Enum.Parse<FitMode>(j["fit"]!.GetValue<string>()));
+                return Ok();
+
+            case "setDualItemTransform":
+                Engine().SetDualItemTransform(j["sceneId"]!.GetValue<string>(), j["itemId"]!.GetValue<string>(), ReadRect(j),
+                    Enum.Parse<FitMode>(j["fit"]!.GetValue<string>()));
+                return Ok();
+
+            case "setItemCrop":
+                Engine().SetItemCrop(j["sceneId"]!.GetValue<string>(), j["itemId"]!.GetValue<string>(),
+                    j["dual"]?.GetValue<bool>() ?? false, ReadRect(j),
+                    j["cl"]!.GetValue<float>(), j["cr"]!.GetValue<float>(), j["ct"]!.GetValue<float>(), j["cb"]!.GetValue<float>());
                 return Ok();
 
             case "beginTikTokLogin": return Ok(TikTok.Begin());

@@ -74,6 +74,7 @@ public sealed unsafe class StreamEngine : IDisposable
     private readonly Dictionary<string, (int W, int H, byte[] Data)> _pendingPixels = new();
     private readonly MonitorCapturePool _monitors = new();
     private NRect? _selection;
+    private NRect? _dualSelection;
 
     private IntPtr _previewHwnd;
     private int _previewW, _previewH;
@@ -106,8 +107,8 @@ public sealed unsafe class StreamEngine : IDisposable
     private long _transStartTicks, _transDurTicks;
     private readonly System.Runtime.GCLatencyMode _prevGcMode;
 
-    public bool IsStreaming => _outputs.Any(o => o.Name != "File");
-    public bool IsRecording => _outputs.Any(o => o.Name == "File");
+    public bool IsStreaming => _outputs.Any(o => o.Name != "File" && o.Name != "FileHorizontal");
+    public bool IsRecording => _outputs.Any(o => o.Name is "File" or "FileHorizontal");
     public bool IsReplayActive => _replay != null;
 
     public StreamEngine(AppSettings settings)
@@ -172,6 +173,7 @@ public sealed unsafe class StreamEngine : IDisposable
     }
 
     public void SetSelection(NRect? rect) => _cmds.Enqueue(() => _selection = rect);
+    public void SetDualSelection(NRect? rect) => _cmds.Enqueue(() => _dualSelection = rect);
 
     public void SetItemTransform(string sceneId, string itemId, NRect rect, FitMode fit) => _cmds.Enqueue(() =>
     {
@@ -180,6 +182,36 @@ public sealed unsafe class StreamEngine : IDisposable
         if (it == null) return;
         it.X = rect.X; it.Y = rect.Y; it.W = rect.W; it.H = rect.H; it.Fit = fit;
         _selection = rect;
+    });
+
+    public void SetDualItemTransform(string sceneId, string itemId, NRect rect, FitMode fit) => _cmds.Enqueue(() =>
+    {
+        var sc = _scene.Scenes.FirstOrDefault(x => x.Id == sceneId);
+        var it = sc?.Items.FirstOrDefault(x => x.Id == itemId);
+        if (it == null) return;
+        it.HasDualLayout = true;
+        it.DualX = rect.X; it.DualY = rect.Y; it.DualW = rect.W; it.DualH = rect.H; it.DualFit = fit;
+        _dualSelection = rect;
+    });
+
+    public void SetItemCrop(string sceneId, string itemId, bool dual, NRect rect, float cl, float cr, float ct, float cb) => _cmds.Enqueue(() =>
+    {
+        var sc = _scene.Scenes.FirstOrDefault(x => x.Id == sceneId);
+        var it = sc?.Items.FirstOrDefault(x => x.Id == itemId);
+        if (it == null) return;
+        if (dual)
+        {
+            it.HasDualLayout = true;
+            it.DualX = rect.X; it.DualY = rect.Y; it.DualW = rect.W; it.DualH = rect.H; it.DualFit = FitMode.Free;
+            it.DualCropLeft = cl; it.DualCropRight = cr; it.DualCropTop = ct; it.DualCropBottom = cb;
+            _dualSelection = rect;
+        }
+        else
+        {
+            it.X = rect.X; it.Y = rect.Y; it.W = rect.W; it.H = rect.H; it.Fit = FitMode.Free;
+            it.CropLeft = cl; it.CropRight = cr; it.CropTop = ct; it.CropBottom = cb;
+            _selection = rect;
+        }
     });
 
     private static void ApplyPriority(string p)
@@ -292,11 +324,15 @@ public sealed unsafe class StreamEngine : IDisposable
 
     public Task<string?> StopStreamAsync() => RunOnRender(() =>
     {
-        foreach (var name in _outputs.Where(x => x.Name != "File").Select(x => x.Name).ToArray())
+        foreach (var name in _outputs.Where(x => x.Name is not ("File" or "FileHorizontal")).Select(x => x.Name).ToArray())
             RemoveOutput(name, "stopped");
     });
     public Task<string?> StartRecordAsync() => RunOnRender(() => { if (!IsRecording) StartRecordInternal(); });
-    public Task<string?> StopRecordAsync() => RunOnRender(() => RemoveOutput("File", "stopped"));
+    public Task<string?> StopRecordAsync() => RunOnRender(() =>
+    {
+        RemoveOutput("File", "stopped");
+        RemoveOutput("FileHorizontal", "stopped");
+    });
 
     public Task<string?> StartReplayAsync() => RunOnRender(() =>
     {
@@ -370,14 +406,29 @@ public sealed unsafe class StreamEngine : IDisposable
             }
         }
 
-        var recVenc = _venc!;
         var s = _scene;
-        bool needDedicatedRecVenc = s.DualCanvasEnabled || (s.RecordCodec is "hevc" or "av1");
-        if (needDedicatedRecVenc)
+        string target = s.DualCanvasEnabled ? (s.DualRecordTarget ?? "Horizontal") : "Vertical";
+        bool recordVertical = target is "Vertical" or "Both";
+        bool recordHorizontal = s.DualCanvasEnabled && target is "Horizontal" or "Both";
+
+        if (recordVertical)
         {
-            int rw = s.DualCanvasEnabled ? Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096) : _comp.Width;
-            int rh = s.DualCanvasEnabled ? Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096) : _comp.Height;
-            if (s.DualCanvasEnabled)
+            var vertVenc = _venc!;
+            if (!recordHorizontal && s.RecordCodec is "hevc" or "av1")
+            {
+                _recVenc?.Dispose();
+                _recVenc = new VideoEncoder(Gpu, _comp.Width, _comp.Height, new VideoEncoderOptions(
+                    _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
+                vertVenc = _recVenc;
+            }
+            AddOutput(new StreamOutput("File", path, vertVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
+        }
+
+        if (recordHorizontal)
+        {
+            int rw = Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096);
+            int rh = Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096);
+            if (_dualComp == null || _dualComp.Width != rw || _dualComp.Height != rh)
             {
                 _dualComp?.Dispose();
                 _dualComp = new Compositor(Gpu, rw, rh);
@@ -385,10 +436,10 @@ public sealed unsafe class StreamEngine : IDisposable
             _recVenc?.Dispose();
             _recVenc = new VideoEncoder(Gpu, rw, rh, new VideoEncoderOptions(
                 _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
-            recVenc = _recVenc;
+            var hName = recordVertical ? "FileHorizontal" : "File";
+            var hPath = recordVertical ? Path.Combine(folder, $"TikStream {DateTime.Now:yyyy-MM-dd HH-mm-ss} (Horizontal).{ext}") : path;
+            AddOutput(new StreamOutput(hName, hPath, _recVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, recordVertical ? null : extraForOutput));
         }
-
-        AddOutput(new StreamOutput("File", path, recVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
         _recordStart = _clock.ElapsedTicks;
     }
 
@@ -460,20 +511,24 @@ public sealed unsafe class StreamEngine : IDisposable
         var o = _outputs.FirstOrDefault(x => x.Name == name);
         if (o == null) return;
         _outputs = _outputs.Where(x => x != o).ToArray();
-        if (name == "File")
+        if (name is "File" or "FileHorizontal")
         {
-            if (_recVenc != null)
+            bool stillRecording = _outputs.Any(x => x.Name is "File" or "FileHorizontal");
+            if (!stillRecording && _recVenc != null)
             {
                 try { _recVenc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, o)); } catch { }
                 _recVenc.Dispose();
                 _recVenc = null;
             }
-            if (_dualPreviewHwnd == IntPtr.Zero)
+            if (!stillRecording && _dualPreviewHwnd == IntPtr.Zero)
             {
                 _dualComp?.Dispose();
                 _dualComp = null;
             }
-            lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
+            if (name == "File")
+            {
+                lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
+            }
         }
         if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o);
         Task.Run(o.Dispose);
@@ -507,23 +562,28 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         var pkt = (AVPacket*)p;
         pkt->stream_index = streamIndex;
+        bool hasFileHoriz = _outputs.Any(o => o.Name == "FileHorizontal");
         bool dedicatedFileVideo = streamIndex == StreamOutput.VideoIndex && _recVenc != null;
         foreach (var o in _outputs)
         {
-            if (dedicatedFileVideo && o.Name == "File") continue;
+            if (dedicatedFileVideo)
+            {
+                if (hasFileHoriz && o.Name == "FileHorizontal") continue;
+                if (!hasFileHoriz && o.Name == "File") continue;
+            }
             o.Enqueue(pkt);
         }
         _replay?.Enqueue(pkt, streamIndex);
         ffmpeg.av_packet_free(&pkt);
     }
 
-    private void DeliverToFile(IntPtr p, int streamIndex)
+    private void DeliverToFile(IntPtr p, int streamIndex, string targetName = "File")
     {
         var pkt = (AVPacket*)p;
         pkt->stream_index = streamIndex;
         foreach (var o in _outputs)
         {
-            if (o.Name == "File") { o.Enqueue(pkt); break; }
+            if (o.Name == targetName) { o.Enqueue(pkt); break; }
         }
         ffmpeg.av_packet_free(&pkt);
     }
@@ -705,28 +765,95 @@ public sealed unsafe class StreamEngine : IDisposable
     private readonly List<DrawCmd> _drawList = new(32);
     private readonly List<DrawCmd> _dualDrawList = new(32);
 
-    private void BuildDualDrawList(Compositor dualComp)
+    private void BuildDualDrawList(Compositor dualComp, Scene? scene)
     {
         _dualDrawList.Clear();
+        if (scene == null) return;
         float mainW = _comp.Width, mainH = _comp.Height;
         float dualW = dualComp.Width, dualH = dualComp.Height;
         if (mainW <= 0 || mainH <= 0 || dualW <= 0 || dualH <= 0) return;
 
-        // Preserve exact pixel aspect ratio of every Free item when mapping from vertical 9:16 to horizontal 16:9.
         float aspectRatio = (mainW / mainH) / (dualW / dualH);
-        foreach (var srcCmd in _drawList)
+        int blurSlot = 0;
+        var full = new Vector4(0, 0, 1, 1);
+
+        foreach (var item in scene.Items)
         {
-            var cmd = srcCmd;
-            bool isFull = cmd.Dst.X <= 0.001f && cmd.Dst.Y <= 0.001f && cmd.Dst.W >= 0.999f && cmd.Dst.H >= 0.999f;
-            if (!isFull)
+            if (!item.Visible || !_sources.TryGetValue(item.SourceId, out var rt) || !rt.Ready) continue;
+            float sw = rt.Width, sh = rt.Height;
+            var cmd = new DrawCmd { Srv = rt.Srv!, Srv2 = rt.Srv2, Yuv = rt.Yuv, Hdr = rt.IsHdr, Opacity = Math.Clamp(item.Opacity, 0, 1), Darken = 1, Opaque = rt.Croppable && !rt.PreserveAlpha };
+            float zoom = Math.Clamp(item.Zoom, 1f, 4f);
+
+            FitMode fit = item.HasDualLayout ? item.DualFit : item.Fit;
+            float ix = item.HasDualLayout ? item.DualX : item.X;
+            float iy = item.HasDualLayout ? item.DualY : item.Y;
+            float iw = item.HasDualLayout ? item.DualW : item.W;
+            float ih = item.HasDualLayout ? item.DualH : item.H;
+
+            switch (fit)
             {
-                float cx = cmd.Dst.X + cmd.Dst.W * 0.5f;
-                float cy = cmd.Dst.Y + cmd.Dst.H * 0.5f;
-                float nw = cmd.Dst.W * aspectRatio;
-                float nh = cmd.Dst.H;
-                if (nw > 0.96f) { float k = 0.96f / nw; nw *= k; nh *= k; }
-                cmd.Dst = new NRect(cx - nw * 0.5f, cy - nh * 0.5f, nw, nh);
+                case FitMode.Fill:
+                    cmd.SrcUv = CoverCrop(sw, sh, dualW, dualH, zoom, item.PanX, item.PanY);
+                    cmd.Dst = new NRect(0, 0, 1, 1);
+                    break;
+                case FitMode.FitBlur:
+                    if (!rt.PreserveAlpha && blurSlot < Compositor.BlurSlots)
+                    {
+                        int slot = blurSlot++;
+                        dualComp.RenderBlurBackground(slot, rt.Srv!, rt.Yuv ? rt.Srv2 : null, CoverCrop(sw, sh, dualW, dualH, 1, 0, 0), rt.IsHdr);
+                        _dualDrawList.Add(new DrawCmd { Srv = dualComp.BgSrv(slot), SrcUv = full, Dst = new NRect(0, 0, 1, 1), Opacity = cmd.Opacity, Opaque = true, Darken = 0.55f });
+                    }
+                    float sc = Math.Min(dualW / sw, dualH / sh);
+                    float dw = sw * sc / dualW, dh = sh * sc / dualH;
+                    cmd.SrcUv = CoverCrop(sw, sh, sw, sh, zoom, item.PanX, item.PanY);
+                    cmd.Dst = new NRect((1 - dw) / 2, (1 - dh) / 2, dw, dh);
+                    break;
+                default:
+                    if (!item.HasDualLayout)
+                    {
+                        float cx = ix + iw * 0.5f;
+                        float cy = iy + ih * 0.5f;
+                        float nw = iw * aspectRatio;
+                        float nh = ih;
+                        if (nw > 0.96f) { float k = 0.96f / nw; nw *= k; nh *= k; }
+                        ix = cx - nw * 0.5f; iy = cy - nh * 0.5f; iw = nw; ih = nh;
+                    }
+                    cmd.Dst = new NRect(ix, iy, iw, ih);
+                    cmd.SrcUv = rt.Croppable ? CoverCrop(sw, sh, iw * dualW, ih * dualH, zoom, item.PanX, item.PanY) : full;
+                    cmd.RadiusPx = Math.Min(iw * dualW, ih * dualH) * Math.Clamp(item.Corner, 0, 0.5f);
+                    break;
             }
+
+            float cl = Math.Clamp(item.HasDualLayout ? item.DualCropLeft : item.CropLeft, 0f, 0.45f);
+            float cr = Math.Clamp(item.HasDualLayout ? item.DualCropRight : item.CropRight, 0f, 0.45f);
+            float ct = Math.Clamp(item.HasDualLayout ? item.DualCropTop : item.CropTop, 0f, 0.45f);
+            float cb = Math.Clamp(item.HasDualLayout ? item.DualCropBottom : item.CropBottom, 0f, 0.45f);
+            if (cl > 0 || cr > 0 || ct > 0 || cb > 0)
+            {
+                float uSpan = cmd.SrcUv.Z - cmd.SrcUv.X;
+                float vSpan = cmd.SrcUv.W - cmd.SrcUv.Y;
+                cmd.SrcUv = new Vector4(cmd.SrcUv.X + uSpan * cl, cmd.SrcUv.Y + vSpan * ct, cmd.SrcUv.Z - uSpan * cr, cmd.SrcUv.W - vSpan * cb);
+            }
+            cmd.Brightness = Math.Clamp(item.Brightness, -0.5f, 0.5f);
+            cmd.ContrastDelta = Math.Clamp(item.Contrast, 0.5f, 2.0f) - 1f;
+            cmd.SaturationDelta = Math.Clamp(item.Saturation, 0f, 2.0f) - 1f;
+            if (item.ChromaKeyEnabled)
+            {
+                uint argb = unchecked((uint)item.ChromaKeyArgb);
+                cmd.ChromaKeyEnabled = true;
+                cmd.ChromaKeyRgb = new Vector3(((argb >> 16) & 0xFF) / 255f, ((argb >> 8) & 0xFF) / 255f, (argb & 0xFF) / 255f);
+                cmd.ChromaKeySimilarity = Math.Clamp(item.ChromaKeySimilarity, 0.01f, 0.6f);
+                cmd.ChromaKeySmoothness = Math.Clamp(item.ChromaKeySmoothness, 0.01f, 0.3f);
+            }
+            if (item.ShadowEnabled)
+            {
+                cmd.ShadowEnabled = true;
+                cmd.ShadowOffsetX = Math.Clamp(item.ShadowOffsetX, -0.1f, 0.1f);
+                cmd.ShadowOffsetY = Math.Clamp(item.ShadowOffsetY, -0.1f, 0.1f);
+                cmd.ShadowBlur = Math.Clamp(item.ShadowBlur, 0.002f, 0.12f);
+                cmd.ShadowIntensity = Math.Clamp(item.ShadowIntensity, 0f, 1f);
+            }
+            if (item.Mirror) cmd.SrcUv = new Vector4(cmd.SrcUv.Z, cmd.SrcUv.Y, cmd.SrcUv.X, cmd.SrcUv.W);
             _dualDrawList.Add(cmd);
         }
     }
@@ -812,6 +939,14 @@ public sealed unsafe class StreamEngine : IDisposable
                     cmd.ChromaKeySimilarity = Math.Clamp(item.ChromaKeySimilarity, 0.01f, 0.6f);
                     cmd.ChromaKeySmoothness = Math.Clamp(item.ChromaKeySmoothness, 0.01f, 0.3f);
                 }
+                if (item.ShadowEnabled)
+                {
+                    cmd.ShadowEnabled = true;
+                    cmd.ShadowOffsetX = Math.Clamp(item.ShadowOffsetX, -0.1f, 0.1f);
+                    cmd.ShadowOffsetY = Math.Clamp(item.ShadowOffsetY, -0.1f, 0.1f);
+                    cmd.ShadowBlur = Math.Clamp(item.ShadowBlur, 0.002f, 0.12f);
+                    cmd.ShadowIntensity = Math.Clamp(item.ShadowIntensity, 0f, 1f);
+                }
                 if (item.Mirror) cmd.SrcUv = new Vector4(cmd.SrcUv.Z, cmd.SrcUv.Y, cmd.SrcUv.X, cmd.SrcUv.W);
                 _drawList.Add(cmd);
             }
@@ -844,13 +979,14 @@ public sealed unsafe class StreamEngine : IDisposable
                     var recComp = _dualComp ?? _comp;
                     if (_dualComp != null)
                     {
-                        BuildDualDrawList(_dualComp);
+                        BuildDualDrawList(_dualComp, scene);
                         _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
                     }
                     var rFrame = _recVenc.AcquireFrame(out var ry, out var ruv);
                     recComp.ConvertToNv12(ry, ruv);
                     ctx.Flush();
-                    _recVenc.Encode(rFrame, pts, key, p => DeliverToFile(p, StreamOutput.VideoIndex));
+                    string recOutName = _outputs.Any(o => o.Name == "FileHorizontal") ? "FileHorizontal" : "File";
+                    _recVenc.Encode(rFrame, pts, key, p => DeliverToFile(p, StreamOutput.VideoIndex, recOutName));
                 }
                 _lastPts = pts;
                 _encodedFrames++;
@@ -886,10 +1022,10 @@ public sealed unsafe class StreamEngine : IDisposable
             }
             if (_recVenc == null)
             {
-                BuildDualDrawList(_dualComp);
+                BuildDualDrawList(_dualComp, scene);
                 _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
             }
-            _dualComp.PresentPreview(null);
+            _dualComp.PresentPreview(_dualSelection);
         }
         else if (_dualPreviewDirty)
         {

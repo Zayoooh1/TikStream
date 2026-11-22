@@ -428,6 +428,21 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
 QRectF itemRect(const QJsonObject &i) { return QRectF(i["x"].toDouble(), i["y"].toDouble(), i["w"].toDouble(1), i["h"].toDouble(1)); }
 QColor argbOf(const QJsonValue &v, QColor def = Qt::white) { return v.isDouble() ? QColor::fromRgba(QRgb(quint32(qint64(v.toDouble())))) : def; }
 double argbVal(const QColor &c) { return double(qint32(c.rgba())); }
+
+void applyDarkTitleBar(QWidget *w)
+{
+    if (!w) return;
+    const HWND hwnd = HWND(w->winId());
+    if (!hwnd) return;
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    COLORREF caption = RGB(0x18, 0x1a, 0x24);
+    COLORREF text = RGB(0xe8, 0xea, 0xf2);
+    COLORREF border = RGB(0x2c, 0x30, 0x42);
+    DwmSetWindowAttribute(hwnd, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, 36 /*DWMWA_TEXT_COLOR*/, &text, sizeof(text));
+    DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof(border));
+}
 } // namespace
 
 // =====================================================================================
@@ -530,8 +545,7 @@ MainWindow::~MainWindow() = default;
 void MainWindow::showEvent(QShowEvent *e)
 {
     QMainWindow::showEvent(e);
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(HWND(winId()), 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    applyDarkTitleBar(this);
 }
 
 // =============================== construction ===============================
@@ -655,7 +669,7 @@ void MainWindow::buildCentral()
     bar->setObjectName("previewBar");
     auto *bl = new QHBoxLayout(bar);
     bl->setContentsMargins(12, 4, 12, 4);
-    auto *info = new QLabel("Drag item to move  •  corner = resize (Shift = free aspect)  •  mouse wheel = scale  •  Delete = remove");
+    auto *info = new QLabel("Drag to move  •  corner = resize (Shift = free aspect)  •  Alt + drag edge = crop  •  wheel = scale  •  Delete = remove");
     info->setObjectName("previewInfo");
     bl->addWidget(info);
     bl->addStretch();
@@ -698,6 +712,9 @@ void MainWindow::buildDocks()
             menu.exec(d->mapToGlobal(pos));
         });
         addDockWidget(area, d);
+        connect(d, &QDockWidget::topLevelChanged, d, [d](bool floating) {
+            if (floating) QTimer::singleShot(0, d, [d] { applyDarkTitleBar(d); });
+        });
         return d;
     };
     auto withToolbar = [](QWidget *main, const QList<QWidget *> &left, const QList<QWidget *> &right) {
@@ -885,6 +902,9 @@ void MainWindow::buildDocks()
     m_dualPreviewDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable | QDockWidget::DockWidgetClosable);
     addDockWidget(Qt::RightDockWidgetArea, m_dualPreviewDock);
     m_dualPreviewDock->setFloating(true);
+    connect(m_dualPreviewDock, &QDockWidget::topLevelChanged, m_dualPreviewDock, [this](bool floating) {
+        if (floating) QTimer::singleShot(0, m_dualPreviewDock, [this] { applyDarkTitleBar(m_dualPreviewDock); });
+    });
     m_dualPreviewDock->hide();
     if (auto *pm = findChild<QMenu *>("panelsMenu")) {
         auto *act = m_dualPreviewDock->toggleViewAction();
@@ -895,16 +915,31 @@ void MainWindow::buildDocks()
         if (m_dualPreviewDock && m_dualPreviewDock->isVisible())
             EngineHost::instance().call("setDualPreview", QJsonObject{{"hwnd", hwnd}, {"w", w}, {"h", h}});
     });
+    connect(m_dualPreview, &PreviewWidget::canvasPressed, this, [this](QPointF p) { onCanvasPressedAt(p, true); });
+    connect(m_dualPreview, &PreviewWidget::canvasDragged, this, &MainWindow::onCanvasDragged);
+    connect(m_dualPreview, &PreviewWidget::canvasReleased, this, [this] {
+        m_drag = Drag::None;
+        m_dragTimer->stop();
+        if (m_dragChanged) {
+            m_dragChanged = false;
+            pushSettings();
+            updateSelection();
+        }
+    });
+    connect(m_dualPreview, &PreviewWidget::canvasWheel, this, [this](int d) { onCanvasWheelAt(d, true); });
+    connect(m_dualPreview, &PreviewWidget::deletePressed, this, &MainWindow::removeSelectedItem);
     connect(m_dualPreviewDock, &QDockWidget::visibilityChanged, this, [this](bool vis) {
         if (!vis) {
             EngineHost::instance().call("setDualPreview", QJsonObject{{"hwnd", 0}, {"w", 0}, {"h", 0}});
         } else if (m_dualPreview) {
+            if (m_dualPreviewDock->isFloating()) QTimer::singleShot(0, m_dualPreviewDock, [this] { applyDarkTitleBar(m_dualPreviewDock); });
             const qreal dpr = m_dualPreview->devicePixelRatioF();
             EngineHost::instance().call("setDualPreview", QJsonObject{
                 {"hwnd", qint64(m_dualPreview->winId())},
                 {"w", std::max(2, int(std::lround(m_dualPreview->width() * dpr)))},
                 {"h", std::max(2, int(std::lround(m_dualPreview->height() * dpr)))},
             });
+            updateSelection();
         }
     });
 }
@@ -1674,6 +1709,7 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
     addEntry("Edge Cropping", false);
     addEntry("Color Correction", false);
     auto *chromaItem = addEntry("Green Screen (Chroma Key)", true, item["chromaKeyEnabled"].toBool());
+    auto *shadowItem = addEntry("Drop Shadow", true, item["shadowEnabled"].toBool());
     leftCol->addWidget(list, 1);
     body->addLayout(leftCol);
 
@@ -1762,11 +1798,38 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
         pages->addWidget(p);
     }
 
+    // 3: GPU Drop Shadow (center X/Y, spread/blur, intensity)
+    auto *shOffX = hslider(-100, 100); shOffX->setValue(qRound(item["shadowOffsetX"].toDouble(0.01) * 1000));
+    auto *shOffY = hslider(-100, 100); shOffY->setValue(qRound(item["shadowOffsetY"].toDouble(0.015) * 1000));
+    auto *shBlur = hslider(2, 120);    shBlur->setValue(qRound(item["shadowBlur"].toDouble(0.03) * 1000));
+    auto *shInt  = hslider(0, 100);    shInt->setValue(qRound(item["shadowIntensity"].toDouble(0.65) * 100));
+    {
+        auto *p = new QWidget;
+        auto *f = form(p);
+        auto addShRow = [&](const QString &lbl, QSlider *sl, const QString &key, double div, const QString &suf) {
+            auto *row = new QHBoxLayout;
+            auto *vl = hintLabel(QString("%1%2").arg(sl->value() / (div == 1000.0 ? 10.0 : 1.0), 0, 'f', div == 1000.0 ? 1 : 0).arg(suf));
+            row->addWidget(sl, 1);
+            row->addWidget(vl);
+            f->addRow(lbl, row);
+            connect(sl, &QSlider::valueChanged, &dlg, [=](int val) {
+                vl->setText(QString("%1%2").arg(val / (div == 1000.0 ? 10.0 : 1.0), 0, 'f', div == 1000.0 ? 1 : 0).arg(suf));
+                updateItem([key, val, div](QJsonObject &i) { i[key] = val / div; });
+            });
+        };
+        addShRow("Center X", shOffX, "shadowOffsetX", 1000.0, "%");
+        addShRow("Center Y", shOffY, "shadowOffsetY", 1000.0, "%");
+        addShRow("Spread / Blur", shBlur, "shadowBlur", 1000.0, "%");
+        addShRow("Intensity", shInt, "shadowIntensity", 100.0, "%");
+        f->addRow("", hintLabel("Ultra-fast GPU shader shadow (0% CPU). Works on webcams, games, PNG/GIFs, and TikTok Alerts. Toggle the checkbox on the left to enable."));
+        pages->addWidget(p);
+    }
+
     connect(list, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
     connect(list, &QListWidget::itemChanged, &dlg, [=](QListWidgetItem *it) {
-        if (it != chromaItem) return;
         const bool on = it->checkState() == Qt::Checked;
-        updateItem([on](QJsonObject &i) { i["chromaKeyEnabled"] = on; });
+        if (it == chromaItem) updateItem([on](QJsonObject &i) { i["chromaKeyEnabled"] = on; });
+        else if (it == shadowItem) updateItem([on](QJsonObject &i) { i["shadowEnabled"] = on; });
     });
     list->setCurrentRow(0);
 
@@ -1783,11 +1846,15 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
         chromaItem->setCheckState(Qt::Unchecked);
         chromaColor->setColor(QColor(0, 255, 0));
         chromaSim->setValue(25); chromaSmooth->setValue(8);
+        shadowItem->setCheckState(Qt::Unchecked);
+        shOffX->setValue(10); shOffY->setValue(15); shBlur->setValue(30); shInt->setValue(65);
         updateItem([](QJsonObject &i) {
             i["cropLeft"] = 0; i["cropRight"] = 0; i["cropTop"] = 0; i["cropBottom"] = 0;
             i["brightness"] = 0; i["contrast"] = 1; i["saturation"] = 1;
             i["chromaKeyEnabled"] = false; i["chromaKeyArgb"] = int(QColor(0, 255, 0).rgba());
             i["chromaKeySimilarity"] = 0.25; i["chromaKeySmoothness"] = 0.08;
+            i["shadowEnabled"] = false; i["shadowOffsetX"] = 0.01; i["shadowOffsetY"] = 0.015;
+            i["shadowBlur"] = 0.03; i["shadowIntensity"] = 0.65;
         });
     });
     connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
@@ -3298,20 +3365,47 @@ QSizeF MainWindow::naturalSize(const QString &sourceId) const
 
 QRectF MainWindow::displayRect(const QJsonObject &item) const
 {
-    const QString fit = item["fit"].toString("Free");
+    return displayRectFor(item, false);
+}
+
+QRectF MainWindow::displayRectFor(const QJsonObject &item, bool dual) const
+{
+    const double cw = dual ? std::max(128, m_s["dualCanvasWidth"].toInt(1920)) : m_canvasW;
+    const double ch = dual ? std::max(128, m_s["dualCanvasHeight"].toInt(1080)) : m_canvasH;
+    const bool hasDual = dual && item["hasDualLayout"].toBool();
+    const QString fit = hasDual ? item["dualFit"].toString("Free") : item["fit"].toString("Free");
     if (fit == "Fill") return QRectF(0, 0, 1, 1);
     if (fit == "FitBlur") {
         const QSizeF ns = naturalSize(item["sourceId"].toString());
-        const double s = std::min(m_canvasW / ns.width(), m_canvasH / ns.height());
-        const double w = ns.width() * s / m_canvasW, h = ns.height() * s / m_canvasH;
+        const double s = std::min(cw / ns.width(), ch / ns.height());
+        const double w = ns.width() * s / cw, h = ns.height() * s / ch;
         return QRectF((1 - w) / 2, (1 - h) / 2, w, h);
     }
-    return itemRect(item);
+    if (hasDual)
+        return QRectF(item["dualX"].toDouble(), item["dualY"].toDouble(), item["dualW"].toDouble(1), item["dualH"].toDouble(1));
+    QRectF r = itemRect(item);
+    if (dual && m_canvasW > 0 && m_canvasH > 0) {
+        const double aspectRatio = (double(m_canvasW) / m_canvasH) / (cw / ch);
+        const double cx = r.center().x(), cy = r.center().y();
+        double nw = r.width() * aspectRatio, nh = r.height();
+        if (nw > 0.96) { const double k = 0.96 / nw; nw *= k; nh *= k; }
+        r = QRectF(cx - nw * 0.5, cy - nh * 0.5, nw, nh);
+    }
+    return r;
 }
 
-QJsonObject MainWindow::makeFree(QJsonObject item) const
+QJsonObject MainWindow::makeFree(QJsonObject item, bool dual) const
 {
-    if (item.isEmpty() || item["fit"].toString("Free") == "Free") return item;
+    if (item.isEmpty()) return item;
+    if (dual) {
+        if (item["hasDualLayout"].toBool() && item["dualFit"].toString("Free") == "Free") return item;
+        const QRectF r = displayRectFor(item, true);
+        item["hasDualLayout"] = true;
+        item["dualFit"] = "Free";
+        item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = r.width(); item["dualH"] = r.height();
+        return item;
+    }
+    if (item["fit"].toString("Free") == "Free") return item;
     const QRectF r = displayRect(item);
     item["fit"] = "Free";
     item["x"] = r.x(); item["y"] = r.y(); item["w"] = r.width(); item["h"] = r.height();
@@ -3334,8 +3428,10 @@ void MainWindow::updateSelection()
 {
     const QJsonObject item = selectedItem();
     const bool visual = !sourceTypeInfo(selectedSource()["type"].toString()).audio;
-    EngineHost::instance().call("setSelection",
-        !item.isEmpty() && visual && item["visible"].toBool(true) ? rectObj(displayRect(item)) : QJsonObject{});
+    const bool show = !item.isEmpty() && visual && item["visible"].toBool(true);
+    EngineHost::instance().call("setSelection", show ? rectObj(displayRectFor(item, false)) : QJsonObject{});
+    if (m_dualPreviewDock && m_dualPreviewDock->isVisible())
+        EngineHost::instance().call("setDualSelection", show ? rectObj(displayRectFor(item, true)) : QJsonObject{});
 }
 
 double MainWindow::snap(double v, const QList<double> &targets, double tol, double *delta) const
@@ -3348,16 +3444,47 @@ double MainWindow::snap(double v, const QList<double> &targets, double tol, doub
 
 void MainWindow::onCanvasPressed(QPointF p)
 {
-    m_drag = Drag::None;
-    if (m_applyTimer->isActive()) pushSettings();
-    // 10 px tolerance in preview pixels -> canvas units
-    const double s = std::min(m_preview->width() / double(m_canvasW), m_preview->height() / double(m_canvasH));
-    const double tolX = 10.0 / (m_canvasW * s), tolY = 10.0 / (m_canvasH * s);
+    onCanvasPressedAt(p, false);
+}
 
-    // 1. corner handle of the selected item
+void MainWindow::onCanvasPressedAt(QPointF p, bool dual)
+{
+    m_drag = Drag::None;
+    m_dragDual = dual;
+    if (m_applyTimer->isActive()) pushSettings();
+    PreviewWidget *pw = dual && m_dualPreview ? m_dualPreview : m_preview;
+    const double cw = dual ? std::max(128, m_s["dualCanvasWidth"].toInt(1920)) : m_canvasW;
+    const double ch = dual ? std::max(128, m_s["dualCanvasHeight"].toInt(1080)) : m_canvasH;
+    const double s = std::min(pw->width() / cw, pw->height() / ch);
+    const double tolX = 12.0 / (cw * s), tolY = 12.0 / (ch * s);
+    const bool altHeld = (QApplication::keyboardModifiers() & Qt::AltModifier) != 0;
+
+    // 1. selected item: Alt + edge = crop, otherwise corner handle = resize
     const QJsonObject sel = selectedItem();
     if (!sel.isEmpty() && sel["visible"].toBool(true) && !sel["locked"].toBool() && !sourceTypeInfo(selectedSource()["type"].toString()).audio) {
-        const QRectF r = displayRect(sel);
+        const QRectF r = displayRectFor(sel, dual);
+        if (altHeld) {
+            const double cTolX = tolX * 1.4, cTolY = tolY * 1.4;
+            const bool inY = p.y() >= r.top() - cTolY && p.y() <= r.bottom() + cTolY;
+            const bool inX = p.x() >= r.left() - cTolX && p.x() <= r.right() + cTolX;
+            Drag cropDrag = Drag::None;
+            if (inY && std::abs(p.x() - r.left()) <= cTolX) cropDrag = Drag::CropLeft;
+            else if (inY && std::abs(p.x() - r.right()) <= cTolX) cropDrag = Drag::CropRight;
+            else if (inX && std::abs(p.y() - r.top()) <= cTolY) cropDrag = Drag::CropTop;
+            else if (inX && std::abs(p.y() - r.bottom()) <= cTolY) cropDrag = Drag::CropBottom;
+            if (cropDrag != Drag::None) {
+                pushUndo();
+                m_drag = cropDrag;
+                m_dragStart = p;
+                m_startRect = r;
+                const bool useDual = dual && sel["hasDualLayout"].toBool();
+                m_startCropL = sel[useDual ? "dualCropLeft" : "cropLeft"].toDouble();
+                m_startCropR = sel[useDual ? "dualCropRight" : "cropRight"].toDouble();
+                m_startCropT = sel[useDual ? "dualCropTop" : "cropTop"].toDouble();
+                m_startCropB = sel[useDual ? "dualCropBottom" : "cropBottom"].toDouble();
+                return;
+            }
+        }
         const QPointF corners[4] = {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()};
         const QPointF opposite[4] = {r.bottomRight(), r.bottomLeft(), r.topRight(), r.topLeft()};
         for (int k = 0; k < 4; ++k) {
@@ -3375,7 +3502,7 @@ void MainWindow::onCanvasPressed(QPointF p)
     for (int i = items.size() - 1; i >= 0; --i) {
         const auto it = items[i].toObject();
         if (!it["visible"].toBool(true) || sourceTypeInfo(sourceById(it["sourceId"].toString())["type"].toString()).audio) continue;
-        const QRectF r = displayRect(it);
+        const QRectF r = displayRectFor(it, dual);
         if (!r.contains(p)) continue;
         if (it["id"].toString() != m_selItem) selectItem(it["id"].toString());
         if (it["locked"].toBool()) return;
@@ -3391,28 +3518,87 @@ void MainWindow::onCanvasPressed(QPointF p)
 void MainWindow::onCanvasDragged(QPointF p)
 {
     if (m_drag == Drag::None) return;
-    QJsonObject item = makeFree(selectedItem());
+    QJsonObject item = makeFree(selectedItem(), m_dragDual);
     if (item.isEmpty()) return;
-    const bool snapOn = m_s["snapping"].toBool(true);
+    const bool snapScreen = m_s["snapping"].toBool(true);
+    const bool snapSources = m_s["snapToSources"].toBool(true);
     const double tol = 0.012;
     QRectF r = m_startRect;
 
+    QList<double> targetsX, targetsY;
+    if (snapScreen) { targetsX << 0.0 << 0.5 << 1.0; targetsY << 0.0 << 0.5 << 1.0; }
+    if (snapSources) {
+        for (const auto &v : activeScene()["items"].toArray()) {
+            const auto other = v.toObject();
+            if (other["id"].toString() == m_selItem || !other["visible"].toBool(true)) continue;
+            if (sourceTypeInfo(sourceById(other["sourceId"].toString())["type"].toString()).audio) continue;
+            const QRectF orr = displayRectFor(other, m_dragDual);
+            targetsX << orr.left() << orr.center().x() << orr.right();
+            targetsY << orr.top() << orr.center().y() << orr.bottom();
+        }
+    }
+
+    if (m_drag == Drag::CropLeft || m_drag == Drag::CropRight || m_drag == Drag::CropTop || m_drag == Drag::CropBottom) {
+        double cl = m_startCropL, cr = m_startCropR, ct = m_startCropT, cb = m_startCropB;
+        const double visU = std::max(0.1, 1.0 - m_startCropL - m_startCropR);
+        const double visV = std::max(0.1, 1.0 - m_startCropT - m_startCropB);
+        const double fullW = m_startRect.width() / visU;
+        const double fullH = m_startRect.height() / visV;
+        if (m_drag == Drag::CropLeft) {
+            const double dx = p.x() - m_dragStart.x();
+            cl = std::clamp(m_startCropL + dx / std::max(1e-4, fullW), 0.0, 0.45);
+            r.setLeft(m_startRect.left() + (cl - m_startCropL) * fullW);
+        } else if (m_drag == Drag::CropRight) {
+            const double dx = m_dragStart.x() - p.x();
+            cr = std::clamp(m_startCropR + dx / std::max(1e-4, fullW), 0.0, 0.45);
+            r.setRight(m_startRect.right() - (cr - m_startCropR) * fullW);
+        } else if (m_drag == Drag::CropTop) {
+            const double dy = p.y() - m_dragStart.y();
+            ct = std::clamp(m_startCropT + dy / std::max(1e-4, fullH), 0.0, 0.45);
+            r.setTop(m_startRect.top() + (ct - m_startCropT) * fullH);
+        } else if (m_drag == Drag::CropBottom) {
+            const double dy = m_dragStart.y() - p.y();
+            cb = std::clamp(m_startCropB + dy / std::max(1e-4, fullH), 0.0, 0.45);
+            r.setBottom(m_startRect.bottom() - (cb - m_startCropB) * fullH);
+        }
+        if (m_dragDual) {
+            item["hasDualLayout"] = true;
+            item["dualFit"] = "Free";
+            item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = std::max(0.02, r.width()); item["dualH"] = std::max(0.02, r.height());
+            item["dualCropLeft"] = cl; item["dualCropRight"] = cr; item["dualCropTop"] = ct; item["dualCropBottom"] = cb;
+        } else {
+            item["x"] = r.x(); item["y"] = r.y(); item["w"] = std::max(0.02, r.width()); item["h"] = std::max(0.02, r.height());
+            item["cropLeft"] = cl; item["cropRight"] = cr; item["cropTop"] = ct; item["cropBottom"] = cb;
+        }
+        setItem(item);
+        m_dragChanged = true;
+        if (!m_dragTimer->isActive()) {
+            sendDragTransform();
+            m_dragTimer->start();
+        }
+        return;
+    }
+
     if (m_drag == Drag::Move) {
         r.moveTopLeft(m_startRect.topLeft() + (p - m_dragStart));
-        if (snapOn) {
-            double d;
-            snap(r.left(), {0, 0.5}, tol, &d);
-            if (d == 0) snap(r.right(), {1, 0.5}, tol, &d);
-            if (d == 0) snap(r.center().x(), {0.5}, tol, &d);
+        if (!targetsX.isEmpty()) {
+            double d = 0;
+            snap(r.left(), targetsX, tol, &d);
+            if (d == 0) snap(r.right(), targetsX, tol, &d);
+            if (d == 0) snap(r.center().x(), targetsX, tol, &d);
             r.translate(d, 0);
-            snap(r.top(), {0, 0.5}, tol, &d);
-            if (d == 0) snap(r.bottom(), {1, 0.5}, tol, &d);
-            if (d == 0) snap(r.center().y(), {0.5}, tol, &d);
+        }
+        if (!targetsY.isEmpty()) {
+            double d = 0;
+            snap(r.top(), targetsY, tol, &d);
+            if (d == 0) snap(r.bottom(), targetsY, tol, &d);
+            if (d == 0) snap(r.center().y(), targetsY, tol, &d);
             r.translate(0, d);
         }
     } else {
         QPointF c = p;
-        if (snapOn) c = QPointF(snap(c.x(), {0, 0.5, 1}, tol), snap(c.y(), {0, 0.5, 1}, tol));
+        if (!targetsX.isEmpty()) c.setX(snap(c.x(), targetsX, tol));
+        if (!targetsY.isEmpty()) c.setY(snap(c.y(), targetsY, tol));
         double w = std::abs(c.x() - m_anchor.x()), h = std::abs(c.y() - m_anchor.y());
         if (!(QApplication::keyboardModifiers() & Qt::ShiftModifier) && m_startRect.height() > 0) {
             const double aspect = m_startRect.width() / m_startRect.height();
@@ -3424,25 +3610,53 @@ void MainWindow::onCanvasDragged(QPointF p)
         const double y = c.y() < m_anchor.y() ? m_anchor.y() - h : m_anchor.y();
         r = QRectF(x, y, w, h);
     }
-    item["x"] = r.x(); item["y"] = r.y(); item["w"] = r.width(); item["h"] = r.height();
+    if (m_dragDual) {
+        item["hasDualLayout"] = true;
+        item["dualFit"] = "Free";
+        item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = r.width(); item["dualH"] = r.height();
+    } else {
+        item["x"] = r.x(); item["y"] = r.y(); item["w"] = r.width(); item["h"] = r.height();
+    }
     setItem(item);
     m_dragChanged = true;
     if (!m_dragTimer->isActive()) {
         sendDragTransform();
         m_dragTimer->start();
     }
-    if (m_fit->currentData().toString() != "Free") { m_loading = true; m_fit->setCurrentIndex(0); m_loading = false; }
+    if (!m_dragDual && m_fit->currentData().toString() != "Free") { m_loading = true; m_fit->setCurrentIndex(0); m_loading = false; }
 }
 
 void MainWindow::sendDragTransform()
 {
     const auto item = selectedItem();
     if (m_drag == Drag::None || item.isEmpty()) return;
-    auto args = rectObj(itemRect(item));
-    args["sceneId"] = activeScene()["id"];
-    args["itemId"] = item["id"];
-    args["fit"] = item["fit"];
-    EngineHost::instance().call("setItemTransform", args);
+    const QString sceneId = activeScene()["id"].toString();
+    const QString itemId = item["id"].toString();
+    if (m_drag == Drag::CropLeft || m_drag == Drag::CropRight || m_drag == Drag::CropTop || m_drag == Drag::CropBottom) {
+        const QRectF r = displayRectFor(item, m_dragDual);
+        EngineHost::instance().call("setItemCrop", {
+            {"sceneId", sceneId}, {"itemId", itemId}, {"dual", m_dragDual},
+            {"x", r.x()}, {"y", r.y()}, {"w", r.width()}, {"h", r.height()},
+            {"cl", item[m_dragDual ? "dualCropLeft" : "cropLeft"].toDouble()},
+            {"cr", item[m_dragDual ? "dualCropRight" : "cropRight"].toDouble()},
+            {"ct", item[m_dragDual ? "dualCropTop" : "cropTop"].toDouble()},
+            {"cb", item[m_dragDual ? "dualCropBottom" : "cropBottom"].toDouble()},
+        });
+        return;
+    }
+    if (m_dragDual) {
+        EngineHost::instance().call("setDualItemTransform", {
+            {"sceneId", sceneId}, {"itemId", itemId},
+            {"x", item["dualX"]}, {"y", item["dualY"]}, {"w", item["dualW"]}, {"h", item["dualH"]},
+            {"fit", item["dualFit"].toString("Free")},
+        });
+    } else {
+        auto args = rectObj(itemRect(item));
+        args["sceneId"] = sceneId;
+        args["itemId"] = itemId;
+        args["fit"] = item["fit"];
+        EngineHost::instance().call("setItemTransform", args);
+    }
 }
 
 void MainWindow::pushUndo()
@@ -3573,17 +3787,23 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
 
 void MainWindow::onCanvasWheel(int delta)
 {
+    onCanvasWheelAt(delta, false);
+}
+
+void MainWindow::onCanvasWheelAt(int delta, bool dual)
+{
     if (m_selItem.isEmpty() || selectedItem()["locked"].toBool() || sourceTypeInfo(selectedSource()["type"].toString()).audio) return;
     const double f = delta > 0 ? 1.06 : 1 / 1.06;
-    editItem([this, f](QJsonObject &i) {
-        i = makeFree(i);
-        QRectF r = itemRect(i);
+    editItem([this, f, dual](QJsonObject &i) {
+        i = makeFree(i, dual);
+        QRectF r = displayRectFor(i, dual);
         const QPointF c = r.center();
         r.setSize(QSizeF(std::max(0.02, r.width() * f), std::max(0.02, r.height() * f)));
         r.moveCenter(c);
-        i["x"] = r.x(); i["y"] = r.y(); i["w"] = r.width(); i["h"] = r.height();
+        if (dual) { i["dualX"] = r.x(); i["dualY"] = r.y(); i["dualW"] = r.width(); i["dualH"] = r.height(); }
+        else { i["x"] = r.x(); i["y"] = r.y(); i["w"] = r.width(); i["h"] = r.height(); }
     });
-    if (m_fit->currentData().toString() != "Free") { m_loading = true; m_fit->setCurrentIndex(0); m_loading = false; }
+    if (!dual && m_fit->currentData().toString() != "Free") { m_loading = true; m_fit->setCurrentIndex(0); m_loading = false; }
 }
 
 // =============================== live ===============================
