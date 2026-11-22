@@ -162,6 +162,7 @@ public sealed unsafe class BrowserCapture : IDisposable
     private long _uploadedVersion;
 
     private readonly object _stateLock = new();
+    private readonly Action<float[], int>? _onAudio;
     private ChromiumWebBrowser? _browser;
     private string _url;
     private int _width, _height, _fps;
@@ -174,7 +175,7 @@ public sealed unsafe class BrowserCapture : IDisposable
     public string Status => _status;
     public long Frames => Volatile.Read(ref _frameVersion);
 
-    public BrowserCapture(string url, int width, int height, int fps, string css, bool muted, int reloadNonce)
+    public BrowserCapture(string url, int width, int height, int fps, string css, bool muted, int reloadNonce, Action<float[], int>? onAudio = null)
     {
         _url = NormalizeUrl(url);
         _width = Math.Clamp(width, 64, 3840);
@@ -183,6 +184,7 @@ public sealed unsafe class BrowserCapture : IDisposable
         _css = css ?? "";
         _muted = muted;
         _reloadNonce = reloadNonce;
+        _onAudio = onAudio;
 
         Task.Run(InitAsync);
     }
@@ -237,6 +239,7 @@ public sealed unsafe class BrowserCapture : IDisposable
 
             var browser = new ChromiumWebBrowser(_url, bs, requestContext: null, automaticallyCreateBrowser: false);
             browser.RenderHandler = new RawBgraRenderHandler(browser, OnRawPaint);
+            if (_onAudio != null) browser.AudioHandler = new BrowserAudioHandler(_onAudio);
             browser.Size = new System.Drawing.Size(_width, _height);
             browser.BrowserInitialized += (_, _) =>
             {
@@ -476,5 +479,49 @@ public sealed unsafe class BrowserCapture : IDisposable
         {
             if (type == PaintElementType.View) _onPaint(buffer, width, height);
         }
+    }
+
+    private sealed unsafe class BrowserAudioHandler(Action<float[], int> onAudio) : IAudioHandler
+    {
+        private int _channels = 2;
+        private float[] _interleaved = new float[2048];
+        private bool _disposed;
+
+        public bool GetAudioParameters(IWebBrowser chromiumWebBrowser, IBrowser browser, ref AudioParameters parameters)
+        {
+            parameters = new AudioParameters(ChannelLayout.LayoutStereo, AudioEngine.SampleRate, 480);
+            return true;
+        }
+
+        public void OnAudioStreamStarted(IWebBrowser chromiumWebBrowser, IBrowser browser, AudioParameters parameters, int channels)
+        {
+            _channels = Math.Max(1, channels);
+        }
+
+        public void OnAudioStreamPacket(IWebBrowser chromiumWebBrowser, IBrowser browser, IntPtr data, int noOfFrames, long pts)
+        {
+            if (_disposed || data == IntPtr.Zero || noOfFrames <= 0) return;
+            int samples = noOfFrames * 2;
+            if (_interleaved.Length < samples) _interleaved = new float[samples];
+            var chans = (float**)data;
+            float* left = chans[0];
+            float* right = _channels >= 2 && chans[1] != null ? chans[1] : left;
+            if (left == null) return;
+            for (int i = 0; i < noOfFrames; i++)
+            {
+                _interleaved[i * 2] = left[i];
+                _interleaved[i * 2 + 1] = right[i];
+            }
+            onAudio(_interleaved, samples);
+        }
+
+        public void OnAudioStreamStopped(IWebBrowser chromiumWebBrowser, IBrowser browser) { }
+
+        public void OnAudioStreamError(IWebBrowser chromiumWebBrowser, IBrowser browser, string errorMessage)
+        {
+            Log.Warn("Browser audio: " + errorMessage);
+        }
+
+        public void Dispose() => _disposed = true;
     }
 }

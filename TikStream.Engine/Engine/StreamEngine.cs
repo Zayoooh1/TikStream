@@ -302,7 +302,7 @@ public sealed unsafe class StreamEngine : IDisposable
                     SourceType.Camera => new CameraRt(d, _fps) { ConfigKey = key },
                     SourceType.Media => new MediaRt(d, Audio) { ConfigKey = key },
                     SourceType.Color => new ColorRt(d, _comp, Gpu) { ConfigKey = key },
-                    SourceType.Browser => new BrowserRt(d) { ConfigKey = key },
+                    SourceType.Browser => new BrowserRt(d, Audio) { ConfigKey = key },
                     _ => new PixelsRt(d) { ConfigKey = key },
                 };
                 if (created is PixelsRt px && _pendingPixels.Remove(d.Id, out var pp)) px.Set(Gpu, _comp, pp.W, pp.H, pp.Data);

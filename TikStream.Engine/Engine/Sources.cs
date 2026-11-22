@@ -386,6 +386,7 @@ internal sealed class ColorRt : RtSource
 
 internal sealed class BrowserRt : RtSource
 {
+    private readonly AudioEngine _audio;
     private readonly BrowserCapture _cap;
     private ID3D11Texture2D? _tex;
     private ID3D11ShaderResourceView? _srv;
@@ -395,10 +396,15 @@ internal sealed class BrowserRt : RtSource
     public override bool PreserveAlpha => true;
     public override string Status => _cap.Status;
 
-    public BrowserRt(SourceDef def)
+    public BrowserRt(SourceDef def, AudioEngine audio)
     {
         Def = def;
-        _cap = new BrowserCapture(def.BrowserUrl, def.BrowserWidth, def.BrowserHeight, def.BrowserFps, def.BrowserCss, def.BrowserMuted, def.BrowserReloadNonce);
+        _audio = audio;
+        var pushAudio = audio.RegisterPushInput(def.Id, def.Name);
+        audio.SetVolume(def.Id, !def.Muted && !def.BrowserMuted ? def.Volume : 0);
+        if (string.IsNullOrEmpty(def.MonitorMode)) def.MonitorMode = "MonitorAndOutput";
+        audio.SetFilters(def.Id, def);
+        _cap = new BrowserCapture(def.BrowserUrl, def.BrowserWidth, def.BrowserHeight, def.BrowserFps, def.BrowserCss, def.BrowserMuted, def.BrowserReloadNonce, pushAudio);
     }
 
     public override void Update(GpuDevice gpu, Compositor comp)
@@ -418,6 +424,7 @@ internal sealed class BrowserRt : RtSource
     public override void Dispose()
     {
         _cap.Dispose();
+        _audio.Unregister(Def.Id);
         _srv?.Dispose();
         _tex?.Dispose();
         Srv = null;

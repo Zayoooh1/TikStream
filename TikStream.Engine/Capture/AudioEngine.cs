@@ -95,6 +95,16 @@ public sealed class AudioEngine : IDisposable
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
                 }
             }
+            foreach (var d in settings.Sources.Where(x => x.Type == SourceType.Browser))
+            {
+                if (_inputs.TryGetValue(d.Id, out var inp))
+                {
+                    inp.SetVolume(!d.Muted && !d.BrowserMuted && (audible?.Contains(d.Id) == true) ? d.Volume : 0);
+                    inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
+                    inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
+                        d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                }
+            }
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.AlertBox))
             {
                 if (!_inputs.TryGetValue(d.Id, out var inp))

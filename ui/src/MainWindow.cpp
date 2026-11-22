@@ -85,8 +85,8 @@ QFormLayout *form(QWidget *w)
     auto *f = new QFormLayout(w);
     f->setContentsMargins(0, 0, 0, 0);
     f->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    f->setHorizontalSpacing(12);
-    f->setVerticalSpacing(9);
+    f->setHorizontalSpacing(8);
+    f->setVerticalSpacing(8);
     f->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     return f;
 }
@@ -1038,11 +1038,13 @@ void MainWindow::buildProperties(QWidget *host)
     });
 
     auto *content = new QWidget;
+    content->setMinimumWidth(0);
     auto *cv = new QVBoxLayout(content);
-    cv->setContentsMargins(14, 10, 14, 14);
+    cv->setContentsMargins(10, 10, 10, 14);
     cv->setSpacing(10);
     cv->addWidget(new SectionLabel("Source"));
     m_pages = new QStackedWidget;
+    m_pages->setMinimumWidth(0);
     m_pages->addWidget(pageScreen());
     m_pages->addWidget(pageWindow());
     m_pages->addWidget(pageCamera());
@@ -1061,10 +1063,12 @@ void MainWindow::buildProperties(QWidget *host)
     m_srcStatus->setObjectName("statusPill");
     cv->addWidget(m_srcStatus);
     m_transform = buildTransform();
+    m_transform->setMinimumWidth(0);
     cv->addWidget(m_transform);
     cv->addStretch();
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidget(content);
     bv->addWidget(scroll, 1);
@@ -1417,26 +1421,36 @@ QWidget *MainWindow::pageMedia()
 QWidget *MainWindow::pageBrowser()
 {
     auto *w = new QWidget;
+    w->setMinimumWidth(0);
     auto *f = form(w);
 
     auto *urlRow = new QHBoxLayout();
+    urlRow->setSpacing(5);
     m_browserUrl = new QLineEdit;
-    m_browserUrl->setPlaceholderText("https://... or local HTML file");
+    m_browserUrl->setMinimumWidth(0);
+    m_browserUrl->setPlaceholderText("https://... or local HTML");
     auto *browse = new QPushButton("File…");
+    browse->setMinimumWidth(0);
+    browse->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     browse->setToolTip("Select a local HTML file");
     urlRow->addWidget(m_browserUrl, 1);
     urlRow->addWidget(browse);
     f->addRow("URL", urlRow);
 
     auto *sizeRow = new QHBoxLayout();
+    sizeRow->setSpacing(4);
     m_browserWidth = new PaddedSpinBox;
     m_browserWidth->setRange(64, 3840);
     m_browserWidth->setSingleStep(10);
     m_browserWidth->setSuffix(" px");
+    m_browserWidth->setMinimumWidth(0);
+    m_browserWidth->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_browserHeight = new PaddedSpinBox;
     m_browserHeight->setRange(64, 2160);
     m_browserHeight->setSingleStep(10);
     m_browserHeight->setSuffix(" px");
+    m_browserHeight->setMinimumWidth(0);
+    m_browserHeight->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     sizeRow->addWidget(m_browserWidth, 1);
     sizeRow->addWidget(new QLabel("×"));
     sizeRow->addWidget(m_browserHeight, 1);
@@ -1445,25 +1459,35 @@ QWidget *MainWindow::pageBrowser()
     m_browserFps = new PaddedSpinBox;
     m_browserFps->setRange(1, 60);
     m_browserFps->setSuffix(" fps");
+    m_browserFps->setMinimumWidth(0);
     f->addRow("FPS", m_browserFps);
 
     m_browserCss = new QPlainTextEdit;
+    m_browserCss->setMinimumWidth(0);
+    m_browserCss->setLineWrapMode(QPlainTextEdit::WidgetWidth);
     m_browserCss->setFixedHeight(78);
     m_browserCss->setPlaceholderText("html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: rgba(0, 0, 0, 0); } body { display: flex; align-items: center; justify-content: center; }");
-    f->addRow("Custom CSS", m_browserCss);
+    f->addRow("CSS", m_browserCss);
 
     m_browserMuted = new QCheckBox("Mute browser audio");
     f->addRow("", m_browserMuted);
 
     auto *btnRow = new QHBoxLayout();
-    auto *interact = new QPushButton(themedIcon("globe"), "  Interact…");
+    btnRow->setSpacing(6);
+    auto *interact = new QPushButton(themedIcon("globe"), " Interact");
+    interact->setMinimumWidth(0);
+    interact->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     interact->setCursor(Qt::PointingHandCursor);
-    auto *refresh = new QPushButton(themedIcon("refresh"), "  Refresh Cache");
+    auto *refresh = new QPushButton(themedIcon("refresh"), " Refresh");
+    refresh->setMinimumWidth(0);
+    refresh->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     refresh->setCursor(Qt::PointingHandCursor);
-    btnRow->addWidget(interact);
-    btnRow->addWidget(refresh);
+    btnRow->addWidget(interact, 1);
+    btnRow->addWidget(refresh, 1);
     f->addRow("", btnRow);
-    f->addRow("", hintLabel("Renders web pages, StreamElements, Streamlabs, and TikFinity overlays off-screen with transparent background (Chromium)."));
+    auto *hint = hintLabel("Renders web overlays (Tipply, StreamElements, Streamlabs, TikFinity) with audio routed to the Audio Mixer.");
+    hint->setMinimumWidth(0);
+    f->addRow("", hint);
 
     connect(interact, &QPushButton::clicked, this, [this] {
         const QString id = selectedSource()["id"].toString();
@@ -2438,7 +2462,7 @@ void MainWindow::rebuildMixer()
         const auto id = s["id"].toString();
         const bool sceneDevice = sourceTypeInfo(t).audio && !s["globalAudio"].toBool();
         if (sceneDevice && !sceneAudio.contains(id)) continue;
-        if (sourceTypeInfo(t).audio || t == "Media" || t == "AlertBox") {
+        if (sourceTypeInfo(t).audio || t == "Media" || t == "AlertBox" || t == "Browser") {
             audio << s;
             sig << s["id"].toString() + s["name"].toString() + s["deviceId"].toString() + (s["muted"].toBool() ? "m" : "")
                 + (sceneDevice && !sceneAudio.value(id) ? "h" : "");
@@ -2701,6 +2725,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             src["browserCss"] = "html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: rgba(0, 0, 0, 0); } body { display: flex; align-items: center; justify-content: center; }";
             src["browserMuted"] = false;
             src["browserReloadNonce"] = 0;
+            src["monitorMode"] = "MonitorAndOutput";
         }
         if (type == "AlertBox") {
             src["alertImagePath"] = "";
