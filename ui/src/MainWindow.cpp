@@ -267,7 +267,7 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
         fps->setRange(1, 60); fps->setSuffix(" fps"); fps->setValue(30);
         f->addRow("FPS", fps);
 
-        auto *css = new QPlainTextEdit("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+        auto *css = new QPlainTextEdit("html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: rgba(0, 0, 0, 0); } body { display: flex; align-items: center; justify-content: center; }");
         css->setFixedHeight(84);
         f->addRow("Custom CSS", css);
 
@@ -1449,7 +1449,7 @@ QWidget *MainWindow::pageBrowser()
 
     m_browserCss = new QPlainTextEdit;
     m_browserCss->setFixedHeight(78);
-    m_browserCss->setPlaceholderText("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+    m_browserCss->setPlaceholderText("html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: rgba(0, 0, 0, 0); } body { display: flex; align-items: center; justify-content: center; }");
     f->addRow("Custom CSS", m_browserCss);
 
     m_browserMuted = new QCheckBox("Mute browser audio");
@@ -1723,10 +1723,10 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
     };
 
     // 0: Edge Cropping
-    auto *cropL = hslider(0, 45); cropL->setValue(qRound(item["cropLeft"].toDouble() * 100));
-    auto *cropR = hslider(0, 45); cropR->setValue(qRound(item["cropRight"].toDouble() * 100));
-    auto *cropT = hslider(0, 45); cropT->setValue(qRound(item["cropTop"].toDouble() * 100));
-    auto *cropB = hslider(0, 45); cropB->setValue(qRound(item["cropBottom"].toDouble() * 100));
+    auto *cropL = hslider(0, 95); cropL->setValue(qRound(item["cropLeft"].toDouble() * 100));
+    auto *cropR = hslider(0, 95); cropR->setValue(qRound(item["cropRight"].toDouble() * 100));
+    auto *cropT = hslider(0, 95); cropT->setValue(qRound(item["cropTop"].toDouble() * 100));
+    auto *cropB = hslider(0, 95); cropB->setValue(qRound(item["cropBottom"].toDouble() * 100));
     {
         auto *p = new QWidget;
         auto *f = form(p);
@@ -1736,7 +1736,19 @@ void MainWindow::openVideoFiltersDialog(const QString &itemId)
             f->addRow(lbl, row);
             connect(s, &QSlider::valueChanged, &dlg, [=](int val) {
                 vLbl->setText(QString("%1%").arg(val));
-                updateItem([key, val](QJsonObject &i) { i[key] = val / 100.0; });
+                updateItem([this, key, val](QJsonObject &i) {
+                    if (!i["hasDualLayout"].toBool()) {
+                        const QRectF dr = displayRectFor(i, true);
+                        i["hasDualLayout"] = true;
+                        i["dualFit"] = i["fit"].toString("Free");
+                        i["dualX"] = dr.x(); i["dualY"] = dr.y(); i["dualW"] = dr.width(); i["dualH"] = dr.height();
+                        i["dualCropLeft"] = i["cropLeft"].toDouble();
+                        i["dualCropRight"] = i["cropRight"].toDouble();
+                        i["dualCropTop"] = i["cropTop"].toDouble();
+                        i["dualCropBottom"] = i["cropBottom"].toDouble();
+                    }
+                    i[key] = val / 100.0;
+                });
             });
         };
         addRowPct("Crop Left", cropL, "cropLeft");
@@ -2686,7 +2698,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
             src["browserWidth"] = 800;
             src["browserHeight"] = 600;
             src["browserFps"] = 30;
-            src["browserCss"] = "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }";
+            src["browserCss"] = "html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background-color: rgba(0, 0, 0, 0); } body { display: flex; align-items: center; justify-content: center; }";
             src["browserMuted"] = false;
             src["browserReloadNonce"] = 0;
         }
@@ -2735,6 +2747,14 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double sc = std::min({1.0, 0.9 * cw / bw, 0.9 * ch / bh});
         const double w = bw * sc / cw, h = bh * sc / ch;
         item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
+        const double dcw = std::max(128, m_s["dualCanvasWidth"].toInt(1920));
+        const double dch = std::max(128, m_s["dualCanvasHeight"].toInt(1080));
+        const double dsc = std::min({1.0, 0.9 * dcw / bw, 0.9 * dch / bh});
+        const double dw = bw * dsc / dcw, dh = bh * dsc / dch;
+        item["hasDualLayout"] = true;
+        item["dualFit"] = "Free";
+        item["dualX"] = (1.0 - dw) / 2.0; item["dualY"] = (1.0 - dh) / 2.0; item["dualW"] = dw; item["dualH"] = dh;
+        item["dualCropLeft"] = 0.0; item["dualCropRight"] = 0.0; item["dualCropTop"] = 0.0; item["dualCropBottom"] = 0.0;
     } else if (type == "AlertBox") {
         // Dimensions are determined dynamically once an alert image/GIF + text is rendered.
         item["x"] = 0.5; item["y"] = 0.25; item["w"] = 0.0; item["h"] = 0.0;
@@ -2746,6 +2766,13 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
     } else {
         // image/text: size determined after rasterization (w = 0 -> automatic)
         item["x"] = 0.1; item["y"] = 0.42; item["w"] = 0.0; item["h"] = 0.0;
+    }
+    if (!sourceTypeInfo(type).audio && !item["hasDualLayout"].toBool() && item["w"].toDouble() > 0) {
+        const QRectF dr = displayRectFor(item, true);
+        item["hasDualLayout"] = true;
+        item["dualFit"] = item["fit"].toString("Free");
+        item["dualX"] = dr.x(); item["dualY"] = dr.y(); item["dualW"] = dr.width(); item["dualH"] = dr.height();
+        item["dualCropLeft"] = 0.0; item["dualCropRight"] = 0.0; item["dualCropTop"] = 0.0; item["dualCropBottom"] = 0.0;
     }
     QJsonObject sc = activeScene();
     QJsonArray items = sc["items"].toArray();
@@ -3397,10 +3424,19 @@ QRectF MainWindow::displayRectFor(const QJsonObject &item, bool dual) const
 QJsonObject MainWindow::makeFree(QJsonObject item, bool dual) const
 {
     if (item.isEmpty()) return item;
-    if (dual) {
-        if (item["hasDualLayout"].toBool() && item["dualFit"].toString("Free") == "Free") return item;
-        const QRectF r = displayRectFor(item, true);
+    if (!item["hasDualLayout"].toBool()) {
+        const QRectF dr = displayRectFor(item, true);
         item["hasDualLayout"] = true;
+        item["dualFit"] = dual ? QStringLiteral("Free") : item["fit"].toString("Free");
+        item["dualX"] = dr.x(); item["dualY"] = dr.y(); item["dualW"] = dr.width(); item["dualH"] = dr.height();
+        item["dualCropLeft"] = item["cropLeft"].toDouble();
+        item["dualCropRight"] = item["cropRight"].toDouble();
+        item["dualCropTop"] = item["cropTop"].toDouble();
+        item["dualCropBottom"] = item["cropBottom"].toDouble();
+    }
+    if (dual) {
+        if (item["dualFit"].toString("Free") == "Free") return item;
+        const QRectF r = displayRectFor(item, true);
         item["dualFit"] = "Free";
         item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = r.width(); item["dualH"] = r.height();
         return item;
@@ -3540,34 +3576,35 @@ void MainWindow::onCanvasDragged(QPointF p)
 
     if (m_drag == Drag::CropLeft || m_drag == Drag::CropRight || m_drag == Drag::CropTop || m_drag == Drag::CropBottom) {
         double cl = m_startCropL, cr = m_startCropR, ct = m_startCropT, cb = m_startCropB;
-        const double visU = std::max(0.1, 1.0 - m_startCropL - m_startCropR);
-        const double visV = std::max(0.1, 1.0 - m_startCropT - m_startCropB);
+        const double visU = std::max(0.02, 1.0 - m_startCropL - m_startCropR);
+        const double visV = std::max(0.02, 1.0 - m_startCropT - m_startCropB);
         const double fullW = m_startRect.width() / visU;
         const double fullH = m_startRect.height() / visV;
+        const double maxSum = 0.98;
         if (m_drag == Drag::CropLeft) {
             const double dx = p.x() - m_dragStart.x();
-            cl = std::clamp(m_startCropL + dx / std::max(1e-4, fullW), 0.0, 0.45);
+            cl = std::clamp(m_startCropL + dx / std::max(1e-4, fullW), 0.0, std::max(0.0, maxSum - cr));
             r.setLeft(m_startRect.left() + (cl - m_startCropL) * fullW);
         } else if (m_drag == Drag::CropRight) {
             const double dx = m_dragStart.x() - p.x();
-            cr = std::clamp(m_startCropR + dx / std::max(1e-4, fullW), 0.0, 0.45);
+            cr = std::clamp(m_startCropR + dx / std::max(1e-4, fullW), 0.0, std::max(0.0, maxSum - cl));
             r.setRight(m_startRect.right() - (cr - m_startCropR) * fullW);
         } else if (m_drag == Drag::CropTop) {
             const double dy = p.y() - m_dragStart.y();
-            ct = std::clamp(m_startCropT + dy / std::max(1e-4, fullH), 0.0, 0.45);
+            ct = std::clamp(m_startCropT + dy / std::max(1e-4, fullH), 0.0, std::max(0.0, maxSum - cb));
             r.setTop(m_startRect.top() + (ct - m_startCropT) * fullH);
         } else if (m_drag == Drag::CropBottom) {
             const double dy = m_dragStart.y() - p.y();
-            cb = std::clamp(m_startCropB + dy / std::max(1e-4, fullH), 0.0, 0.45);
+            cb = std::clamp(m_startCropB + dy / std::max(1e-4, fullH), 0.0, std::max(0.0, maxSum - ct));
             r.setBottom(m_startRect.bottom() - (cb - m_startCropB) * fullH);
         }
         if (m_dragDual) {
             item["hasDualLayout"] = true;
             item["dualFit"] = "Free";
-            item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = std::max(0.02, r.width()); item["dualH"] = std::max(0.02, r.height());
+            item["dualX"] = r.x(); item["dualY"] = r.y(); item["dualW"] = std::max(0.005, r.width()); item["dualH"] = std::max(0.005, r.height());
             item["dualCropLeft"] = cl; item["dualCropRight"] = cr; item["dualCropTop"] = ct; item["dualCropBottom"] = cb;
         } else {
-            item["x"] = r.x(); item["y"] = r.y(); item["w"] = std::max(0.02, r.width()); item["h"] = std::max(0.02, r.height());
+            item["x"] = r.x(); item["y"] = r.y(); item["w"] = std::max(0.005, r.width()); item["h"] = std::max(0.005, r.height());
             item["cropLeft"] = cl; item["cropRight"] = cr; item["cropTop"] = ct; item["cropBottom"] = cb;
         }
         setItem(item);

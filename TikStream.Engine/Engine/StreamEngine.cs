@@ -175,11 +175,46 @@ public sealed unsafe class StreamEngine : IDisposable
     public void SetSelection(NRect? rect) => _cmds.Enqueue(() => _selection = rect);
     public void SetDualSelection(NRect? rect) => _cmds.Enqueue(() => _dualSelection = rect);
 
+    private void EnsureDualSnapshot(SceneItem it)
+    {
+        if (it.HasDualLayout) return;
+        float mainW = _comp.Width, mainH = _comp.Height;
+        float dualW = _dualComp?.Width ?? Math.Clamp(_scene.DualCanvasWidth & ~1, 128, 4096);
+        float dualH = _dualComp?.Height ?? Math.Clamp(_scene.DualCanvasHeight & ~1, 128, 4096);
+        float ix = it.X, iy = it.Y, iw = it.W, ih = it.H;
+        if (it.Fit == FitMode.Free && mainW > 0 && mainH > 0 && dualW > 0 && dualH > 0)
+        {
+            float aspectRatio = (mainW / mainH) / (dualW / dualH);
+            float cx = ix + iw * 0.5f, cy = iy + ih * 0.5f;
+            float nw = iw * aspectRatio, nh = ih;
+            if (nw > 0.96f) { float k = 0.96f / nw; nw *= k; nh *= k; }
+            ix = cx - nw * 0.5f; iy = cy - nh * 0.5f; iw = nw; ih = nh;
+        }
+        it.HasDualLayout = true;
+        it.DualFit = it.Fit;
+        it.DualX = ix; it.DualY = iy; it.DualW = iw; it.DualH = ih;
+        it.DualCropLeft = it.CropLeft; it.DualCropRight = it.CropRight;
+        it.DualCropTop = it.CropTop; it.DualCropBottom = it.CropBottom;
+    }
+
+    private static void ClampCropPair(ref float a, ref float b)
+    {
+        a = Math.Clamp(a, 0f, 0.98f);
+        b = Math.Clamp(b, 0f, 0.98f);
+        if (a + b > 0.98f)
+        {
+            float k = 0.98f / (a + b);
+            a *= k;
+            b *= k;
+        }
+    }
+
     public void SetItemTransform(string sceneId, string itemId, NRect rect, FitMode fit) => _cmds.Enqueue(() =>
     {
         var sc = _scene.Scenes.FirstOrDefault(x => x.Id == sceneId);
         var it = sc?.Items.FirstOrDefault(x => x.Id == itemId);
         if (it == null) return;
+        EnsureDualSnapshot(it);
         it.X = rect.X; it.Y = rect.Y; it.W = rect.W; it.H = rect.H; it.Fit = fit;
         _selection = rect;
     });
@@ -189,7 +224,7 @@ public sealed unsafe class StreamEngine : IDisposable
         var sc = _scene.Scenes.FirstOrDefault(x => x.Id == sceneId);
         var it = sc?.Items.FirstOrDefault(x => x.Id == itemId);
         if (it == null) return;
-        it.HasDualLayout = true;
+        EnsureDualSnapshot(it);
         it.DualX = rect.X; it.DualY = rect.Y; it.DualW = rect.W; it.DualH = rect.H; it.DualFit = fit;
         _dualSelection = rect;
     });
@@ -199,9 +234,11 @@ public sealed unsafe class StreamEngine : IDisposable
         var sc = _scene.Scenes.FirstOrDefault(x => x.Id == sceneId);
         var it = sc?.Items.FirstOrDefault(x => x.Id == itemId);
         if (it == null) return;
+        EnsureDualSnapshot(it);
+        ClampCropPair(ref cl, ref cr);
+        ClampCropPair(ref ct, ref cb);
         if (dual)
         {
-            it.HasDualLayout = true;
             it.DualX = rect.X; it.DualY = rect.Y; it.DualW = rect.W; it.DualH = rect.H; it.DualFit = FitMode.Free;
             it.DualCropLeft = cl; it.DualCropRight = cr; it.DualCropTop = ct; it.DualCropBottom = cb;
             _dualSelection = rect;
@@ -824,10 +861,12 @@ public sealed unsafe class StreamEngine : IDisposable
                     break;
             }
 
-            float cl = Math.Clamp(item.HasDualLayout ? item.DualCropLeft : item.CropLeft, 0f, 0.45f);
-            float cr = Math.Clamp(item.HasDualLayout ? item.DualCropRight : item.CropRight, 0f, 0.45f);
-            float ct = Math.Clamp(item.HasDualLayout ? item.DualCropTop : item.CropTop, 0f, 0.45f);
-            float cb = Math.Clamp(item.HasDualLayout ? item.DualCropBottom : item.CropBottom, 0f, 0.45f);
+            float cl = item.HasDualLayout ? item.DualCropLeft : item.CropLeft;
+            float cr = item.HasDualLayout ? item.DualCropRight : item.CropRight;
+            float ct = item.HasDualLayout ? item.DualCropTop : item.CropTop;
+            float cb = item.HasDualLayout ? item.DualCropBottom : item.CropBottom;
+            ClampCropPair(ref cl, ref cr);
+            ClampCropPair(ref ct, ref cb);
             if (cl > 0 || cr > 0 || ct > 0 || cb > 0)
             {
                 float uSpan = cmd.SrcUv.Z - cmd.SrcUv.X;
@@ -916,10 +955,9 @@ public sealed unsafe class StreamEngine : IDisposable
                 }
                 if (item.CropLeft > 0 || item.CropRight > 0 || item.CropTop > 0 || item.CropBottom > 0)
                 {
-                    float cl = Math.Clamp(item.CropLeft, 0f, 0.45f);
-                    float cr = Math.Clamp(item.CropRight, 0f, 0.45f);
-                    float ct = Math.Clamp(item.CropTop, 0f, 0.45f);
-                    float cb = Math.Clamp(item.CropBottom, 0f, 0.45f);
+                    float cl = item.CropLeft, cr = item.CropRight, ct = item.CropTop, cb = item.CropBottom;
+                    ClampCropPair(ref cl, ref cr);
+                    ClampCropPair(ref ct, ref cb);
                     float uSpan = cmd.SrcUv.Z - cmd.SrcUv.X;
                     float vSpan = cmd.SrcUv.W - cmd.SrcUv.Y;
                     cmd.SrcUv = new Vector4(
