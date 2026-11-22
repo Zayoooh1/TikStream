@@ -763,13 +763,18 @@ void MainWindow::buildDocks()
 
     m_liveChat = new LiveChat;
     m_liveChat->setAccount(m_s["tikTokUsername"].toString());
+    m_liveChat->setKickAccount(m_s["kickUsername"].toString("zayosh"));
     connect(m_liveChat, &LiveChat::overlayChanged, this, &MainWindow::updateChatOverlays);
     connect(m_liveChat, &LiveChat::alertTriggered, this, &MainWindow::triggerAlert);
     connect(m_liveChat, &LiveChat::accountChanged, this, [this](const QString &nick) {
         m_s["tikTokUsername"] = nick;
         pushSettings();
     });
-    auto *chat = makeDock("TikTok LIVE Chat", "dockLiveChat", m_liveChat, Qt::RightDockWidgetArea);
+    connect(m_liveChat, &LiveChat::kickAccountChanged, this, [this](const QString &ch) {
+        m_s["kickUsername"] = ch;
+        pushSettings();
+    });
+    auto *chat = makeDock("LIVE Chat (TikTok + Kick)", "dockLiveChat", m_liveChat, Qt::RightDockWidgetArea);
     chat->setFeatures(chat->features() | QDockWidget::DockWidgetClosable);
     findChild<QMenu *>("panelsMenu")->addAction(chat->toggleViewAction());
     chat->hide();

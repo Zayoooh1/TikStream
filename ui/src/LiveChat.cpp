@@ -15,9 +15,11 @@
 #include <QLocale>
 #include <QNetworkReply>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QStandardPaths>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <algorithm>
@@ -25,12 +27,30 @@
 namespace {
 constexpr int historyLimit = 200;
 constexpr int imageLimit = 128 * 1024;
+constexpr int RoleAvatarUrl = Qt::UserRole;
+constexpr int RolePlatform = Qt::UserRole + 1;
+constexpr int RoleNick = Qt::UserRole + 2;
+constexpr int RoleBody = Qt::UserRole + 3;
+constexpr int RoleColor = Qt::UserRole + 4;
 
 QString normalizeAccount(QString raw)
 {
     raw = raw.trimmed();
     while (raw.startsWith('@')) raw.remove(0, 1);
     return raw.trimmed().left(64);
+}
+
+QString normalizeKickAccount(QString raw)
+{
+    raw = raw.trimmed();
+    const int idx = raw.indexOf(QStringLiteral("kick.com/"), 0, Qt::CaseInsensitive);
+    if (idx >= 0) raw = raw.mid(idx + 9);
+    while (raw.startsWith('@') || raw.startsWith('/')) raw.remove(0, 1);
+    const int slash = raw.indexOf('/');
+    if (slash >= 0) raw = raw.left(slash);
+    const int q = raw.indexOf('?');
+    if (q >= 0) raw = raw.left(q);
+    return raw.trimmed().left(32);
 }
 
 bool avatarHost(const QString &host)
@@ -40,6 +60,128 @@ bool avatarHost(const QString &host)
     }
     return false;
 }
+
+QPixmap makePlatformBadge(const QString &platform, int sz = 16)
+{
+    const int px = sz * 2;
+    QPixmap pm(px, px);
+    pm.setDevicePixelRatio(2.0);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+    const QRectF r(0.5, 0.5, sz - 1.0, sz - 1.0);
+    if (platform == QStringLiteral("kick")) {
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(83, 252, 24)); // Kick #53FC18
+        p.drawRoundedRect(r, sz * 0.24, sz * 0.24);
+        QFont f(QStringLiteral("Segoe UI"));
+        f.setPixelSize(int(sz * 0.72));
+        f.setWeight(QFont::Black);
+        p.setFont(f);
+        p.setPen(QColor(10, 14, 10));
+        p.drawText(r, Qt::AlignCenter, QStringLiteral("K"));
+    } else {
+        p.setPen(QPen(QColor(255, 255, 255, 38), 0.75));
+        p.setBrush(QColor(18, 19, 26));
+        p.drawRoundedRect(r, sz * 0.24, sz * 0.24);
+        QFont f(QStringLiteral("Segoe UI"));
+        f.setPixelSize(int(sz * 0.74));
+        f.setWeight(QFont::Black);
+        p.setFont(f);
+        p.setPen(QColor(37, 244, 238));
+        p.drawText(r.translated(-0.7, -0.5), Qt::AlignCenter, QStringLiteral("T"));
+        p.setPen(QColor(254, 44, 85));
+        p.drawText(r.translated(0.7, 0.5), Qt::AlignCenter, QStringLiteral("T"));
+        p.setPen(Qt::white);
+        p.drawText(r, Qt::AlignCenter, QStringLiteral("T"));
+    }
+    return pm;
+}
+
+const QPixmap &platformBadgeCached(const QString &platform, int sz = 16)
+{
+    static QPixmap tt16 = makePlatformBadge(QStringLiteral("tiktok"), 16);
+    static QPixmap kk16 = makePlatformBadge(QStringLiteral("kick"), 16);
+    static QPixmap tt20 = makePlatformBadge(QStringLiteral("tiktok"), 20);
+    static QPixmap kk20 = makePlatformBadge(QStringLiteral("kick"), 20);
+    if (sz >= 19) return platform == QStringLiteral("kick") ? kk20 : tt20;
+    return platform == QStringLiteral("kick") ? kk16 : tt16;
+}
+
+class ChatMessageDelegate final : public QStyledItemDelegate
+{
+public:
+    explicit ChatMessageDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        const QString nick = index.data(RoleNick).toString();
+        const QString body = index.data(RoleBody).toString();
+        const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        const bool hasAvatar = !avatar.isNull();
+        const int leftOff = 8 + (hasAvatar ? 30 : 0);
+        const int availW = std::max(80, option.rect.width() - leftOff - 8);
+        QFont nickF = option.font; nickF.setBold(true);
+        const QFontMetrics nfm(nickF);
+        const QFontMetrics bfm(option.font);
+        const QRect br = bfm.boundingRect(QRect(0, 0, availW, 1000), Qt::TextWordWrap, body);
+        const int h = std::max(hasAvatar ? 36 : 30, 5 + std::max(16, nfm.height()) + 2 + br.height() + 6);
+        return {option.rect.width(), h};
+    }
+
+    void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        p->save();
+        p->setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing | QPainter::SmoothPixmapTransform);
+        if (option.state & QStyle::State_Selected)
+            p->fillRect(option.rect, QColor(255, 255, 255, 16));
+
+        const QString platform = index.data(RolePlatform).toString();
+        const QString nick = index.data(RoleNick).toString();
+        const QString body = index.data(RoleBody).toString();
+        const QString colorHex = index.data(RoleColor).toString();
+        const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        const bool hasAvatar = !avatar.isNull();
+
+        int x = option.rect.left() + 8;
+        const int top = option.rect.top() + 5;
+        if (hasAvatar) {
+            const QRect avRect(x, top + 1, 24, 24);
+            QPainterPath clip;
+            clip.addEllipse(avRect);
+            p->save();
+            p->setClipPath(clip);
+            avatar.paint(p, avRect);
+            p->restore();
+            x += 30;
+        }
+
+        const int availW = std::max(60, option.rect.right() - x - 8);
+        const QPixmap &badge = platformBadgeCached(platform, 16);
+        p->drawPixmap(x, top + 1, badge);
+
+        QFont nickF = option.font;
+        nickF.setBold(true);
+        p->setFont(nickF);
+        const QFontMetrics nfm(nickF);
+        QColor nickCol = (platform == QStringLiteral("kick")) ? QColor(83, 252, 24) : QColor(120, 210, 255);
+        if (!colorHex.isEmpty()) {
+            const QColor parsed(colorHex);
+            if (parsed.isValid() && parsed.lightness() > 55) nickCol = parsed;
+        }
+        p->setPen(nickCol);
+        const int nickX = x + 21;
+        const int nickW = std::max(40, availW - 21);
+        const int headH = std::max(16, nfm.height());
+        p->drawText(QRect(nickX, top, nickW, headH), Qt::AlignVCenter | Qt::AlignLeft, nfm.elidedText(nick, Qt::ElideRight, nickW));
+
+        p->setFont(option.font);
+        p->setPen(QColor(232, 234, 242));
+        const QRect bodyRect(x, top + headH + 2, availW, std::max(16, option.rect.bottom() - (top + headH + 2) - 4));
+        p->drawText(bodyRect, Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, body);
+        p->restore();
+    }
+};
 }
 
 class GiftNotifications final : public QWidget
@@ -77,7 +219,6 @@ public:
     {
         const Row incoming{sender, nick, text};
         const bool moving = m_turn.state() == QAbstractAnimation::Running;
-        // An entry that is currently fading out can reappear at the bottom as a new notification.
         for (int i = moving ? 1 : 0; i < m_rows.size(); ++i) {
             if (m_rows[i].sender != sender) continue;
             m_rows[i] = incoming;
@@ -160,40 +301,66 @@ private:
 LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
 {
     setMinimumWidth(200);
+
+    // Row 1: TikTok LIVE username
     auto *accRow = new QHBoxLayout;
-    accRow->setSpacing(4);
-    auto *atLabel = new QLabel("@", this);
+    accRow->setSpacing(5);
+    auto *ttBadge = new QLabel(this);
+    ttBadge->setPixmap(platformBadgeCached(QStringLiteral("tiktok"), 16));
+    ttBadge->setToolTip("TikTok LIVE");
     m_accountEdit = new QLineEdit(this);
+    m_accountEdit->setMinimumWidth(0);
     m_accountEdit->setPlaceholderText("tiktok_username");
     m_accountEdit->setToolTip("Enter a TikTok username (without @) and press Enter");
     auto *connectBtn = new QPushButton("Connect", this);
-    accRow->addWidget(atLabel);
+    connectBtn->setMinimumWidth(0);
+    accRow->addWidget(ttBadge);
     accRow->addWidget(m_accountEdit, 1);
     accRow->addWidget(connectBtn);
 
-    m_status = new QLabel("Enter a TikTok @username above to connect to LIVE chat.", this);
+    // Row 2: Kick.com channel
+    auto *kickRow = new QHBoxLayout;
+    kickRow->setSpacing(5);
+    auto *kickBadge = new QLabel(this);
+    kickBadge->setPixmap(platformBadgeCached(QStringLiteral("kick"), 16));
+    kickBadge->setToolTip("Kick.com Live Chat");
+    m_kickAccountEdit = new QLineEdit(this);
+    m_kickAccountEdit->setMinimumWidth(0);
+    m_kickAccountEdit->setPlaceholderText("kick_channel (e.g. zayosh)");
+    m_kickAccountEdit->setToolTip("Enter a Kick.com channel name or URL and press Enter");
+    auto *kickConnectBtn = new QPushButton("Connect", this);
+    kickConnectBtn->setMinimumWidth(0);
+    kickRow->addWidget(kickBadge);
+    kickRow->addWidget(m_kickAccountEdit, 1);
+    kickRow->addWidget(kickConnectBtn);
+
+    m_status = new QLabel("Enter a TikTok or Kick channel above to connect.", this);
     m_status->setWordWrap(true);
     m_taps = new QLabel("Likes: —", this);
     m_taps->setObjectName("liveChatTaps");
     m_gifts = new GiftNotifications(this);
     m_messages = new QListWidget(this);
     m_messages->setObjectName("liveChatMessages");
+    m_messages->setItemDelegate(new ChatMessageDelegate(m_messages));
     m_messages->setWordWrap(true);
     m_messages->setResizeMode(QListView::Adjust);
     m_messages->setTextElideMode(Qt::ElideNone);
-    m_messages->setIconSize({26, 26});
     m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_connection = new QPushButton("Connect", this);
+    m_connection = new QPushButton("Pause", this);
     auto *refresh = new QPushButton("Refresh", this);
-    refresh->setToolTip("Check immediately if the LIVE stream is active (without waiting 30 s)");
+    refresh->setToolTip("Reconnect TikTok and Kick chat immediately");
     auto *open = new QPushButton("Open LIVE", this);
     auto *actions = new QHBoxLayout;
+    actions->setSpacing(5);
     actions->addWidget(m_connection);
     actions->addWidget(refresh);
     actions->addWidget(open);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(5);
     layout->addLayout(accRow);
+    layout->addLayout(kickRow);
     layout->addWidget(m_status);
     layout->addWidget(m_gifts);
     layout->addWidget(m_messages, 1);
@@ -202,33 +369,61 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
 
     connect(m_accountEdit, &QLineEdit::returnPressed, this, &LiveChat::applyAccountFromInput);
     connect(connectBtn, &QPushButton::clicked, this, &LiveChat::applyAccountFromInput);
+    connect(m_kickAccountEdit, &QLineEdit::returnPressed, this, &LiveChat::applyKickAccountFromInput);
+    connect(kickConnectBtn, &QPushButton::clicked, this, &LiveChat::applyKickAccountFromInput);
+
     connect(open, &QPushButton::clicked, this, [this] {
-        if (m_account.isEmpty()) return;
-        QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.tiktok.com/@%1/live").arg(m_account)));
+        if (!m_account.isEmpty())
+            QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.tiktok.com/@%1/live").arg(m_account)));
+        else if (!m_kickAccount.isEmpty())
+            QDesktopServices::openUrl(QUrl(QStringLiteral("https://kick.com/%1").arg(m_kickAccount)));
     });
     connect(refresh, &QPushButton::clicked, this, [this] {
         m_paused = false;
         stopProcess();
+        stopKickProcess();
         start();
+        startKick();
     });
     connect(m_connection, &QPushButton::clicked, this, [this] {
-        if (m_process.state() != QProcess::NotRunning) {
+        const bool anyRunning = m_process.state() != QProcess::NotRunning || m_kickProcess.state() != QProcess::NotRunning;
+        if (anyRunning) {
             m_paused = true;
-            m_process.kill();
+            stopProcess();
+            stopKickProcess();
+            if (!m_account.isEmpty()) m_ttStatus = QStringLiteral("TikTok: paused");
+            if (!m_kickAccount.isEmpty()) m_kickStatus = QStringLiteral("Kick: paused");
+            m_connection->setText("Resume");
+            updateCombinedStatus();
             return;
         }
+        m_paused = false;
         start();
+        startKick();
     });
+
     connect(&m_process, &QProcess::readyReadStandardOutput, this, &LiveChat::readEvents);
     connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            m_status->setText("Failed to start chat connection.");
-            m_connection->setText("Reconnect");
+            m_ttStatus = QStringLiteral("TikTok: failed to start");
+            updateCombinedStatus();
         }
     });
     connect(&m_process, &QProcess::finished, this, [this] {
-        m_status->setText(m_paused ? "Chat paused." : "Chat connection ended.");
-        m_connection->setText(m_paused ? "Resume" : "Reconnect");
+        m_ttStatus = m_paused ? QStringLiteral("TikTok: paused") : QStringLiteral("TikTok: ended");
+        updateCombinedStatus();
+    });
+
+    connect(&m_kickProcess, &QProcess::readyReadStandardOutput, this, &LiveChat::readKickEvents);
+    connect(&m_kickProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            m_kickStatus = QStringLiteral("Kick: failed to start");
+            updateCombinedStatus();
+        }
+    });
+    connect(&m_kickProcess, &QProcess::finished, this, [this] {
+        m_kickStatus = m_paused ? QStringLiteral("Kick: paused") : QStringLiteral("Kick: ended");
+        updateCombinedStatus();
     });
 }
 
@@ -239,17 +434,30 @@ LiveChat::~LiveChat()
         m_process.kill();
         m_process.waitForFinished(500);
     }
+    m_kickProcess.disconnect(this);
+    if (m_kickProcess.state() != QProcess::NotRunning) {
+        m_kickProcess.kill();
+        m_kickProcess.waitForFinished(500);
+    }
 }
 
 void LiveChat::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
-    if (!m_started) start();
+    if (!m_started && !m_paused) {
+        m_started = true;
+        if (!m_account.isEmpty()) start();
+        if (!m_kickAccount.isEmpty()) startKick();
+    }
 }
 
 void LiveChat::ensureStarted()
 {
-    if (!m_started && !m_paused) start();
+    if (!m_started && !m_paused) {
+        m_started = true;
+        if (!m_account.isEmpty()) start();
+        if (!m_kickAccount.isEmpty()) startKick();
+    }
 }
 
 void LiveChat::setDemoPreview(bool enabled)
@@ -263,6 +471,17 @@ void LiveChat::notifyOverlay()
 {
     ++m_overlayRevision;
     emit overlayChanged();
+}
+
+void LiveChat::updateCombinedStatus()
+{
+    QStringList parts;
+    if (!m_ttStatus.isEmpty()) parts << m_ttStatus;
+    if (!m_kickStatus.isEmpty()) parts << m_kickStatus;
+    if (parts.isEmpty()) m_status->setText("Enter a TikTok or Kick channel above to connect.");
+    else m_status->setText(parts.join(QStringLiteral("  |  ")));
+    const bool anyRunning = m_process.state() != QProcess::NotRunning || m_kickProcess.state() != QProcess::NotRunning;
+    m_connection->setText(anyRunning ? QStringLiteral("Pause") : (m_paused ? QStringLiteral("Resume") : QStringLiteral("Connect")));
 }
 
 QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGifts, bool showTaps) const
@@ -327,19 +546,23 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
 
     // 3. Chat messages from bottom to top (most recent visible)
     if (showChat && bottomY > topY + 40) {
-        struct Msg { QString nick, text; QIcon icon; };
+        struct Msg { QString platform, nick, text, color; QIcon icon; };
         QList<Msg> msgs;
         const int count = m_messages->count();
         for (int i = std::max(0, count - 10); i < count; ++i) {
             const auto *it = m_messages->item(i);
-            const QString raw = it->text();
-            const int nl = raw.indexOf('\n');
-            msgs.append({nl >= 0 ? raw.left(nl) : raw, nl >= 0 ? raw.mid(nl + 1) : QString(), it->icon()});
+            msgs.append({
+                it->data(RolePlatform).toString(),
+                it->data(RoleNick).toString(),
+                it->data(RoleBody).toString(),
+                it->data(RoleColor).toString(),
+                it->icon(),
+            });
         }
         if (m_demoPreview && msgs.isEmpty()) {
-            msgs.append({"alex_gg", "Let's get the win today! 🔥", QIcon()});
-            msgs.append({"sarah_tv", "Crisp quality and smooth 60 FPS!", QIcon()});
-            msgs.append({"mark99", "Shoutout from the stream!", QIcon()});
+            msgs.append({"tiktok", "alex_gg", "Let's get the win today! 🔥", "", QIcon()});
+            msgs.append({"kick", "zayosh_fan", "Crisp quality and smooth 60 FPS!", "", QIcon()});
+            msgs.append({"tiktok", "mark99", "Shoutout from the stream!", "", QIcon()});
         }
 
         QFont nickF("Segoe UI", 14, QFont::Bold);
@@ -354,7 +577,8 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
             const int leftOff = 12 + (hasIcon ? iconSz + 10 : 0);
             const int textW = std::max(80, availW - leftOff - 12);
             const QRect bodyRect = bfm.boundingRect(QRect(0, 0, textW, 200), Qt::TextWordWrap, m.text);
-            const int cardH = std::max(hasIcon ? 50 : 44, 8 + nfm.height() + 2 + bodyRect.height() + 10);
+            const int headH = std::max(20, nfm.height());
+            const int cardH = std::max(hasIcon ? 50 : 44, 8 + headH + 2 + bodyRect.height() + 10);
             if (curBottom - cardH < topY) break;
             const QRectF card(pad, curBottom - cardH, availW, cardH);
             p.setPen(QPen(QColor(255, 255, 255, 36), 1.0));
@@ -364,12 +588,20 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
                 const QRect ir(pad + 12, int(card.top()) + (cardH - iconSz) / 2, iconSz, iconSz);
                 m.icon.paint(&p, ir);
             }
+            const QPixmap &badge = platformBadgeCached(m.platform, 20);
+            p.drawPixmap(pad + leftOff, int(card.top()) + 8 + (headH - 20) / 2, badge);
             p.setFont(nickF);
-            p.setPen(QColor(120, 210, 255));
-            p.drawText(QRectF(pad + leftOff, card.top() + 8, textW, nfm.height()), Qt::AlignVCenter, nfm.elidedText(m.nick, Qt::ElideRight, textW));
+            QColor nickCol = (m.platform == QStringLiteral("kick")) ? QColor(83, 252, 24) : QColor(120, 210, 255);
+            if (!m.color.isEmpty()) {
+                const QColor parsed(m.color);
+                if (parsed.isValid() && parsed.lightness() > 55) nickCol = parsed;
+            }
+            p.setPen(nickCol);
+            p.drawText(QRectF(pad + leftOff + 26, card.top() + 8, std::max(40, textW - 26), headH),
+                       Qt::AlignVCenter, nfm.elidedText(m.nick, Qt::ElideRight, std::max(40, textW - 26)));
             p.setFont(bodyF);
             p.setPen(QColor(245, 247, 252));
-            p.drawText(QRectF(pad + leftOff, card.top() + 10 + nfm.height(), textW, bodyRect.height() + 4), Qt::TextWordWrap, m.text);
+            p.drawText(QRectF(pad + leftOff, card.top() + 10 + headH, textW, bodyRect.height() + 4), Qt::TextWordWrap, m.text);
             curBottom = int(card.top()) - 8;
         }
     }
@@ -384,26 +616,54 @@ void LiveChat::stopProcess()
     m_process.waitForFinished(500);
 }
 
+void LiveChat::stopKickProcess()
+{
+    if (m_kickProcess.state() == QProcess::NotRunning) return;
+    QSignalBlocker blocked(&m_kickProcess);
+    m_kickProcess.kill();
+    m_kickProcess.waitForFinished(500);
+}
+
 void LiveChat::setAccount(const QString &username)
 {
     const QString norm = normalizeAccount(username);
     if (m_accountEdit && m_accountEdit->text() != norm) m_accountEdit->setText(norm);
     if (m_account == norm) return;
     m_account = norm;
-    m_messages->clear();
     m_gifts->clear();
     m_tapsText.clear();
     m_taps->setText("Likes: —");
     notifyOverlay();
     stopProcess();
     if (m_account.isEmpty()) {
-        m_started = false;
-        m_status->setText("Enter a TikTok @username above to connect to LIVE chat.");
-        m_connection->setText("Connect");
+        m_ttStatus.clear();
+        updateCombinedStatus();
         return;
     }
     if (m_started || isVisible()) start();
-    else m_status->setText(QStringLiteral("@%1 · waiting to connect").arg(m_account));
+    else {
+        m_ttStatus = QStringLiteral("TikTok: @%1 (waiting)").arg(m_account);
+        updateCombinedStatus();
+    }
+}
+
+void LiveChat::setKickAccount(const QString &channel)
+{
+    const QString norm = normalizeKickAccount(channel);
+    if (m_kickAccountEdit && m_kickAccountEdit->text() != norm) m_kickAccountEdit->setText(norm);
+    if (m_kickAccount == norm) return;
+    m_kickAccount = norm;
+    stopKickProcess();
+    if (m_kickAccount.isEmpty()) {
+        m_kickStatus.clear();
+        updateCombinedStatus();
+        return;
+    }
+    if (m_started || isVisible()) startKick();
+    else {
+        m_kickStatus = QStringLiteral("Kick: %1 (waiting)").arg(m_kickAccount);
+        updateCombinedStatus();
+    }
 }
 
 void LiveChat::applyAccountFromInput()
@@ -413,7 +673,6 @@ void LiveChat::applyAccountFromInput()
     const bool changed = (norm != m_account);
     m_account = norm;
     if (changed) {
-        m_messages->clear();
         m_gifts->clear();
         m_tapsText.clear();
         m_taps->setText("Likes: —");
@@ -422,14 +681,28 @@ void LiveChat::applyAccountFromInput()
     }
     stopProcess();
     m_paused = false;
+    m_started = true;
     start();
+}
+
+void LiveChat::applyKickAccountFromInput()
+{
+    const QString norm = normalizeKickAccount(m_kickAccountEdit->text());
+    m_kickAccountEdit->setText(norm);
+    const bool changed = (norm != m_kickAccount);
+    m_kickAccount = norm;
+    if (changed) emit kickAccountChanged(m_kickAccount);
+    stopKickProcess();
+    m_paused = false;
+    m_started = true;
+    startKick();
 }
 
 void LiveChat::start()
 {
     if (m_account.isEmpty()) {
-        m_status->setText("Enter a TikTok @username above to connect to LIVE chat.");
-        m_connection->setText("Connect");
+        m_ttStatus.clear();
+        updateCombinedStatus();
         return;
     }
     m_started = true;
@@ -439,14 +712,38 @@ void LiveChat::start()
     const auto bundledNode = QCoreApplication::applicationDirPath() + "/chat/node.exe";
     const auto node = QFileInfo::exists(bundledNode) ? bundledNode : QStandardPaths::findExecutable("node");
     if (node.isEmpty() || !QFileInfo::exists(script) || !QFileInfo::exists(QFileInfo(script).path() + "/node_modules/tiktok-live-connector/package.json")) {
-        m_status->setText("Node.js or TikTok chat module is missing.");
-        m_connection->setText("Reconnect");
+        m_ttStatus = QStringLiteral("TikTok: module missing");
+        updateCombinedStatus();
         return;
     }
-    m_status->setText(QStringLiteral("Connecting to @%1…").arg(m_account));
-    m_connection->setText("Pause");
+    m_ttStatus = QStringLiteral("TikTok: connecting @%1…").arg(m_account);
     m_process.setStandardErrorFile(QProcess::nullDevice());
     m_process.start(node, {script, m_account});
+    updateCombinedStatus();
+}
+
+void LiveChat::startKick()
+{
+    if (m_kickAccount.isEmpty()) {
+        m_kickStatus.clear();
+        updateCombinedStatus();
+        return;
+    }
+    m_started = true;
+    m_paused = false;
+    m_kickInput.clear();
+    const auto script = QCoreApplication::applicationDirPath() + "/chat/kick.mjs";
+    const auto bundledNode = QCoreApplication::applicationDirPath() + "/chat/node.exe";
+    const auto node = QFileInfo::exists(bundledNode) ? bundledNode : QStandardPaths::findExecutable("node");
+    if (node.isEmpty() || !QFileInfo::exists(script)) {
+        m_kickStatus = QStringLiteral("Kick: script missing");
+        updateCombinedStatus();
+        return;
+    }
+    m_kickStatus = QStringLiteral("Kick: connecting %1…").arg(m_kickAccount);
+    m_kickProcess.setStandardErrorFile(QProcess::nullDevice());
+    m_kickProcess.start(node, {script, m_kickAccount});
+    updateCombinedStatus();
 }
 
 void LiveChat::readEvents()
@@ -472,22 +769,51 @@ void LiveChat::readEvents()
         const auto state = event["state"].toString();
         const auto codeVal = event["code"];
         const QString codeText = codeVal.isDouble()
-            ? QStringLiteral(" (code %1)").arg(codeVal.toInteger())
+            ? QStringLiteral(" (%1)").arg(codeVal.toInteger())
             : (codeVal.isString() && !codeVal.toString().isEmpty()
                 ? QStringLiteral(" (%1)").arg(codeVal.toString().left(24))
                 : QString());
-        if (state == "connecting") m_status->setText(QStringLiteral("Connecting to @%1…").arg(m_account));
-        else if (state == "connected") m_status->setText(QStringLiteral("LIVE · @%1").arg(m_account));
-        else if (state == "offline") m_status->setText(QStringLiteral("@%1 is offline. Retrying in 30 s.").arg(m_account));
-        else if (state == "disconnected") m_status->setText(QStringLiteral("WebSocket connection lost%1. Retrying in 30 s.").arg(codeText));
-        else if (state == "rate_limited") m_status->setText(QStringLiteral("Signing service rate-limited%1. Retrying in 30 s.").arg(codeText));
-        else if (state == "sign_error") m_status->setText(QStringLiteral("Chat signing service error%1. Retrying in 30 s.").arg(codeText));
-        else if (state == "ws_error") m_status->setText(QStringLiteral("WebSocket connection error%1. Retrying in 30 s.").arg(codeText));
-        else if (state == "room_error") m_status->setText(QStringLiteral("Cannot access LIVE room%1. Retrying in 30 s.").arg(codeText));
-        else if (state == "unavailable") m_status->setText(QStringLiteral("TikTok chat is unavailable%1. Retrying in 30 s.").arg(codeText));
+        if (state == "connecting") m_ttStatus = QStringLiteral("TikTok: connecting @%1…").arg(m_account);
+        else if (state == "connected") m_ttStatus = QStringLiteral("TikTok: LIVE · @%1").arg(m_account);
+        else if (state == "offline") m_ttStatus = QStringLiteral("TikTok: @%1 offline").arg(m_account);
+        else if (state == "disconnected") m_ttStatus = QStringLiteral("TikTok: reconnecting%1").arg(codeText);
+        else if (state == "rate_limited") m_ttStatus = QStringLiteral("TikTok: rate-limited%1").arg(codeText);
+        else if (state == "sign_error") m_ttStatus = QStringLiteral("TikTok: sign error%1").arg(codeText);
+        else if (state == "ws_error") m_ttStatus = QStringLiteral("TikTok: WS error%1").arg(codeText);
+        else if (state == "room_error") m_ttStatus = QStringLiteral("TikTok: room error%1").arg(codeText);
+        else if (state == "unavailable") m_ttStatus = QStringLiteral("TikTok: unavailable%1").arg(codeText);
+        updateCombinedStatus();
     }
     m_input.remove(0, consumed);
     if (m_input.size() > 512 * 1024) m_input.clear();
+}
+
+void LiveChat::readKickEvents()
+{
+    m_kickInput += m_kickProcess.readAllStandardOutput();
+    qsizetype consumed = 0;
+    for (qsizetype end; (end = m_kickInput.indexOf('\n', consumed)) >= 0; consumed = end + 1) {
+        if (end - consumed > 512 * 1024) continue;
+        const auto event = QJsonDocument::fromJson(m_kickInput.mid(consumed, end - consumed)).object();
+        if (event["type"] == "messages") appendMessages(event["messages"].toArray());
+        if (event["type"] != "status") continue;
+        const auto state = event["state"].toString();
+        const auto codeVal = event["code"];
+        const QString codeText = codeVal.isDouble()
+            ? QStringLiteral(" (%1)").arg(codeVal.toInteger())
+            : (codeVal.isString() && !codeVal.toString().isEmpty()
+                ? QStringLiteral(" (%1)").arg(codeVal.toString().left(24))
+                : QString());
+        if (state == "connecting") m_kickStatus = QStringLiteral("Kick: connecting %1…").arg(m_kickAccount);
+        else if (state == "connected") m_kickStatus = QStringLiteral("Kick: LIVE · %1").arg(m_kickAccount);
+        else if (state == "not_found") m_kickStatus = QStringLiteral("Kick: '%1' not found").arg(m_kickAccount);
+        else if (state == "disconnected") m_kickStatus = QStringLiteral("Kick: reconnecting%1").arg(codeText);
+        else if (state == "ws_error") m_kickStatus = QStringLiteral("Kick: WS error%1").arg(codeText);
+        else if (state == "unavailable") m_kickStatus = QStringLiteral("Kick: unavailable%1").arg(codeText);
+        updateCombinedStatus();
+    }
+    m_kickInput.remove(0, consumed);
+    if (m_kickInput.size() > 512 * 1024) m_kickInput.clear();
 }
 
 void LiveChat::appendMessages(const QJsonArray &messages)
@@ -498,9 +824,11 @@ void LiveChat::appendMessages(const QJsonArray &messages)
     bool giftChanged = false;
     for (const auto &value : messages) {
         const auto message = value.toObject();
+        const auto platform = message["platform"].toString(QStringLiteral("tiktok"));
         const auto nick = message["nick"].toString().left(100);
         const auto text = message["text"].toString().left(500);
         const auto url = message["avatar"].toString().left(1500);
+        const auto color = message["color"].toString().left(16);
         if (nick.isEmpty() || text.isEmpty()) continue;
         if (message["kind"] == "gift") {
             const auto sender = message["senderId"].toString().left(160);
@@ -518,10 +846,16 @@ void LiveChat::appendMessages(const QJsonArray &messages)
             chatChanged = true;
         }
         if (m_messages->count() == historyLimit) delete m_messages->takeItem(0);
-        auto *item = new QListWidgetItem(nick + "\n" + text, m_messages);
-        item->setData(Qt::UserRole, url);
-        if (const auto *cached = m_avatars.object(url)) item->setIcon(*cached);
-        else requestAvatar(url);
+        auto *item = new QListWidgetItem(m_messages);
+        item->setData(RolePlatform, platform);
+        item->setData(RoleNick, nick);
+        item->setData(RoleBody, text);
+        item->setData(RoleColor, color);
+        item->setData(RoleAvatarUrl, url);
+        if (!url.isEmpty()) {
+            if (const auto *cached = m_avatars.object(url)) item->setIcon(*cached);
+            else requestAvatar(url);
+        }
     }
     if (chatChanged) {
         m_messages->setUpdatesEnabled(true);
@@ -568,7 +902,7 @@ void LiveChat::startAvatar(const QString &address)
         m_avatars.insert(address, new QIcon(icon));
         for (int i = m_messages->count() - 1; i >= 0; --i) {
             auto *item = m_messages->item(i);
-            if (item->data(Qt::UserRole).toString() == address) item->setIcon(icon);
+            if (item->data(RoleAvatarUrl).toString() == address) item->setIcon(icon);
         }
         notifyOverlay();
     });

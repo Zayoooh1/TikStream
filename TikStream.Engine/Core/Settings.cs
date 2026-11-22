@@ -172,6 +172,7 @@ public sealed class AppSettings
     public string ServerUrl { get; set; } = "";
     public string StreamKeyProtected { get; set; } = "";
     public string TikTokUsername { get; set; } = "";
+    public string KickUsername { get; set; } = "zayosh";
     public string TikTokSignerUrl { get; set; } = "https://tiktok-live-studio-api-signer1.p.rapidapi.com/";
     public string TikTokSignerKeyProtected { get; set; } = "";
     public string TikTokSessionProtected { get; set; } = "";
