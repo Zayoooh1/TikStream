@@ -42,6 +42,7 @@
 #include <QMouseEvent>
 #include <QMovie>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -2660,8 +2661,8 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double w = bw * sc / cw, h = bh * sc / ch;
         item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
     } else if (type == "AlertBox") {
-        const double w = 0.84, h = w * cw / ch * (260.0 / 640.0);
-        item["x"] = (1.0 - w) / 2.0; item["y"] = 0.14; item["w"] = w; item["h"] = h;
+        const double w = 0.72, h = w * cw / ch * (380.0 / 720.0);
+        item["x"] = (1.0 - w) / 2.0; item["y"] = 0.12; item["w"] = w; item["h"] = h;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
         const double scale = std::min(1.0, 0.8 * cw / sz.width());
@@ -3021,16 +3022,15 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
-            img = QImage(640, 260, QImage::Format_ARGB32_Premultiplied);
+            img = QImage(720, 380, QImage::Format_ARGB32_Premultiplied);
             img.fill(Qt::transparent);
             if (!m_alertKind.isEmpty()) {
                 QPainter p(&img);
                 p.setRenderHint(QPainter::Antialiasing, true);
+                p.setRenderHint(QPainter::TextAntialiasing, true);
+                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 const QColor accent = m_alertKind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
-                p.setBrush(QColor(18, 20, 30, 230));
-                p.setPen(QPen(accent, 3.0));
-                p.drawRoundedRect(QRectF(8, 8, 624, 244), 20, 20);
-                int leftX = 28;
+
                 QImage iconImg;
                 if (m_alertMovie && m_alertMovie->state() == QMovie::Running) {
                     iconImg = m_alertMovie->currentImage();
@@ -3039,21 +3039,46 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                     if (imgPath.isEmpty()) imgPath = src["alertImagePath"].toString();
                     if (!imgPath.isEmpty()) iconImg = QImage(imgPath);
                 }
+
+                int textTop = 80;
                 if (!iconImg.isNull()) {
-                    p.drawImage(QRect(26, 48, 160, 160), iconImg.scaled(160, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-                    leftX = 204;
+                    const QImage scaled = iconImg.scaled(210, 210, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    const int ix = (img.width() - scaled.width()) / 2;
+                    const int iy = 10 + (210 - scaled.height()) / 2;
+                    p.drawImage(ix, iy, scaled);
+                    textTop = 228;
                 }
-                const int textW = 612 - leftX;
-                p.setFont(QFont("Segoe UI", 16, QFont::Bold));
-                p.setPen(accent);
-                p.drawText(QRect(leftX, 34, textW, 34), Qt::AlignLeft | Qt::AlignVCenter,
-                           m_alertKind == "gift" ? "TIKTOK LIVE GIFT" : "NEW FOLLOWER");
-                p.setFont(QFont("Segoe UI", 28, QFont::Bold));
-                p.setPen(Qt::white);
-                p.drawText(QRect(leftX, 74, textW, 56), Qt::AlignLeft | Qt::AlignVCenter, m_alertUser);
-                p.setFont(QFont("Segoe UI", 20, QFont::DemiBold));
-                p.setPen(QColor(220, 224, 238));
-                p.drawText(QRect(leftX, 136, textW, 92), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, m_alertDetail);
+
+                auto drawBoldOutlined = [&](const QString &text, int pixelSize, int centerY, const QColor &fillColor) {
+                    if (text.isEmpty()) return;
+                    QFont f("Segoe UI");
+                    f.setPixelSize(pixelSize);
+                    f.setWeight(QFont::Black);
+                    const QFontMetrics fm(f);
+                    const QString elided = fm.elidedText(text, Qt::ElideRight, img.width() - 40);
+                    const int tw = fm.horizontalAdvance(elided);
+                    const qreal x = (img.width() - tw) / 2.0;
+                    const qreal baseline = centerY + (fm.ascent() - fm.descent()) / 2.0;
+
+                    QPainterPath path;
+                    path.addText(x, baseline, f, elided);
+
+                    // Soft drop shadow
+                    p.save();
+                    p.translate(0, 4);
+                    p.setPen(QPen(QColor(0, 0, 0, 170), 9.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.setBrush(QColor(0, 0, 0, 170));
+                    p.drawPath(path);
+                    p.restore();
+
+                    // Crisp dark outline + vibrant fill
+                    p.setPen(QPen(QColor(12, 14, 20, 245), 7.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.setBrush(fillColor);
+                    p.drawPath(path);
+                };
+
+                drawBoldOutlined(m_alertUser, 50, textTop + 34, accent);
+                drawBoldOutlined(m_alertDetail, 34, textTop + 92, Qt::white);
             }
         } else {
             img = rasterizeSource(src);
