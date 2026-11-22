@@ -703,6 +703,33 @@ public sealed unsafe class StreamEngine : IDisposable
     }
 
     private readonly List<DrawCmd> _drawList = new(32);
+    private readonly List<DrawCmd> _dualDrawList = new(32);
+
+    private void BuildDualDrawList(Compositor dualComp)
+    {
+        _dualDrawList.Clear();
+        float mainW = _comp.Width, mainH = _comp.Height;
+        float dualW = dualComp.Width, dualH = dualComp.Height;
+        if (mainW <= 0 || mainH <= 0 || dualW <= 0 || dualH <= 0) return;
+
+        // Preserve exact pixel aspect ratio of every Free item when mapping from vertical 9:16 to horizontal 16:9.
+        float aspectRatio = (mainW / mainH) / (dualW / dualH);
+        foreach (var srcCmd in _drawList)
+        {
+            var cmd = srcCmd;
+            bool isFull = cmd.Dst.X <= 0.001f && cmd.Dst.Y <= 0.001f && cmd.Dst.W >= 0.999f && cmd.Dst.H >= 0.999f;
+            if (!isFull)
+            {
+                float cx = cmd.Dst.X + cmd.Dst.W * 0.5f;
+                float cy = cmd.Dst.Y + cmd.Dst.H * 0.5f;
+                float nw = cmd.Dst.W * aspectRatio;
+                float nh = cmd.Dst.H;
+                if (nw > 0.96f) { float k = 0.96f / nw; nw *= k; nh *= k; }
+                cmd.Dst = new NRect(cx - nw * 0.5f, cy - nh * 0.5f, nw, nh);
+            }
+            _dualDrawList.Add(cmd);
+        }
+    }
 
     private void RenderFrame(long frameTime, long interval, long frameNo)
     {
@@ -817,7 +844,8 @@ public sealed unsafe class StreamEngine : IDisposable
                     var recComp = _dualComp ?? _comp;
                     if (_dualComp != null)
                     {
-                        _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
+                        BuildDualDrawList(_dualComp);
+                        _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
                     }
                     var rFrame = _recVenc.AcquireFrame(out var ry, out var ruv);
                     recComp.ConvertToNv12(ry, ruv);
@@ -857,7 +885,10 @@ public sealed unsafe class StreamEngine : IDisposable
                 catch (Exception ex) { Log.Warn("Dual preview: " + ex.Message); }
             }
             if (_recVenc == null)
-                _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_drawList));
+            {
+                BuildDualDrawList(_dualComp);
+                _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
+            }
             _dualComp.PresentPreview(null);
         }
         else if (_dualPreviewDirty)

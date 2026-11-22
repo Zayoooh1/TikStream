@@ -2661,7 +2661,7 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
         const double w = bw * sc / cw, h = bh * sc / ch;
         item["x"] = (1.0 - w) / 2.0; item["y"] = (1.0 - h) / 2.0; item["w"] = w; item["h"] = h;
     } else if (type == "AlertBox") {
-        const double w = 0.72, h = w * cw / ch * (380.0 / 720.0);
+        const double w = 0.86, h = w * cw / ch * (9.0 / 16.0);
         item["x"] = (1.0 - w) / 2.0; item["y"] = 0.12; item["w"] = w; item["h"] = h;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
@@ -3022,7 +3022,10 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
-            img = QImage(720, 380, QImage::Format_ARGB32_Premultiplied);
+            const int aw = std::max(1920, std::max(m_canvasW, m_canvasH));
+            const int ah = (aw * 9) / 16;
+            const qreal sc = aw / 1080.0;
+            img = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
             img.fill(Qt::transparent);
             if (!m_alertKind.isEmpty()) {
                 QPainter p(&img);
@@ -3040,45 +3043,44 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                     if (!imgPath.isEmpty()) iconImg = QImage(imgPath);
                 }
 
-                int textTop = 80;
+                int textTop = int(140 * sc);
                 if (!iconImg.isNull()) {
-                    const QImage scaled = iconImg.scaled(210, 210, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                    const int ix = (img.width() - scaled.width()) / 2;
-                    const int iy = 10 + (210 - scaled.height()) / 2;
+                    const int maxIcon = int(310 * sc);
+                    const QImage scaled = iconImg.scaled(maxIcon, maxIcon, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    const int ix = (aw - scaled.width()) / 2;
+                    const int iy = int(16 * sc) + (maxIcon - scaled.height()) / 2;
                     p.drawImage(ix, iy, scaled);
-                    textTop = 228;
+                    textTop = int(344 * sc);
                 }
 
                 auto drawBoldOutlined = [&](const QString &text, int pixelSize, int centerY, const QColor &fillColor) {
                     if (text.isEmpty()) return;
                     QFont f("Segoe UI");
-                    f.setPixelSize(pixelSize);
-                    f.setWeight(QFont::Black);
+                    f.setPixelSize(std::max(18, int(pixelSize * sc)));
+                    f.setWeight(QFont::Bold);
                     const QFontMetrics fm(f);
-                    const QString elided = fm.elidedText(text, Qt::ElideRight, img.width() - 40);
+                    const QString elided = fm.elidedText(text, Qt::ElideRight, aw - int(60 * sc));
                     const int tw = fm.horizontalAdvance(elided);
-                    const qreal x = (img.width() - tw) / 2.0;
+                    const qreal x = (aw - tw) / 2.0;
                     const qreal baseline = centerY + (fm.ascent() - fm.descent()) / 2.0;
 
                     QPainterPath path;
                     path.addText(x, baseline, f, elided);
 
-                    // Soft drop shadow
+                    // 1. Soft drop shadow underneath
                     p.save();
-                    p.translate(0, 4);
-                    p.setPen(QPen(QColor(0, 0, 0, 170), 9.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    p.setBrush(QColor(0, 0, 0, 170));
-                    p.drawPath(path);
+                    p.translate(0, 5.0 * sc);
+                    p.strokePath(path, QPen(QColor(0, 0, 0, 150), 11.0 * sc, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.fillPath(path, QColor(0, 0, 0, 150));
                     p.restore();
 
-                    // Crisp dark outline + vibrant fill
-                    p.setPen(QPen(QColor(12, 14, 20, 245), 7.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    p.setBrush(fillColor);
-                    p.drawPath(path);
+                    // 2. Crisp dark outline UNDER the fill, then vibrant fill ON TOP (never obscured by stroke)
+                    p.strokePath(path, QPen(QColor(10, 12, 18, 245), 8.0 * sc, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    p.fillPath(path, fillColor);
                 };
 
-                drawBoldOutlined(m_alertUser, 50, textTop + 34, accent);
-                drawBoldOutlined(m_alertDetail, 34, textTop + 92, Qt::white);
+                drawBoldOutlined(m_alertUser, 78, textTop + int(48 * sc), accent);
+                drawBoldOutlined(m_alertDetail, 52, textTop + int(134 * sc), Qt::white);
             }
         } else {
             img = rasterizeSource(src);
