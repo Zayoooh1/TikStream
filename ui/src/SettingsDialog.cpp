@@ -300,36 +300,22 @@ QWidget *SettingsDialog::pageStream()
     m_secondEnabled->setEnabled(!m_live);
     updateSecondEnabled(m_secondEnabled->isChecked());
 
-    // ---------- TikTok LIVE Native Account (QR + LIVE Studio Import + Signer) ----------
+    // ---------- TikTok LIVE Native Account (QR + LIVE Studio Import) ----------
     QFormLayout *ttForm;
     v->addWidget(card(w, &ttForm, "Konto TikTok LIVE (QR / LIVE Studio)",
-        "Zaloguj się przez kod QR lub zaimportuj sesję z TikTok LIVE Studio. Klucz signera i sesja są szyfrowane lokalnie (DPAPI)."));
+        "Zaloguj się bezpośrednio kodem QR w aplikacji TikTok lub zaimportuj aktywną sesję z TikTok LIVE Studio. Sesja jest szyfrowana lokalnie (Windows DPAPI)."));
 
-    m_signerKey = track(new QLineEdit(m_s["tikTokSignerKey"].toString()));
-    m_signerKey->setEchoMode(QLineEdit::Password);
-    m_signerKey->setPlaceholderText("Klucz X-RapidAPI-Key (tiktok-live-studio-api-signer1)");
-    auto *signerRow = new QHBoxLayout;
-    signerRow->addWidget(m_signerKey, 1);
-    auto *showSigner = new QToolButton;
-    showSigner->setText("Pokaż");
-    showSigner->setCheckable(true);
-    connect(showSigner, &QToolButton::toggled, m_signerKey, [this, showSigner](bool on) {
-        m_signerKey->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
-        showSigner->setText(on ? "Ukryj" : "Pokaż");
-    });
-    signerRow->addWidget(showSigner);
-    ttForm->addRow("Klucz Signera", signerRow);
-
-    const QString defaultSignerUrl = QStringLiteral("https://tiktok-live-studio-api-signer1.p.rapidapi.com/");
-    m_signerUrl = track(new QLineEdit(m_s["tikTokSignerUrl"].toString(defaultSignerUrl)));
-    m_signerUrl->setPlaceholderText(defaultSignerUrl);
-    ttForm->addRow("URL Signera", m_signerUrl);
-
-    auto *ttAccountLabel = hint("Sprawdzanie statusu konta…");
+    auto *ttAccountLabel = new QLabel("Sprawdzanie statusu konta…");
     ttAccountLabel->setTextFormat(Qt::PlainText);
-    auto *ttStatusLabel = hint("");
+    ttAccountLabel->setWordWrap(true);
+    ttAccountLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    ttAccountLabel->setStyleSheet("color: #e2e8f0; font-weight: 500;");
+
+    auto *ttStatusLabel = new QLabel("");
     ttStatusLabel->setTextFormat(Qt::PlainText);
     ttStatusLabel->setWordWrap(true);
+    ttStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    ttStatusLabel->setStyleSheet("color: #94a3b8;");
 
     auto *qrImageLabel = new QLabel;
     qrImageLabel->setAlignment(Qt::AlignCenter);
@@ -356,6 +342,37 @@ QWidget *SettingsDialog::pageStream()
     ttForm->addRow(ttBtnRow);
     ttForm->addRow("", qrImageLabel);
     ttForm->addRow("", ttStatusLabel);
+
+    // Optional advanced signer fields (collapsed by default — not needed for QR login)
+    auto *advToggle = new QCheckBox("Zaawansowane: zewnętrzny signer API (opcjonalne)");
+    ttForm->addRow("", advToggle);
+
+    auto *advBox = new QWidget;
+    auto *advForm = new QFormLayout(advBox);
+    advForm->setContentsMargins(0, 4, 0, 0);
+    m_signerKey = track(new QLineEdit(m_s["tikTokSignerKey"].toString()));
+    m_signerKey->setEchoMode(QLineEdit::Password);
+    m_signerKey->setPlaceholderText("Opcjonalny klucz X-RapidAPI-Key");
+    auto *signerRow = new QHBoxLayout;
+    signerRow->addWidget(m_signerKey, 1);
+    auto *showSigner = new QToolButton;
+    showSigner->setText("Pokaż");
+    showSigner->setCheckable(true);
+    connect(showSigner, &QToolButton::toggled, m_signerKey, [this, showSigner](bool on) {
+        m_signerKey->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
+        showSigner->setText(on ? "Ukryj" : "Pokaż");
+    });
+    signerRow->addWidget(showSigner);
+    advForm->addRow("Klucz Signera", signerRow);
+
+    const QString defaultSignerUrl = QStringLiteral("https://tiktok-live-studio-api-signer1.p.rapidapi.com/");
+    m_signerUrl = track(new QLineEdit(m_s["tikTokSignerUrl"].toString(defaultSignerUrl)));
+    m_signerUrl->setPlaceholderText(defaultSignerUrl);
+    advForm->addRow("URL Signera", m_signerUrl);
+
+    advBox->setVisible(false);
+    connect(advToggle, &QCheckBox::toggled, advBox, &QWidget::setVisible);
+    ttForm->addRow(advBox);
 
     auto *qrTimer = new QTimer(w);
     auto qrRendered = std::make_shared<QString>();
@@ -425,7 +442,7 @@ QWidget *SettingsDialog::pageStream()
         qrRendered->clear();
         ttStatusLabel->setText(res["statusText"].toString("Generowanie kodu QR…"));
         btnQrCancel->setVisible(true);
-        qrTimer->start(2000);
+        qrTimer->start(1000);
         refreshTikTokAccount();
     });
 

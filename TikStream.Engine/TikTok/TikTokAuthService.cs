@@ -49,7 +49,7 @@ public sealed class TikTokAuthService
         public readonly CancellationTokenSource Cts = new(TimeSpan.FromMinutes(5));
         public readonly CookieContainer Jar = new();
         public readonly HttpClient Http;
-        public readonly ITikTokSigner Signer;
+        public readonly ITikTokSigner? Signer;
         public readonly string DeviceId = TikTokSessionData.GenerateNumericId();
         public readonly string InstallId = TikTokSessionData.GenerateNumericId();
         public string Status = "loading"; // loading | new | scanned | confirmed | expired | error
@@ -61,7 +61,7 @@ public sealed class TikTokAuthService
         public TikTokSessionData? CompletedSession;
         public Task? PollTask;
 
-        public QrFlowState(ITikTokSigner signer)
+        public QrFlowState(ITikTokSigner? signer)
         {
             Signer = signer;
             var handler = new SocketsHttpHandler
@@ -87,9 +87,10 @@ public sealed class TikTokAuthService
 
     public object BeginQrLogin(string? signerKey, string? signerUrl, Action<TikTokSessionData> onSessionConfirmed)
     {
-        var signer = new RapidApiTikTokSigner(signerKey, signerUrl);
-        if (!signer.IsConfigured)
-            return new { error = "Wpisz klucz RapidAPI Signera przed logowaniem kodem QR." };
+        // QR login (/passport/web/get_qrcode & check_qrconnect) uses local Passport SDK signing (MD5+XOR5)
+        // and does NOT require any external RapidAPI key.
+        var candidate = new RapidApiTikTokSigner(signerKey, signerUrl);
+        ITikTokSigner? signer = candidate.IsConfigured ? candidate : null;
 
         QrFlowState flow;
         lock (_gate)
@@ -441,9 +442,8 @@ public sealed class TikTokAuthService
         if (!session.HasSessionCookie)
             return new TikTokCreateInfoResult(false, false, "", "", "", "", "Brak aktywnej sesji TikTok. Zaloguj się najpierw przez QR lub LIVE Studio.");
 
-        var signer = new RapidApiTikTokSigner(signerKey, signerUrl);
-        if (!signer.IsConfigured)
-            return new TikTokCreateInfoResult(false, false, "", "", "", "", "Brak klucza RapidAPI Signera.");
+        var candidate = new RapidApiTikTokSigner(signerKey, signerUrl);
+        ITikTokSigner? signer = candidate.IsConfigured ? candidate : null;
 
         session.EnsureDeviceIds();
         var jar = new CookieContainer();
@@ -518,7 +518,7 @@ public sealed class TikTokAuthService
 
     private static async Task<JsonDocument> SendSignedJsonAsync(
         HttpClient http,
-        ITikTokSigner signer,
+        ITikTokSigner? signer,
         HttpMethod method,
         string baseUrl,
         Dictionary<string, string> queryParams,
@@ -527,7 +527,9 @@ public sealed class TikTokAuthService
         CancellationToken ct)
     {
         long ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var sig = await signer.SignRequestAsync(ts, Aid, queryParams, null, deviceId, ct).ConfigureAwait(false);
+        TikTokSignatureResult? sig = null;
+        if (signer is { IsConfigured: true })
+            sig = await signer.SignRequestAsync(ts, Aid, queryParams, null, deviceId, ct).ConfigureAwait(false);
 
         var qs = BuildQueryString(queryParams);
         var fullUrl = string.IsNullOrEmpty(qs) ? baseUrl : $"{baseUrl}?{qs}";
@@ -548,11 +550,18 @@ public sealed class TikTokAuthService
         if (isPassport)
             req.Headers.TryAddWithoutValidation("Referer", "https://www.tiktok.com/ucenter_web/live_studio/login");
 
-        req.Headers.TryAddWithoutValidation("x-khronos", sig.XKhronos);
-        req.Headers.TryAddWithoutValidation("x-ladon", sig.XLadon);
-        req.Headers.TryAddWithoutValidation("x-argus", sig.XArgus);
-        if (!string.IsNullOrEmpty(sig.XGorgon))
-            req.Headers.TryAddWithoutValidation("x-gorgon", sig.XGorgon);
+        if (sig != null)
+        {
+            req.Headers.TryAddWithoutValidation("x-khronos", sig.XKhronos);
+            req.Headers.TryAddWithoutValidation("x-ladon", sig.XLadon);
+            req.Headers.TryAddWithoutValidation("x-argus", sig.XArgus);
+            if (!string.IsNullOrEmpty(sig.XGorgon))
+                req.Headers.TryAddWithoutValidation("x-gorgon", sig.XGorgon);
+        }
+        else
+        {
+            req.Headers.TryAddWithoutValidation("x-khronos", ts.ToString());
+        }
 
         using var resp = await http.SendAsync(req, ct).ConfigureAwait(false);
         var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
