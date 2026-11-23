@@ -44,6 +44,7 @@ protected:
     void closeEvent(QCloseEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
     void showEvent(QShowEvent *e) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     // ---------- construction ----------
@@ -209,6 +210,7 @@ private:
     PreviewWidget *m_preview = nullptr, *m_dualPreview = nullptr;
     QDockWidget *m_dualPreviewDock = nullptr;
     bool m_dualDockPositioned = false;
+    bool m_layoutReady = false;
     QStackedWidget *m_previewStack = nullptr;
     QListWidget *m_sceneList = nullptr, *m_sourceList = nullptr;
     QToolButton *m_btnRemove = nullptr, *m_btnUp = nullptr, *m_btnDown = nullptr, *m_btnLock = nullptr;

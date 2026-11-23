@@ -53,6 +53,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QSystemTrayIcon>
@@ -504,31 +505,65 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     m_layoutSaveTimer->setInterval(400);
     connect(m_layoutSaveTimer, &QTimer::timeout, this, &MainWindow::saveDockLayout);
 
-    QSettings qs("TikStream", "UI2");
-    const QByteArray savedGeo = qs.value("geometry").toByteArray();
-    const QByteArray savedState = qs.value("state").toByteArray();
+    const QString layoutIni = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/layout.ini";
+    QSettings iniQs(layoutIni, QSettings::IniFormat);
+    QSettings regQs("TikStream", "UI2");
+    const bool useIni = !iniQs.value("state").toByteArray().isEmpty() || !iniQs.value("geometry").toByteArray().isEmpty();
+    QSettings &loadQs = useIni ? iniQs : regQs;
+
+    const QByteArray savedGeo = loadQs.value("geometry").toByteArray();
+    const QByteArray savedState = loadQs.value("state").toByteArray();
     if (!savedGeo.isEmpty()) restoreGeometry(savedGeo);
-    const bool hadState = !savedState.isEmpty() && restoreState(savedState);
-    if (!hadState && !qs.value("compactLayoutV1").toBool()) arrangeDocks(false);
+    const bool hadState = !savedState.isEmpty() && (restoreState(savedState, 1) || restoreState(savedState));
+    if (!hadState && !loadQs.value("compactLayoutV1").toBool()) arrangeDocks(false);
     if (hadState) m_dualDockPositioned = true;
+
+    QHash<QString, QByteArray> savedDockGeos;
+    QHash<QString, QSize> savedDockSizes;
+    installEventFilter(this);
     for (auto *dock : findChildren<QDockWidget *>()) {
-        if (dock->isFloating()) {
-            const QByteArray dg = qs.value("dockGeo/" + dock->objectName()).toByteArray();
-            if (!dg.isEmpty()) dock->restoreGeometry(dg);
+        const QString name = dock->objectName();
+        if (!name.isEmpty()) {
+            const QByteArray dg = loadQs.value("dockGeo/" + name).toByteArray();
+            if (!dg.isEmpty()) {
+                savedDockGeos.insert(name, dg);
+                if (dock->isFloating()) dock->restoreGeometry(dg);
+            }
+            const QSize ds = loadQs.value("dockSize/" + name).toSize();
+            if (ds.isValid() && ds.width() > 40 && ds.height() > 40) savedDockSizes.insert(name, ds);
         }
-        auto schedSave = [this] { if (m_layoutSaveTimer && !m_loading) m_layoutSaveTimer->start(); };
+        dock->installEventFilter(this);
+        auto schedSave = [this] { if (m_layoutReady && m_layoutSaveTimer && !m_loading) m_layoutSaveTimer->start(); };
         connect(dock, &QDockWidget::dockLocationChanged, this, [schedSave](Qt::DockWidgetArea) { schedSave(); });
         connect(dock, &QDockWidget::topLevelChanged, this, [schedSave](bool) { schedSave(); });
         connect(dock, &QDockWidget::visibilityChanged, this, [schedSave](bool) { schedSave(); });
     }
-    QTimer::singleShot(0, this, [this] {
+    QTimer::singleShot(0, this, [this, savedDockGeos, savedDockSizes] {
+        QList<QDockWidget *> hDocks, vDocks;
+        QList<int> hSizes, vSizes;
         for (auto *dock : findChildren<QDockWidget *>()) {
-            if (dock->isFloating() && dock->isVisible()) {
-                ensureDockOnScreen(dock);
-                applyDarkTitleBar(dock);
+            const QString name = dock->objectName();
+            if (dock->isFloating()) {
+                if (savedDockGeos.contains(name)) dock->restoreGeometry(savedDockGeos.value(name));
+                if (dock->isVisible()) {
+                    ensureDockOnScreen(dock);
+                    applyDarkTitleBar(dock);
+                }
+            } else if (dock->isVisible() && savedDockSizes.contains(name)) {
+                const QSize ds = savedDockSizes.value(name);
+                const auto area = dockWidgetArea(dock);
+                if (area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea) {
+                    hDocks.append(dock);
+                    hSizes.append(ds.width());
+                }
+                vDocks.append(dock);
+                vSizes.append(ds.height());
             }
         }
+        if (!hDocks.isEmpty()) resizeDocks(hDocks, hSizes, Qt::Horizontal);
+        if (!vDocks.isEmpty()) resizeDocks(vDocks, vSizes, Qt::Vertical);
     });
+    QTimer::singleShot(500, this, [this] { m_layoutReady = true; });
 
     for (const auto &v : sources()) uploadRaster(v.toObject());
     refreshCaptureList();
@@ -4229,6 +4264,9 @@ void MainWindow::showUpdateDialog(const QJsonObject &info)
                 laterBtn->setEnabled(true);
                 return;
             }
+            saveDockLayout();
+            pushSettings();
+            m_reallyQuit = true;
             const auto r = EngineHost::instance().callObj("installUpdate");
             if (r.contains("error")) {
                 QMessageBox::warning(&dlg, "Update", r["error"].toString());
@@ -4248,6 +4286,9 @@ void MainWindow::showUpdateDialog(const QJsonObject &info)
         }
         const auto st = EngineHost::instance().callObj("updateStatus");
         if (st["ready"].toBool()) {
+            saveDockLayout();
+            pushSettings();
+            m_reallyQuit = true;
             const auto r = EngineHost::instance().callObj("installUpdate");
             if (r.contains("error")) { QMessageBox::warning(&dlg, "Update", r["error"].toString()); return; }
             dlg.accept();
@@ -4482,19 +4523,53 @@ void MainWindow::ensureDockOnScreen(QDockWidget *dock)
     }
 }
 
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (m_layoutReady && m_layoutSaveTimer && !m_loading) {
+        const auto t = event->type();
+        if (watched == this) {
+            if (t == QEvent::Resize || t == QEvent::Move || t == QEvent::WindowStateChange)
+                m_layoutSaveTimer->start();
+        } else if (qobject_cast<QDockWidget *>(watched)) {
+            if (t == QEvent::Resize || t == QEvent::Move)
+                m_layoutSaveTimer->start();
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::saveDockLayout()
 {
     if (QCoreApplication::arguments().contains("--test")) return;
-    QSettings qs("TikStream", "UI2");
-    qs.setValue("geometry", saveGeometry());
-    qs.setValue("state", saveState());
-    qs.setValue("compactLayoutV1", true);
-    for (auto *dock : findChildren<QDockWidget *>()) {
-        if (dock->objectName().isEmpty()) continue;
-        if (dock->isFloating()) qs.setValue("dockGeo/" + dock->objectName(), dock->saveGeometry());
-        else qs.remove("dockGeo/" + dock->objectName());
-    }
-    qs.sync();
+    const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(appData);
+    QSettings iniQs(appData + "/layout.ini", QSettings::IniFormat);
+    QSettings regQs("TikStream", "UI2");
+
+    const QByteArray geo = saveGeometry();
+    const QByteArray st = saveState(1);
+    const auto docks = findChildren<QDockWidget *>();
+
+    auto writeAll = [&](QSettings &qs) {
+        qs.setValue("geometry", geo);
+        qs.setValue("state", st);
+        qs.setValue("compactLayoutV1", true);
+        for (auto *dock : docks) {
+            const QString name = dock->objectName();
+            if (name.isEmpty()) continue;
+            if (dock->isFloating()) {
+                qs.setValue("dockGeo/" + name, dock->saveGeometry());
+                qs.remove("dockSize/" + name);
+            } else {
+                qs.remove("dockGeo/" + name);
+                if (dock->isVisible() && dock->width() > 40 && dock->height() > 40)
+                    qs.setValue("dockSize/" + name, dock->size());
+            }
+        }
+        qs.sync();
+    };
+    writeAll(iniQs);
+    writeAll(regQs);
 }
 
 void MainWindow::syncDualPreviewDock()
@@ -4524,7 +4599,7 @@ void MainWindow::syncDualPreviewDock()
 void MainWindow::closeEvent(QCloseEvent *e)
 {
     if (!m_reallyQuit && m_s["minimizeToTray"].toBool(false) && m_tray && m_tray->isVisible()) {
-        saveDockLayout();
+        if (m_layoutReady) saveDockLayout();
         hide();
         e->ignore();
         return;
@@ -4539,6 +4614,6 @@ void MainWindow::closeEvent(QCloseEvent *e)
     m_statsTimer->stop();
     m_levelsTimer->stop();
     pushSettings();
-    saveDockLayout();
+    if (m_layoutReady) saveDockLayout();
     e->accept();
 }

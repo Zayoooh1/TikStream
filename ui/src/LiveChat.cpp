@@ -583,11 +583,15 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_connection = new QPushButton("Pause", this);
     auto *refresh = new QPushButton("Refresh", this);
     refresh->setToolTip("Reconnect TikTok and Kick chat immediately");
+    m_autoScrollBtn = new QPushButton(this);
+    m_autoScrollBtn->setCheckable(true);
+    m_autoScrollBtn->setToolTip("Automatically scroll to the newest chat messages");
     auto *open = new QPushButton("Open LIVE", this);
     auto *actions = new QHBoxLayout;
     actions->setSpacing(5);
     actions->addWidget(m_connection);
     actions->addWidget(refresh);
+    actions->addWidget(m_autoScrollBtn);
     actions->addWidget(open);
 
     auto *zoomOut = new QPushButton("-", this);
@@ -640,6 +644,9 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     connect(m_zoomReset, &QPushButton::clicked, this, [this] { setChatScale(1.0); });
     const qreal savedScale = QSettings("TikStream", "UI2").value("chatScale", 1.0).toDouble();
     setChatScale(savedScale);
+    const bool savedAutoScroll = QSettings("TikStream", "UI2").value("chatAutoScroll", true).toBool();
+    setAutoScroll(savedAutoScroll);
+    connect(m_autoScrollBtn, &QPushButton::toggled, this, &LiveChat::setAutoScroll);
 
     connect(m_accountEdit, &QLineEdit::returnPressed, this, &LiveChat::applyAccountFromInput);
     connect(connectBtn, &QPushButton::clicked, this, &LiveChat::applyAccountFromInput);
@@ -756,19 +763,35 @@ void LiveChat::keyPressEvent(QKeyEvent *event)
 void LiveChat::setChatScale(qreal scale)
 {
     const qreal clamped = std::round(std::clamp(scale, 0.75, 2.20) * 20.0) / 20.0;
-    const auto *scroll = m_messages ? m_messages->verticalScrollBar() : nullptr;
-    const bool follow = !scroll || scroll->value() >= scroll->maximum() - 2;
     m_chatScale = clamped;
     if (m_delegate) m_delegate->setScale(m_chatScale);
     if (m_zoomReset) m_zoomReset->setText(QStringLiteral("%1%").arg(int(std::lround(m_chatScale * 100.0))));
     if (m_messages) {
         m_messages->doItemsLayout();
         m_messages->viewport()->update();
-        if (follow) m_messages->scrollToBottom();
+        if (m_autoScroll) m_messages->scrollToBottom();
     }
     if (!QCoreApplication::arguments().contains("--test")) {
         QSettings qs("TikStream", "UI2");
         qs.setValue("chatScale", m_chatScale);
+    }
+}
+
+void LiveChat::setAutoScroll(bool enabled)
+{
+    m_autoScroll = enabled;
+    if (m_autoScrollBtn) {
+        QSignalBlocker blocked(m_autoScrollBtn);
+        m_autoScrollBtn->setChecked(m_autoScroll);
+        m_autoScrollBtn->setText(m_autoScroll ? QStringLiteral("Auto-scroll: ON") : QStringLiteral("Auto-scroll: OFF"));
+        m_autoScrollBtn->setStyleSheet(m_autoScroll
+            ? QStringLiteral("background: rgba(74, 222, 128, 34); border: 1px solid rgba(74, 222, 128, 120); color: #86efac;")
+            : QString());
+    }
+    if (m_autoScroll && m_messages) m_messages->scrollToBottom();
+    if (!QCoreApplication::arguments().contains("--test")) {
+        QSettings qs("TikStream", "UI2");
+        qs.setValue("chatAutoScroll", m_autoScroll);
     }
 }
 
@@ -1169,8 +1192,6 @@ void LiveChat::readKickEvents()
 
 void LiveChat::appendMessages(const QJsonArray &messages)
 {
-    const auto *scroll = m_messages->verticalScrollBar();
-    const bool follow = scroll->value() >= scroll->maximum() - 2;
     bool chatChanged = false;
     bool giftChanged = false;
     for (const auto &value : messages) {
@@ -1229,7 +1250,7 @@ void LiveChat::appendMessages(const QJsonArray &messages)
     }
     if (chatChanged) {
         m_messages->setUpdatesEnabled(true);
-        if (follow) m_messages->scrollToBottom();
+        if (m_autoScroll) m_messages->scrollToBottom();
     }
     if (chatChanged || giftChanged) notifyOverlay();
 }
@@ -1317,12 +1338,10 @@ void LiveChat::startEmote(const QString &address)
         const auto pixmap = QPixmap::fromImage(reader.read());
         if (pixmap.isNull()) return;
         m_emotes.insert(address, new QPixmap(pixmap));
-        const auto *scroll = m_messages ? m_messages->verticalScrollBar() : nullptr;
-        const bool follow = !scroll || scroll->value() >= scroll->maximum() - 2;
         if (m_messages) {
             m_messages->doItemsLayout();
             m_messages->viewport()->update();
-            if (follow) m_messages->scrollToBottom();
+            if (m_autoScroll) m_messages->scrollToBottom();
         }
         notifyOverlay();
     });

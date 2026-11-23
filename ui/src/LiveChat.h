@@ -54,6 +54,7 @@ private:
     void applyAccountFromInput();
     void applyKickAccountFromInput();
     void setChatScale(qreal scale);
+    void setAutoScroll(bool enabled);
     void updateGiftStats();
     void updateCombinedStatus();
     void notifyOverlay();
@@ -76,7 +77,9 @@ private:
     QListWidget *m_messages;
     ChatMessageDelegate *m_delegate = nullptr;
     QPushButton *m_zoomReset = nullptr;
+    QPushButton *m_autoScrollBtn = nullptr;
     qreal m_chatScale = 1.0;
+    bool m_autoScroll = true;
     GiftNotifications *m_gifts;
     QPushButton *m_connection;
     QString m_account;
