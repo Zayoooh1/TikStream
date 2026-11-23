@@ -51,7 +51,8 @@ public sealed class AudioEngine : IDisposable
 
     public void SyncDevices(AppSettings settings)
     {
-        var audible = settings.ActiveScene?.Items.Where(i => i.Visible).Select(i => i.SourceId).ToHashSet();
+        var audibleV = settings.ActiveScene?.Items.Where(i => i.Visible).Select(i => i.SourceId).ToHashSet();
+        var audibleH = settings.ActiveScene?.Items.Where(i => i.EffectiveDualVisible).Select(i => i.SourceId).ToHashSet();
         lock (_lock)
         {
             var wanted = settings.Sources.Where(d => !d.IsVisual).ToDictionary(d => d.Id);
@@ -89,7 +90,10 @@ public sealed class AudioEngine : IDisposable
                 }
                 if (_inputs.TryGetValue(d.Id, out var inp))
                 {
-                    inp.SetVolume(!d.Muted && (d.GlobalAudio == true || audible?.Contains(d.Id) == true) ? d.Volume : 0);
+                    bool onV = !d.Muted && (d.GlobalAudio == true ? (d.AudioVertical ?? true) : audibleV?.Contains(d.Id) == true);
+                    bool onH = !d.Muted && (d.GlobalAudio == true ? (d.AudioHorizontal ?? true) : audibleH?.Contains(d.Id) == true);
+                    inp.SetVolume((onV || onH) ? d.Volume : 0);
+                    inp.SetRouting(onV, onH);
                     inp.SetMonitorMode(d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
@@ -99,10 +103,22 @@ public sealed class AudioEngine : IDisposable
             {
                 if (_inputs.TryGetValue(d.Id, out var inp))
                 {
-                    inp.SetVolume(!d.Muted && !d.BrowserMuted && (audible?.Contains(d.Id) == true) ? d.Volume : 0);
+                    bool onV = !d.Muted && !d.BrowserMuted && (audibleV?.Contains(d.Id) == true);
+                    bool onH = !d.Muted && !d.BrowserMuted && (audibleH?.Contains(d.Id) == true);
+                    inp.SetVolume((onV || onH) ? d.Volume : 0);
+                    inp.SetRouting(onV, onH);
                     inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                }
+            }
+            foreach (var d in settings.Sources.Where(x => x.Type == SourceType.Media))
+            {
+                if (_inputs.TryGetValue(d.Id, out var inp))
+                {
+                    bool onV = !d.Muted && (audibleV?.Contains(d.Id) == true);
+                    bool onH = !d.Muted && (audibleH?.Contains(d.Id) == true);
+                    inp.SetRouting(onV, onH);
                 }
             }
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.AlertBox))
@@ -112,7 +128,10 @@ public sealed class AudioEngine : IDisposable
                     inp = Input.FromPush(d.Name, _mixer, isAlert: true);
                     _inputs[d.Id] = inp;
                 }
-                inp.SetVolume(!d.Muted ? d.Volume : 0);
+                bool onV = !d.Muted && (audibleV?.Contains(d.Id) != false);
+                bool onH = !d.Muted && (audibleH?.Contains(d.Id) != false);
+                inp.SetVolume((onV || onH) ? d.Volume : 0);
+                inp.SetRouting(onV, onH);
                 inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
                 inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                     d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
@@ -186,8 +205,8 @@ public sealed class AudioEngine : IDisposable
         lock (_lock) return _inputs.Select(kv => (kv.Key, kv.Value.Name)).ToList();
     }
 
-    /// <summary>Reads exactly <paramref name="frames"/> interleaved stereo frames into the buffer, optionally returning per-source tapped samples.</summary>
-    public void Read(float[] buffer, int frames, Dictionary<string, float[]>? perSource = null)
+    /// <summary>Reads exactly <paramref name="frames"/> interleaved stereo frames into <paramref name="buffer"/> (Vertical mix), optionally producing <paramref name="horizBuffer"/> (Horizontal mix) and per-source tapped samples.</summary>
+    public void Read(float[] buffer, int frames, Dictionary<string, float[]>? perSource = null, float[]? horizBuffer = null)
     {
         int samples = frames * Channels;
         bool hasMonitor = false;
@@ -196,6 +215,37 @@ public sealed class AudioEngine : IDisposable
             foreach (var i in _inputs.Values) i.TrimLatency();
             int read = _mixer.Read(buffer, 0, samples);
             if (read < samples) Array.Clear(buffer, read, samples - read);
+
+            bool splitRouting = false;
+            foreach (var inp in _inputs.Values)
+            {
+                if (!inp.RouteVertical || !inp.RouteHorizontal) { splitRouting = true; break; }
+            }
+            if (splitRouting)
+            {
+                if (_monitorTmp.Length < samples) { _monitorMix = new float[samples]; _monitorTmp = new float[samples]; _monitorBytes = new byte[samples * 4]; }
+                Array.Clear(buffer, 0, samples);
+                if (horizBuffer != null) Array.Clear(horizBuffer, 0, samples);
+                foreach (var inp in _inputs.Values)
+                {
+                    if (inp.IsMonitorOnly) continue;
+                    if (!inp.RouteVertical && (horizBuffer == null || !inp.RouteHorizontal)) continue;
+                    inp.CopyLastSamples(_monitorTmp, samples);
+                    if (inp.RouteVertical)
+                    {
+                        for (int k = 0; k < samples; k++) buffer[k] += _monitorTmp[k];
+                    }
+                    if (horizBuffer != null && inp.RouteHorizontal)
+                    {
+                        for (int k = 0; k < samples; k++) horizBuffer[k] += _monitorTmp[k];
+                    }
+                }
+            }
+            else if (horizBuffer != null)
+            {
+                Array.Copy(buffer, 0, horizBuffer, 0, samples);
+            }
+
             if (perSource != null)
             {
                 foreach (var (id, buf) in perSource)
@@ -223,6 +273,14 @@ public sealed class AudioEngine : IDisposable
         {
             float v = buffer[i];
             if (v > 1f) buffer[i] = 1f; else if (v < -1f) buffer[i] = -1f;
+        }
+        if (horizBuffer != null)
+        {
+            for (int i = 0; i < samples; i++)
+            {
+                float v = horizBuffer[i];
+                if (v > 1f) horizBuffer[i] = 1f; else if (v < -1f) horizBuffer[i] = -1f;
+            }
         }
     }
 
@@ -390,8 +448,17 @@ public sealed class AudioEngine : IDisposable
         public bool IsDevice => _capture != null;
         public bool IsAlert { get; private init; }
         public bool IsMonitored { get; private set; }
+        public bool IsMonitorOnly => _tap.SuppressOutput;
+        public bool RouteVertical { get; private set; } = true;
+        public bool RouteHorizontal { get; private set; } = true;
         public volatile bool Stopped;
         public float Peak;
+
+        public void SetRouting(bool vertical, bool horizontal)
+        {
+            RouteVertical = vertical;
+            RouteHorizontal = horizontal;
+        }
 
         public void SetMonitorMode(string? mode)
         {

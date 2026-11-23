@@ -683,6 +683,25 @@ void MainWindow::buildMenu()
                            "<b>TikStream</b><br>Vertical and horizontal RTMP streaming and recording.<br><br>"
                            "Desktop Duplication → D3D11 → NVENC (zero-copy)<br>GPU: " + m_gpu);
     });
+
+    // Keep top-level menu popups on the same monitor as the clicked menu bar button (fixes multi-monitor + custom QT_SCALE_FACTOR misplacement)
+    for (QMenu *m : {file, edit, view, help}) {
+        connect(m, &QMenu::aboutToShow, this, [this, m] {
+            QTimer::singleShot(0, m, [this, m] {
+                if (!m->isVisible() || !menuBar()) return;
+                const QRect ar = menuBar()->actionGeometry(m->menuAction());
+                QPoint p = menuBar()->mapToGlobal(ar.bottomLeft());
+                QScreen *scr = screen() ? screen() : QGuiApplication::screenAt(p);
+                if (scr) {
+                    const QRect av = scr->availableGeometry();
+                    const QSize sz = m->sizeHint().expandedTo(m->size());
+                    p.setX(std::clamp(p.x(), av.left(), std::max(av.left(), av.right() - sz.width())));
+                    p.setY(std::clamp(p.y(), av.top(), std::max(av.top(), av.bottom() - sz.height())));
+                }
+                m->move(p);
+            });
+        });
+    }
 }
 
 void MainWindow::buildCentral()
@@ -2375,9 +2394,15 @@ void MainWindow::rebuildSourceList()
             return b;
         };
 
-        if (!info.audio) {
-            auto *btnV = makeVisBtn(visV ? "vis-v" : "vis-v-off", "Pokaż / ukryj na Vertical Preview (9:16)");
-            auto *btnH = makeVisBtn(visH ? "vis-h" : "vis-h-off", "Pokaż / ukryj na Horizontal Preview (16:9)");
+        {
+            const QString tipV = info.audio
+                ? QStringLiteral("Enable / mute audio on Vertical (9:16)")
+                : QStringLiteral("Show / hide on Vertical Preview (9:16)");
+            const QString tipH = info.audio
+                ? QStringLiteral("Enable / mute audio on Horizontal (16:9)")
+                : QStringLiteral("Show / hide on Horizontal Preview (16:9)");
+            auto *btnV = makeVisBtn(visV ? "vis-v" : "vis-v-off", tipV);
+            auto *btnH = makeVisBtn(visH ? "vis-h" : "vis-h-off", tipH);
             connect(btnV, &QToolButton::clicked, this, [this, itemId, btnV] {
                 QJsonObject cur = itemById(itemId);
                 if (cur.isEmpty()) return;
@@ -2403,22 +2428,6 @@ void MainWindow::rebuildSourceList()
             });
             hl->addWidget(btnV);
             hl->addWidget(btnH);
-        } else {
-            auto *btnA = makeVisBtn(visV ? "eye" : "eye-off", "Włącz / wycisz źródło audio w scenie");
-            connect(btnA, &QToolButton::clicked, this, [this, itemId, btnA] {
-                QJsonObject cur = itemById(itemId);
-                if (cur.isEmpty()) return;
-                const bool next = !cur["visible"].toBool(true);
-                cur["visible"] = next;
-                cur["dualVisible"] = next;
-                setItem(cur);
-                btnA->setIcon(themedIcon(next ? "eye" : "eye-off"));
-                rebuildMixer();
-                updateSelection();
-                applySoon();
-            });
-            hl->addWidget(btnA);
-            hl->addSpacing(24);
         }
 
         auto *typeIcon = new QLabel(row);
@@ -2601,26 +2610,56 @@ void MainWindow::loadProperties()
 
 void MainWindow::rebuildMixer()
 {
+    auto detectPlatform = [](const QString &url, const QString &customName, const QString &fallback) -> QString {
+        const QString cn = customName.trimmed();
+        if (!cn.isEmpty() && cn.compare("Second Channel", Qt::CaseInsensitive) != 0) {
+            return cn.left(1).toUpper() + cn.mid(1);
+        }
+        const QString u = url.toLower();
+        if (u.contains("tiktok")) return QStringLiteral("TikTok");
+        if (u.contains("kick") || u.contains("live-video.net")) return QStringLiteral("Kick");
+        if (u.contains("twitch")) return QStringLiteral("Twitch");
+        if (u.contains("youtube") || u.contains("youtu.be")) return QStringLiteral("YouTube");
+        return fallback;
+    };
+    const QString vertPlatform = detectPlatform(m_s["serverUrl"].toString(), QString(), QStringLiteral("TikTok"));
+    const QString horizPlatform = detectPlatform(m_s["secondServerUrl"].toString(), m_s["secondStreamName"].toString(), QStringLiteral("Horizontal"));
+
     QStringList sig;
-    QHash<QString, bool> sceneAudio;
+    QHash<QString, bool> sceneAudioV, sceneAudioH;
     for (const auto &v : activeScene()["items"].toArray()) {
         const auto item = v.toObject();
         const auto id = item["sourceId"].toString();
-        sceneAudio[id] = sceneAudio.value(id) || item["visible"].toBool(true) || itemDualVisible(item);
+        sceneAudioV[id] = sceneAudioV.value(id) || item["visible"].toBool(true);
+        sceneAudioH[id] = sceneAudioH.value(id) || itemDualVisible(item);
     }
+    auto sourceRouting = [&](const QJsonObject &s) -> QPair<bool, bool> {
+        const QString id = s["id"].toString();
+        if (s["globalAudio"].toBool()) {
+            return {s.value("audioVertical").toBool(true), s.value("audioHorizontal").toBool(true)};
+        }
+        if (sceneAudioV.contains(id) || sceneAudioH.contains(id)) {
+            return {sceneAudioV.value(id), sceneAudioH.value(id)};
+        }
+        return {true, true};
+    };
+
     QList<QJsonObject> audio;
     for (const auto &v : sources()) {
         const auto s = v.toObject();
         const QString t = s["type"].toString();
         const auto id = s["id"].toString();
         const bool sceneDevice = sourceTypeInfo(t).audio && !s["globalAudio"].toBool();
-        if (sceneDevice && !sceneAudio.contains(id)) continue;
+        if (sceneDevice && !sceneAudioV.contains(id)) continue;
         if (sourceTypeInfo(t).audio || t == "Media" || t == "AlertBox" || t == "Browser") {
             audio << s;
-            sig << s["id"].toString() + s["name"].toString() + s["deviceId"].toString() + (s["muted"].toBool() ? "m" : "")
-                + (sceneDevice && !sceneAudio.value(id) ? "h" : "");
+            const auto [onV, onH] = sourceRouting(s);
+            sig << s["id"].toString() + s["name"].toString() + s["deviceId"].toString()
+                + (s["muted"].toBool() ? "m" : "")
+                + (onV ? "V" : "v") + (onH ? "H" : "h");
         }
     }
+    sig << vertPlatform << horizPlatform;
     const QString signature = sig.join(';');
     if (signature == m_mixerSignature && !m_strips.isEmpty()) return;
     m_mixerSignature = signature;
@@ -2704,6 +2743,29 @@ void MainWindow::rebuildMixer()
         });
         if (s["globalAudio"].toBool()) {
             menu->addSeparator();
+            const bool curV = s.value("audioVertical").toBool(true);
+            const bool curH = s.value("audioHorizontal").toBool(true);
+            auto *actV = menu->addAction(QStringLiteral("Hear on %1 (Vertical)").arg(vertPlatform));
+            actV->setCheckable(true);
+            actV->setChecked(curV);
+            connect(actV, &QAction::toggled, this, [this, id](bool on) {
+                QJsonObject src = sourceById(id);
+                src["audioVertical"] = on;
+                setSource(src);
+                applySoon();
+                QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
+            });
+            auto *actH = menu->addAction(QStringLiteral("Hear on %1 (Horizontal)").arg(horizPlatform));
+            actH->setCheckable(true);
+            actH->setChecked(curH);
+            connect(actH, &QAction::toggled, this, [this, id](bool on) {
+                QJsonObject src = sourceById(id);
+                src["audioHorizontal"] = on;
+                setSource(src);
+                applySoon();
+                QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
+            });
+            menu->addSeparator();
             menu->addAction(themedIcon("trash"), "Remove Audio Source", this, [this, id] {
                 QJsonArray arr = sources();
                 for (int i = 0; i < arr.size(); ++i)
@@ -2714,9 +2776,41 @@ void MainWindow::rebuildMixer()
             });
         }
         gear->setMenu(menu);
+
+        const auto [onV, onH] = sourceRouting(s);
+        QLabel *routeBadge = nullptr;
+        if (onV != onH || (!onV && !onH)) {
+            routeBadge = new QLabel;
+            if (onV && !onH) {
+                routeBadge->setText(QStringLiteral("%1 only").arg(vertPlatform));
+                routeBadge->setToolTip(QStringLiteral("Audio is heard ONLY on %1 (Vertical 9:16)").arg(vertPlatform));
+                routeBadge->setStyleSheet("background: rgba(254, 44, 85, 38); border: 1px solid rgba(37, 244, 238, 140); border-radius: 4px; padding: 1px 6px; color: #25f4ee; font-size: 10px; font-weight: 700;");
+            } else if (!onV && onH) {
+                routeBadge->setText(QStringLiteral("%1 only").arg(horizPlatform));
+                routeBadge->setToolTip(QStringLiteral("Audio is heard ONLY on %1 (Horizontal 16:9)").arg(horizPlatform));
+                const QString lp = horizPlatform.toLower();
+                if (lp.contains("kick"))
+                    routeBadge->setStyleSheet("background: rgba(83, 252, 24, 34); border: 1px solid rgba(83, 252, 24, 150); border-radius: 4px; padding: 1px 6px; color: #53fc18; font-size: 10px; font-weight: 700;");
+                else if (lp.contains("twitch"))
+                    routeBadge->setStyleSheet("background: rgba(145, 70, 255, 42); border: 1px solid rgba(169, 112, 255, 160); border-radius: 4px; padding: 1px 6px; color: #c49bff; font-size: 10px; font-weight: 700;");
+                else
+                    routeBadge->setStyleSheet("background: rgba(96, 165, 250, 38); border: 1px solid rgba(96, 165, 250, 150); border-radius: 4px; padding: 1px 6px; color: #93c5fd; font-size: 10px; font-weight: 700;");
+            } else {
+                routeBadge->setText(QStringLiteral("Off (V+H)"));
+                routeBadge->setToolTip(QStringLiteral("Audio disabled on both Vertical and Horizontal"));
+                routeBadge->setStyleSheet("background: rgba(239, 68, 68, 34); border: 1px solid rgba(239, 68, 68, 120); border-radius: 4px; padding: 1px 6px; color: #fca5a5; font-size: 10px; font-weight: 700;");
+            }
+            if (m_mixerVertical) routeBadge->setAlignment(Qt::AlignCenter);
+        }
+
         head->addWidget(ic);
-        if (m_mixerVertical) v->addWidget(name);
-        else head->addWidget(name, 1);
+        if (m_mixerVertical) {
+            v->addWidget(name);
+            if (routeBadge) v->addWidget(routeBadge);
+        } else {
+            head->addWidget(name, 1);
+            if (routeBadge) head->addWidget(routeBadge);
+        }
         head->addWidget(db);
         head->addWidget(gear);
         v->addLayout(head);
@@ -2731,7 +2825,7 @@ void MainWindow::rebuildMixer()
         auto *mute = toolBtn(s["muted"].toBool() ? "speaker-off" : "speaker", "Mute");
         mute->setCheckable(true);
         mute->setChecked(s["muted"].toBool());
-        const bool hiddenInScene = sourceTypeInfo(type).audio && !s["globalAudio"].toBool() && !sceneAudio.value(id);
+        const bool hiddenInScene = !onV && !onH;
         meter->setMuted(mute->isChecked() || hiddenInScene);
         auto *slider = hslider(0, 200);
         if (m_mixerVertical) {

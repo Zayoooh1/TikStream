@@ -60,6 +60,10 @@ public sealed record SourceDef
     public string MonitorMode { get; set; } = "Off"; // "Off" | "MonitorOnly" | "MonitorAndOutput"
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? GlobalAudio { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AudioVertical { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AudioHorizontal { get; set; }
 
     // LIVE chat overlay
     public bool ShowChat { get; set; } = true;

@@ -90,6 +90,8 @@ public sealed unsafe class StreamEngine : IDisposable
     private VideoEncoder? _recVenc;    // dedicated encoder when RecordCodec != h264 or DualCanvas is enabled
     private Compositor? _dualComp;     // secondary horizontal/custom canvas for simultaneous dual-canvas recording
     private AudioEncoder? _aenc;
+    private AudioEncoder? _aencHoriz;
+    private readonly HashSet<string> _horizOutputs = new();
     private readonly object _audioEncLock = new();
     private readonly List<(string SourceId, string Title, AudioEncoder Enc, float[] Buf)> _extraAudio = new();
     private volatile Dictionary<string, float[]>? _extraAudioMap;
@@ -352,7 +354,8 @@ public sealed unsafe class StreamEngine : IDisposable
             {
                 var name2 = string.IsNullOrWhiteSpace(_scene.SecondStreamName) ? "Second Channel" : _scene.SecondStreamName.Trim();
                 if (name2 == "Stream" || name2 == "File") name2 = "Stream 2";
-                AddOutput(new StreamOutput(name2, url2, _venc!, _aenc!, _fps, opts, RequestKeyframe));
+                _horizOutputs.Add(name2);
+                AddOutput(new StreamOutput(name2, url2, _venc!, _aencHoriz ?? _aenc!, _fps, opts, RequestKeyframe));
             }
         }
         _streamStart = _clock.ElapsedTicks;
@@ -475,7 +478,8 @@ public sealed unsafe class StreamEngine : IDisposable
                 _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
             var hName = recordVertical ? "FileHorizontal" : "File";
             var hPath = recordVertical ? Path.Combine(folder, $"TikStream {DateTime.Now:yyyy-MM-dd HH-mm-ss} (Horizontal).{ext}") : path;
-            AddOutput(new StreamOutput(hName, hPath, _recVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, recordVertical ? null : extraForOutput));
+            _horizOutputs.Add(hName);
+            AddOutput(new StreamOutput(hName, hPath, _recVenc, _aencHoriz ?? _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, recordVertical ? null : extraForOutput));
         }
         _recordStart = _clock.ElapsedTicks;
     }
@@ -523,6 +527,7 @@ public sealed unsafe class StreamEngine : IDisposable
         _venc = new VideoEncoder(Gpu, _comp.Width, _comp.Height, new VideoEncoderOptions(
             _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact), globalHeader: true);
         var aenc = new AudioEncoder(s.AudioBitrateKbps, globalHeader: true);
+        var aencHoriz = new AudioEncoder(s.AudioBitrateKbps, globalHeader: true);
         _encStartTicks = _clock.ElapsedTicks;
         _lastPts = -1;
         _encodedFrames = 0;
@@ -531,6 +536,7 @@ public sealed unsafe class StreamEngine : IDisposable
         {
             _encStartSamples = (long)((double)_encStartTicks * AudioEngine.SampleRate / Stopwatch.Frequency);
             _aenc = aenc;
+            _aencHoriz = aencHoriz;
             _encRun = true;
         }
         Log.Info("Encoders started.");
@@ -548,6 +554,7 @@ public sealed unsafe class StreamEngine : IDisposable
         var o = _outputs.FirstOrDefault(x => x.Name == name);
         if (o == null) return;
         _outputs = _outputs.Where(x => x != o).ToArray();
+        bool wasHoriz = _horizOutputs.Remove(name);
         if (name is "File" or "FileHorizontal")
         {
             bool stillRecording = _outputs.Any(x => x.Name is "File" or "FileHorizontal");
@@ -567,19 +574,21 @@ public sealed unsafe class StreamEngine : IDisposable
                 lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
             }
         }
-        if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o);
+        if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o, flushToHoriz: wasHoriz);
         Task.Run(o.Dispose);
         Log.Info($"=== STOP: {name} ({reason})");
     }
 
-    private void TeardownEncoders(StreamOutput? flushTo = null)
+    private void TeardownEncoders(StreamOutput? flushTo = null, bool flushToHoriz = false)
     {
-        AudioEncoder? aenc;
+        AudioEncoder? aenc, aencHoriz;
         lock (_audioEncLock)
         {
             _encRun = false;
             aenc = _aenc;
             _aenc = null;
+            aencHoriz = _aencHoriz;
+            _aencHoriz = null;
             DisposeExtraAudioLocked(flushTo);
         }
         if (flushTo != null && _venc != null && aenc != null)
@@ -587,12 +596,27 @@ public sealed unsafe class StreamEngine : IDisposable
             try
             {
                 _venc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, flushTo));
-                aenc.Flush(p => DeliverTo(p, StreamOutput.AudioIndex, flushTo));
+                var flushAenc = (flushToHoriz && aencHoriz != null) ? aencHoriz : aenc;
+                flushAenc.Flush(p => DeliverTo(p, StreamOutput.AudioIndex, flushTo));
             }
             catch (Exception ex) { Log.Warn("Encoder flush: " + ex.Message); }
         }
         _venc?.Dispose(); _venc = null;
         aenc?.Dispose();
+        aencHoriz?.Dispose();
+    }
+
+    private void DeliverAudio(IntPtr p, bool horizontal)
+    {
+        var pkt = (AVPacket*)p;
+        pkt->stream_index = StreamOutput.AudioIndex;
+        foreach (var o in _outputs)
+        {
+            bool isHoriz = _horizOutputs.Contains(o.Name);
+            if (isHoriz == horizontal) o.Enqueue(pkt);
+        }
+        if (!horizontal) _replay?.Enqueue(pkt, StreamOutput.AudioIndex);
+        ffmpeg.av_packet_free(&pkt);
     }
 
     private void Deliver(IntPtr p, int streamIndex)
@@ -644,8 +668,11 @@ public sealed unsafe class StreamEngine : IDisposable
             const int encFrame = 1024; // AAC-LC frame size
             const int ch = AudioEngine.Channels;
             var stepBuf = new float[step * ch];
+            var stepBufHoriz = new float[step * ch];
             var encRing = new float[(encFrame + step) * ch];
+            var encRingHoriz = new float[(encFrame + step) * ch];
             var encOut = new float[encFrame * ch];
+            var encOutHoriz = new float[encFrame * ch];
             int encFill = 0;
 
             Dictionary<string, float[]>? lastExtraMap = null;
@@ -665,8 +692,9 @@ public sealed unsafe class StreamEngine : IDisposable
                 while (produced + step <= target && _run)
                 {
                     var extraMap = _extraAudioMap;
-                    Audio.Read(stepBuf, step, extraMap);
+                    Audio.Read(stepBuf, step, extraMap, stepBufHoriz);
                     Array.Copy(stepBuf, 0, encRing, encFill * ch, step * ch);
+                    Array.Copy(stepBufHoriz, 0, encRingHoriz, encFill * ch, step * ch);
 
                     lock (_audioEncLock)
                     {
@@ -693,10 +721,16 @@ public sealed unsafe class StreamEngine : IDisposable
                         {
                             long pts = (produced - encFill) - _encStartSamples;
                             var aenc = _aenc;
+                            var aencHoriz = _aencHoriz;
                             if (aenc != null && _encRun && pts >= 0)
                             {
                                 Array.Copy(encRing, 0, encOut, 0, encFrame * ch);
-                                aenc.Encode(encOut, pts, p => Deliver(p, StreamOutput.AudioIndex));
+                                aenc.Encode(encOut, pts, p => DeliverAudio(p, horizontal: false));
+                                if (aencHoriz != null && _horizOutputs.Count > 0)
+                                {
+                                    Array.Copy(encRingHoriz, 0, encOutHoriz, 0, encFrame * ch);
+                                    aencHoriz.Encode(encOutHoriz, pts, p => DeliverAudio(p, horizontal: true));
+                                }
                                 if (extraMap != null && extraRings.Count == _extraAudio.Count && _extraAudio.Count > 0)
                                 {
                                     for (int i = 0; i < _extraAudio.Count; i++)
@@ -711,6 +745,7 @@ public sealed unsafe class StreamEngine : IDisposable
                             if (rem > 0)
                             {
                                 Array.Copy(encRing, encFrame * ch, encRing, 0, rem * ch);
+                                Array.Copy(encRingHoriz, encFrame * ch, encRingHoriz, 0, rem * ch);
                                 if (extraMap != null && extraRings.Count == _extraAudio.Count)
                                 {
                                     for (int i = 0; i < extraRings.Count; i++)
