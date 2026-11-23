@@ -65,10 +65,21 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
             _status = Ready ? "Window minimized • last frame" : "Window minimized";
             return;
         }
+        if (Native.DwmGetWindowAttribute(_target, Native.DWMWA_CLOAKED, out int targetCloaked, 4) == 0 && targetCloaked != 0)
+        {
+            _status = Ready ? "Window hidden • last frame" : "Window hidden";
+            return;
+        }
         if (Native.DwmGetWindowAttribute(_target, Native.DWMWA_EXTENDED_FRAME_BOUNDS,
                 out Native.RECT rect, 16) != 0) return;
 
         var monitor = Native.MonitorFromWindow(_target, 2);
+        var fg = WindowCaptureRt.GetForegroundWindow();
+        if (fg != IntPtr.Zero && fg != _target && Native.MonitorFromWindow(fg, 2) == monitor)
+        {
+            _status = Ready ? "Another window active on game display • last frame" : "Switch to selected window";
+            return;
+        }
         if (IsOccludedOnSameMonitor(_target, monitor, rect))
         {
             _status = Ready ? "Window covered on same display • last frame" : "Switch to selected window";
@@ -118,24 +129,28 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
         _status = $"{Width}×{Height} • DXGI borderless";
     }
 
-    /// <summary>Returns true only if a visible, non-cloaked window above <paramref name="target"/> on the SAME monitor completely covers its bounds.</summary>
+    /// <summary>Returns true if any visible, non-cloaked, non-click-through window above <paramref name="target"/> on the SAME monitor overlaps its bounds.</summary>
     private static bool IsOccludedOnSameMonitor(IntPtr target, IntPtr targetMonitor, in Native.RECT targetRect)
     {
         if (targetRect.Right <= targetRect.Left || targetRect.Bottom <= targetRect.Top) return false;
+        const long WS_EX_TRANSPARENT = 0x00000020L;
         IntPtr cur = Native.GetWindow(target, Native.GW_HWNDPREV);
         int guard = 0;
-        while (cur != IntPtr.Zero && ++guard < 64)
+        while (cur != IntPtr.Zero && ++guard < 512)
         {
             if (Native.IsWindowVisible(cur) && !Native.IsIconic(cur))
             {
                 long exStyle = Native.GetWindowLongPtrW(cur, Native.GWL_EXSTYLE);
-                if ((exStyle & Native.WS_EX_TOOLWINDOW) == 0 &&
+                if ((exStyle & (Native.WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) == 0 &&
                     (Native.DwmGetWindowAttribute(cur, Native.DWMWA_CLOAKED, out int cloaked, 4) != 0 || cloaked == 0) &&
                     Native.MonitorFromWindow(cur, 2) == targetMonitor &&
                     Native.DwmGetWindowAttribute(cur, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out Native.RECT r, 16) == 0)
                 {
-                    if (r.Left <= targetRect.Left && r.Top <= targetRect.Top &&
-                        r.Right >= targetRect.Right && r.Bottom >= targetRect.Bottom)
+                    int interL = Math.Max(r.Left, targetRect.Left);
+                    int interT = Math.Max(r.Top, targetRect.Top);
+                    int interR = Math.Min(r.Right, targetRect.Right);
+                    int interB = Math.Min(r.Bottom, targetRect.Bottom);
+                    if (interR - interL >= 80 && interB - interT >= 80)
                         return true;
                 }
             }

@@ -661,6 +661,8 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     });
     connect(refresh, &QPushButton::clicked, this, [this] {
         m_paused = false;
+        m_messages->clear();
+        notifyOverlay();
         stopProcess();
         stopKickProcess();
         start();
