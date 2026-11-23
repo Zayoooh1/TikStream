@@ -59,6 +59,7 @@ for (;;) {
         if (!events.enterRoom(id)) return;
         pending = pending.filter(message => message.kind !== 'gift');
         emit({ type: 'clearGifts' });
+        emit({ type: 'giftStats', count: 0, diamonds: 0 });
         taps = { count: null };
         scheduleTaps();
     };
@@ -77,7 +78,10 @@ for (;;) {
     client.on(WebcastEvent.GIFT, event => {
         updateRoom(client.roomId || event.common?.roomId);
         const gift = events.gift(event);
-        if (gift) enqueue(gift);
+        if (gift) {
+            enqueue(gift);
+            emit({ type: 'giftStats', count: gift.totalGifts, diamonds: gift.totalDiamonds });
+        }
     });
     if (WebcastEvent.FOLLOW) {
         client.on(WebcastEvent.FOLLOW, event => {

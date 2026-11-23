@@ -157,6 +157,8 @@ export function classifyError(error) {
 export function liveEvents() {
     let roomId;
     let taps = null;
+    let giftTotalCount = 0;
+    let giftTotalDiamonds = 0;
     const gifts = new Set();
     const follows = new Map();
     const series = new Map();
@@ -173,6 +175,8 @@ export function liveEvents() {
             if (!id || id === roomId) return false;
             roomId = id;
             taps = null;
+            giftTotalCount = 0;
+            giftTotalDiamonds = 0;
             gifts.clear();
             follows.clear();
             series.clear();
@@ -244,7 +248,20 @@ export function liveEvents() {
             const previous = bursts.get(key);
             const total = (previous && (continuing || now - previous.time <= 6000) ? previous.count : 0) + count;
             remember(bursts, key, { count: total, time: now });
-            return { ...sender, kind: 'gift', senderId, text: `🎁 ${name} ×${total}` };
+            const unitDiamonds = toPositiveInt(details?.diamondCount ?? details?.diamond_count ?? event?.diamondCount) || 0;
+            giftTotalCount += count;
+            giftTotalDiamonds += unitDiamonds * count;
+            return {
+                ...sender,
+                kind: 'gift',
+                senderId,
+                text: `🎁 ${name} ×${total}`,
+                totalGifts: giftTotalCount,
+                totalDiamonds: giftTotalDiamonds,
+            };
+        },
+        giftStats() {
+            return { count: giftTotalCount, diamonds: giftTotalDiamonds };
         },
     };
 }

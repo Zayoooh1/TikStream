@@ -610,6 +610,19 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     bottomBar->addStretch(1);
     bottomBar->addWidget(m_taps);
 
+    m_giftTotal = new QLabel(this);
+    m_giftTotal->setStyleSheet("background: rgba(255, 214, 102, 18); border: 1px solid rgba(255, 196, 61, 65); border-radius: 5px; padding: 3px 8px; color: #ffd666; font-weight: 600;");
+    m_giftTotal->setToolTip("Total TikTok gifts and diamonds received during this LIVE");
+    m_giftEarned = new QLabel(this);
+    m_giftEarned->setStyleSheet("background: rgba(74, 222, 128, 18); border: 1px solid rgba(74, 222, 128, 65); border-radius: 5px; padding: 3px 8px; color: #4ade80; font-weight: 600;");
+    m_giftEarned->setToolTip("Estimated TikTok LIVE creator earnings from gifts (~$0.005 per diamond / 50% creator share)");
+    updateGiftStats();
+    auto *giftStatsBar = new QHBoxLayout;
+    giftStatsBar->setSpacing(6);
+    giftStatsBar->addWidget(m_giftTotal);
+    giftStatsBar->addStretch(1);
+    giftStatsBar->addWidget(m_giftEarned);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(5);
@@ -619,6 +632,7 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     layout->addWidget(m_gifts);
     layout->addWidget(m_messages, 1);
     layout->addLayout(actions);
+    layout->addLayout(giftStatsBar);
     layout->addLayout(bottomBar);
 
     connect(zoomOut, &QPushButton::clicked, this, [this] { setChatScale(m_chatScale - 0.10); });
@@ -755,6 +769,19 @@ void LiveChat::setChatScale(qreal scale)
     if (!QCoreApplication::arguments().contains("--test")) {
         QSettings qs("TikStream", "UI2");
         qs.setValue("chatScale", m_chatScale);
+    }
+}
+
+void LiveChat::updateGiftStats()
+{
+    const QLocale en(QLocale::English);
+    if (m_giftTotal) {
+        m_giftTotal->setText(QStringLiteral("🎁 Gifts: %1  (%2 💎)")
+            .arg(en.toString(m_totalGifts), en.toString(m_totalDiamonds)));
+    }
+    if (m_giftEarned) {
+        const double usd = double(m_totalDiamonds) * 0.005;
+        m_giftEarned->setText(QStringLiteral("Earned: ~$%1").arg(QString::number(usd, 'f', 2)));
     }
 }
 
@@ -939,6 +966,9 @@ void LiveChat::setAccount(const QString &username)
     if (m_account == norm) return;
     m_account = norm;
     m_gifts->clear();
+    m_totalGifts = 0;
+    m_totalDiamonds = 0;
+    updateGiftStats();
     m_tapsText.clear();
     m_taps->setText("Likes: —");
     notifyOverlay();
@@ -982,6 +1012,9 @@ void LiveChat::applyAccountFromInput()
     m_account = norm;
     if (changed) {
         m_gifts->clear();
+        m_totalGifts = 0;
+        m_totalDiamonds = 0;
+        updateGiftStats();
         m_tapsText.clear();
         m_taps->setText("Likes: —");
         notifyOverlay();
@@ -1061,7 +1094,18 @@ void LiveChat::readEvents()
         if (end - consumed > 512 * 1024) continue;
         const auto event = QJsonDocument::fromJson(m_input.mid(consumed, end - consumed)).object();
         if (event["type"] == "messages") appendMessages(event["messages"].toArray());
-        if (event["type"] == "clearGifts") { m_gifts->clear(); notifyOverlay(); }
+        if (event["type"] == "clearGifts") {
+            m_gifts->clear();
+            m_totalGifts = 0;
+            m_totalDiamonds = 0;
+            updateGiftStats();
+            notifyOverlay();
+        }
+        if (event["type"] == "giftStats") {
+            m_totalGifts = std::max<qint64>(0, event["count"].toInteger(0));
+            m_totalDiamonds = std::max<qint64>(0, event["diamonds"].toInteger(0));
+            updateGiftStats();
+        }
         if (event["type"] == "taps") {
             const auto count = event["count"].toInteger(-1);
             if (count < 0) { m_tapsText.clear(); m_taps->setText("Likes: —"); }

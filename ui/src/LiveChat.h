@@ -54,6 +54,7 @@ private:
     void applyAccountFromInput();
     void applyKickAccountFromInput();
     void setChatScale(qreal scale);
+    void updateGiftStats();
     void updateCombinedStatus();
     void notifyOverlay();
     void readEvents();
@@ -68,6 +69,10 @@ private:
     QLineEdit *m_kickAccountEdit = nullptr;
     QLabel *m_status;
     QLabel *m_taps;
+    QLabel *m_giftTotal = nullptr;
+    QLabel *m_giftEarned = nullptr;
+    qint64 m_totalGifts = 0;
+    qint64 m_totalDiamonds = 0;
     QListWidget *m_messages;
     ChatMessageDelegate *m_delegate = nullptr;
     QPushButton *m_zoomReset = nullptr;
