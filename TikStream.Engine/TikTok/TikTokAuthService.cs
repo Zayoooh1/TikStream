@@ -15,6 +15,15 @@ public sealed record TikTokCreateInfoResult(
     string Message,
     string? Error = null);
 
+public sealed record TikTokCreateRoomResult(
+    bool Ok,
+    string RoomId,
+    string ServerUrl,
+    string StreamKey,
+    string FullRtmpUrl,
+    string ShareUrl,
+    string? Error = null);
+
 /// <summary>
 /// Manages TikTok LIVE Studio QR login, session persistence, account profile lookup,
 /// and webcast/room/create_info eligibility verification.
@@ -516,6 +525,192 @@ public sealed class TikTokAuthService
         return new TikTokCreateInfoResult(false, false, "", "", "", "", lastError ?? "Nie udało się połączyć z webcast/room/create_info/.");
     }
 
+    public static async Task<TikTokCreateRoomResult> CreateRoomAsync(
+        TikTokSessionData session,
+        string title,
+        string category,
+        string? signerKey,
+        string? signerUrl,
+        CancellationToken ct = default)
+    {
+        if (!session.HasSessionCookie)
+            return new TikTokCreateRoomResult(false, "", "", "", "", "", "No active TikTok session. Sign in via QR code or LIVE Studio import first.");
+
+        var candidate = new RapidApiTikTokSigner(signerKey, signerUrl);
+        ITikTokSigner? signer = candidate.IsConfigured ? candidate : null;
+
+        session.EnsureDeviceIds();
+        var jar = new CookieContainer();
+        var candidateHosts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(session.WebcastDomain))
+            candidateHosts.Add(session.WebcastDomain);
+        foreach (var h in WebcastHosts)
+            if (!candidateHosts.Contains(h, StringComparer.OrdinalIgnoreCase)) candidateHosts.Add(h);
+        session.PopulateCookieContainer(jar, candidateHosts);
+
+        using var handler = new SocketsHttpHandler
+        {
+            CookieContainer = jar,
+            UseCookies = true,
+            AutomaticDecompression = DecompressionMethods.All,
+        };
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
+
+        var query = BuildStudioParams(session.DeviceId, session.InstallId, session.Region);
+        query["live_studio"] = "1";
+
+        string safeTitle = string.IsNullOrWhiteSpace(title) ? "LIVE" : title.Trim();
+        if (safeTitle.Length > 64) safeTitle = safeTitle[..64];
+        var (hashtagId, gameTagId) = ResolveCategoryTag(category);
+
+        var form = new Dictionary<string, string>
+        {
+            ["title"] = safeTitle,
+            ["live_studio"] = "1",
+            ["gen_replay"] = "false",
+            ["chat_sub_only_auth"] = "2",
+            ["chat_l2"] = "1",
+            ["gift_auth"] = "1",
+            ["star_comment_switch"] = "true",
+            ["multi_stream_scene"] = "0",
+            ["multi_stream_source"] = "1",
+            ["hashtag_id"] = hashtagId,
+            ["game_tag_id"] = gameTagId,
+            ["create_source"] = "0",
+        };
+
+        string? lastError = null;
+        foreach (var host in candidateHosts)
+        {
+            try
+            {
+                var url = $"https://{host}/webcast/room/create/";
+                using var doc = await SendSignedJsonAsync(
+                    http, signer, HttpMethod.Post, url, query,
+                    session.DeviceId, isPassport: false, ct, formBody: form).ConfigureAwait(false);
+
+                var root = doc.RootElement;
+                var statusCode = ReadStr(root, "status_code");
+                var hasData = root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object;
+
+                if (statusCode != "0" && !string.IsNullOrEmpty(statusCode))
+                {
+                    var prompt = hasData ? ReadStr(data, "prompts") : "";
+                    if (string.IsNullOrEmpty(prompt) && hasData) prompt = ReadStr(data, "message");
+                    if (string.IsNullOrEmpty(prompt)) prompt = ReadStr(root, "message");
+                    lastError = $"TikTok status_code={statusCode}" + (string.IsNullOrEmpty(prompt) ? "" : $": {prompt}");
+                    Log.Warn($"TikTok room/create rejected on {host}: {lastError}");
+                    if (statusCode is "20003" or "4003088" or "4003025" or "4014257")
+                        return new TikTokCreateRoomResult(false, "", "", "", "", "", lastError);
+                    continue;
+                }
+
+                if (!hasData)
+                {
+                    lastError = "TikTok room/create returned empty data.";
+                    continue;
+                }
+
+                string roomId = ReadStr(data, "id_str");
+                if (string.IsNullOrEmpty(roomId)) roomId = ReadStr(data, "id");
+                string shareUrl = ReadStr(data, "share_url");
+                string pushUrl = "";
+                if (data.TryGetProperty("stream_url", out var su) && su.ValueKind == JsonValueKind.Object)
+                {
+                    pushUrl = ReadStr(su, "rtmp_push_url");
+                    if (string.IsNullOrEmpty(pushUrl) && su.TryGetProperty("rtmp_push_url_params", out _))
+                        pushUrl = ReadStr(su, "rtmp_push_url");
+                }
+                if (string.IsNullOrEmpty(pushUrl))
+                {
+                    lastError = "TikTok created the room but did not return an RTMP push URL.";
+                    continue;
+                }
+
+                var (serverUrl, streamKey) = SplitRtmpUrl(pushUrl);
+                session.WebcastDomain = host;
+                Log.Info($"TikTok room/create OK on {host} (room_id={roomId}, server={serverUrl})");
+                return new TikTokCreateRoomResult(true, roomId, serverUrl, streamKey, pushUrl, shareUrl);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                lastError = ex.Message;
+                Log.Warn($"TikTok room/create failed on {host}: {ex.Message}");
+            }
+        }
+
+        return new TikTokCreateRoomResult(false, "", "", "", "", "", lastError ?? "Failed to create TikTok LIVE room.");
+    }
+
+    public static async Task FinishRoomAsync(
+        TikTokSessionData session,
+        string roomId,
+        string? signerKey,
+        string? signerUrl,
+        CancellationToken ct = default)
+    {
+        if (!session.HasSessionCookie || string.IsNullOrWhiteSpace(roomId)) return;
+        try
+        {
+            var candidate = new RapidApiTikTokSigner(signerKey, signerUrl);
+            ITikTokSigner? signer = candidate.IsConfigured ? candidate : null;
+
+            session.EnsureDeviceIds();
+            var jar = new CookieContainer();
+            string host = !string.IsNullOrWhiteSpace(session.WebcastDomain) ? session.WebcastDomain : WebcastHosts[0];
+            session.PopulateCookieContainer(jar, new[] { host });
+
+            using var handler = new SocketsHttpHandler
+            {
+                CookieContainer = jar,
+                UseCookies = true,
+                AutomaticDecompression = DecompressionMethods.All,
+            };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+
+            var query = BuildStudioParams(session.DeviceId, session.InstallId, session.Region);
+            query["room_id"] = roomId;
+            query["reason"] = "1";
+            var url = $"https://{host}/webcast/room/finish_abnormal/";
+            using var doc = await SendSignedJsonAsync(
+                http, signer, HttpMethod.Post, url, query,
+                session.DeviceId, isPassport: false, ct,
+                formBody: new Dictionary<string, string> { ["room_id"] = roomId, ["reason"] = "1" }).ConfigureAwait(false);
+            Log.Info($"TikTok room/finish_abnormal sent for room {roomId}.");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("TikTok room finish warning: " + ex.Message);
+        }
+    }
+
+    private static (string HashtagId, string GameTagId) ResolveCategoryTag(string? category)
+    {
+        var c = (category ?? "").Trim().ToLowerInvariant();
+        if (c.Contains("just chatting") || c.Contains("chat") || c.Contains("irl")) return ("1", "0");
+        if (c.Contains("music")) return ("3", "0");
+        if (c.Contains("fortnite")) return ("5", "76");
+        if (c.Contains("valorant")) return ("5", "187");
+        if (c.Contains("counter-strike") || c.Contains("cs2") || c.Contains("cs:go")) return ("5", "124");
+        if (c.Contains("league of legends") || c == "lol") return ("5", "5");
+        if (c.Contains("minecraft")) return ("5", "4");
+        if (c.Contains("gta") || c.Contains("grand theft")) return ("5", "75");
+        if (c.Contains("call of duty") || c.Contains("warzone")) return ("5", "128");
+        if (c.Contains("apex")) return ("5", "134");
+        if (c.Contains("fc ") || c.Contains("fifa")) return ("5", "147");
+        return ("5", "0"); // default: Gaming
+    }
+
+    private static (string ServerUrl, string StreamKey) SplitRtmpUrl(string fullUrl)
+    {
+        var trimmed = fullUrl.Trim();
+        int q = trimmed.IndexOf('?');
+        string withoutQuery = q >= 0 ? trimmed[..q] : trimmed;
+        int lastSlash = withoutQuery.LastIndexOf('/');
+        if (lastSlash <= 8) return (trimmed, "");
+        return (trimmed[..lastSlash], trimmed[(lastSlash + 1)..]);
+    }
+
     private static async Task<JsonDocument> SendSignedJsonAsync(
         HttpClient http,
         ITikTokSigner? signer,
@@ -524,17 +719,20 @@ public sealed class TikTokAuthService
         Dictionary<string, string> queryParams,
         string deviceId,
         bool isPassport,
-        CancellationToken ct)
+        CancellationToken ct,
+        Dictionary<string, string>? formBody = null)
     {
         long ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         TikTokSignatureResult? sig = null;
         if (signer is { IsConfigured: true })
-            sig = await signer.SignRequestAsync(ts, Aid, queryParams, null, deviceId, ct).ConfigureAwait(false);
+            sig = await signer.SignRequestAsync(ts, Aid, queryParams, formBody != null ? BuildQueryString(formBody) : null, deviceId, ct).ConfigureAwait(false);
 
         var qs = BuildQueryString(queryParams);
         var fullUrl = string.IsNullOrEmpty(qs) ? baseUrl : $"{baseUrl}?{qs}";
 
         using var req = new HttpRequestMessage(method, fullUrl);
+        if (formBody != null && method == HttpMethod.Post)
+            req.Content = new FormUrlEncodedContent(formBody);
         string browserVer = BuildLiveStudioBrowserVersion(DefaultLiveStudioVersion);
         req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/" + browserVer);
         req.Headers.TryAddWithoutValidation("Accept", isPassport ? "application/json, text/javascript" : "application/json, text/plain, */*");

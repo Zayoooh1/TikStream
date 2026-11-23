@@ -21,6 +21,7 @@ public static unsafe class NativeApi
     private static readonly object Lock = new();
     private static readonly TikTokLogin TikTok = new();
     private static readonly TikTokAuthService TikTokAuth = new();
+    private static string _activeTikTokRoomId = "";
     private static JsonSerializerOptions Json => AppSettings.JsonOpts;
 
     [UnmanagedCallersOnly]
@@ -38,7 +39,7 @@ public static unsafe class NativeApi
                   or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion"
                   or "browserFrame" or "browserInteract" or "playAlertSound"
                   or "tiktokAccountStatus" or "tiktokQrBegin" or "tiktokQrPoll" or "tiktokQrCancel"
-                  or "tiktokImportStudio" or "tiktokLogout" or "tiktokCheckCreateInfo")
+                  or "tiktokImportStudio" or "tiktokLogout" or "tiktokCheckCreateInfo" or "tiktokCreateRoom" or "tiktokFinishRoom")
                 result = Dispatch(m, a);
             else lock (Lock) result = Dispatch(m, a);
         }
@@ -297,6 +298,58 @@ public static unsafe class NativeApi
                 var res = task.Result;
                 if (res.Ok) SaveTikTokSession(sess); // persist discovered webcast host
                 return JsonSerializer.Serialize(res, Json);
+            }
+
+            case "tiktokCreateRoom":
+            {
+                TikTokSessionData? sess;
+                string signerKey, signerUrl;
+                string title = j["title"]?.GetValue<string>() ?? "";
+                string category = j["category"]?.GetValue<string>() ?? "";
+                lock (Lock)
+                {
+                    sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
+                    signerKey = _settings.TikTokSignerKey;
+                    signerUrl = _settings.TikTokSignerUrl;
+                }
+                if (sess == null || !sess.HasSessionCookie)
+                    return JsonSerializer.Serialize(new { ok = false, error = "No active TikTok account session." }, Json);
+                var task = TikTokAuthService.CreateRoomAsync(sess, title, category, signerKey, signerUrl);
+                if (!task.Wait(30000))
+                    return JsonSerializer.Serialize(new { ok = false, error = "Timed out waiting for TikTok webcast/room/create/." }, Json);
+                var res = task.Result;
+                if (res.Ok)
+                {
+                    _activeTikTokRoomId = res.RoomId;
+                    SaveTikTokSession(sess);
+                    lock (Lock)
+                    {
+                        var prev = _settings;
+                        _settings.ServerUrl = res.ServerUrl;
+                        _settings.StreamKey = res.StreamKey;
+                        ScheduleSave();
+                        Engine().ApplySettings(_settings, prev);
+                    }
+                }
+                return JsonSerializer.Serialize(res, Json);
+            }
+
+            case "tiktokFinishRoom":
+            {
+                var roomId = _activeTikTokRoomId;
+                _activeTikTokRoomId = "";
+                if (string.IsNullOrEmpty(roomId)) return Ok();
+                TikTokSessionData? sess;
+                string signerKey, signerUrl;
+                lock (Lock)
+                {
+                    sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
+                    signerKey = _settings.TikTokSignerKey;
+                    signerUrl = _settings.TikTokSignerUrl;
+                }
+                if (sess != null && sess.HasSessionCookie)
+                    _ = Task.Run(() => TikTokAuthService.FinishRoomAsync(sess, roomId, signerKey, signerUrl));
+                return Ok();
             }
             case "startStream": return Result(Engine().StartStreamAsync());
             case "stopStream": return Result(Engine().StopStreamAsync());

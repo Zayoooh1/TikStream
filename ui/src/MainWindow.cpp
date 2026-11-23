@@ -25,6 +25,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontComboBox>
@@ -4211,7 +4212,8 @@ void MainWindow::onCanvasWheelAt(int delta, bool dual)
 
 void MainWindow::toggleStream()
 {
-    if (!m_streaming) {
+    const bool wasStreaming = m_streaming;
+    if (!wasStreaming) {
         if (!prepareStream()) return;
     } else if (m_s["confirmStreamStop"].toBool(true) &&
                QMessageBox::question(this, "Streaming", "Stop streaming?") != QMessageBox::Yes) {
@@ -4219,8 +4221,9 @@ void MainWindow::toggleStream()
     }
     pushSettings();
     m_btnStream->setEnabled(false);
-    const auto r = EngineHost::instance().callObj(m_streaming ? "stopStream" : "startStream");
+    const auto r = EngineHost::instance().callObj(wasStreaming ? "stopStream" : "startStream");
     if (r.contains("error")) QMessageBox::warning(this, "Streaming", r["error"].toString());
+    if (wasStreaming) EngineHost::instance().callObj("tiktokFinishRoom");
     m_btnStream->setEnabled(true);
     pollStats();
 }
@@ -4228,66 +4231,203 @@ void MainWindow::toggleStream()
 bool MainWindow::prepareStream()
 {
     QSettings draft("TikStream", "UI2");
-    QDialog dialog(this);
-    dialog.setWindowTitle("Prepare Stream");
-    dialog.resize(540, 0);
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *form = new QFormLayout;
-    layout->addLayout(form);
-
-    auto *title = new QLineEdit(draft.value("streamDraft/title").toString());
-    auto *category = new QLineEdit(draft.value("streamDraft/category").toString());
-    auto *description = new QPlainTextEdit(draft.value("streamDraft/description").toString());
-    description->setMinimumHeight(100);
-    auto addField = [&dialog, form](const QString &label, QWidget *field, auto readText) {
-        auto *row = new QHBoxLayout;
-        row->addWidget(field, 1);
-        auto *copy = new QPushButton("Copy");
-        copy->setAccessibleName("Copy \"" + label + "\"");
-        copy->setAutoDefault(false);
-        connect(copy, &QPushButton::clicked, &dialog, [readText] {
-            QApplication::clipboard()->setText(readText());
-        });
-        row->addWidget(copy, 0, Qt::AlignTop);
-        form->addRow(label, row);
-    };
-    addField("Title", title, [title] { return title->text(); });
-    addField("Category or Game", category, [category] { return category->text(); });
-    addField("Description", description, [description] { return description->toPlainText(); });
-    layout->addWidget(hintLabel("This is a local draft. Set these details in your platform's dashboard before going live."));
-
-    const bool hasDestination = !m_s["serverUrl"].toString().trimmed().isEmpty()
+    const auto ttAcc = EngineHost::instance().callObj("tiktokAccountStatus");
+    const bool ttLoggedIn = ttAcc["loggedIn"].toBool(false);
+    const QString ttDisp = ttAcc["displayName"].toString(ttAcc["username"].toString());
+    const bool hasManualPrimary = !m_s["serverUrl"].toString().trimmed().isEmpty()
         && !m_s["streamKey"].toString().trimmed().isEmpty();
-    if (!hasDestination)
-        layout->addWidget(hintLabel("To start RTMP streaming, configure the server URL and stream key."));
+    const bool canStartPrimary = ttLoggedIn || hasManualPrimary;
+    const bool hasSecond = m_s["secondStreamEnabled"].toBool(false);
 
-    auto *buttons = new QDialogButtonBox;
-    auto *start = buttons->addButton("Start Streaming", QDialogButtonBox::AcceptRole);
-    auto *save = buttons->addButton("Save Draft", QDialogButtonBox::ActionRole);
-    auto *settings = buttons->addButton("Stream Settings", QDialogButtonBox::ActionRole);
-    auto *cancel = buttons->addButton("Cancel", QDialogButtonBox::RejectRole);
-    start->setEnabled(hasDestination);
-    settings->setVisible(!hasDestination);
-    cancel->setDefault(true);
-    layout->addWidget(buttons);
-
-    auto saveDraft = [&] {
-        draft.setValue("streamDraft/title", title->text());
-        draft.setValue("streamDraft/category", category->text());
-        draft.setValue("streamDraft/description", description->toPlainText());
+    auto detectSecondPlatform = [this]() -> QString {
+        const QString cn = m_s["secondStreamName"].toString().trimmed();
+        if (!cn.isEmpty() && cn.compare("Second Channel", Qt::CaseInsensitive) != 0)
+            return cn.left(1).toUpper() + cn.mid(1);
+        const QString u = m_s["secondServerUrl"].toString().toLower();
+        if (u.contains("kick") || u.contains("live-video.net")) return QStringLiteral("Kick");
+        if (u.contains("twitch")) return QStringLiteral("Twitch");
+        if (u.contains("youtube") || u.contains("youtu.be")) return QStringLiteral("YouTube");
+        return QStringLiteral("Second Platform");
     };
-    connect(start, &QPushButton::clicked, &dialog, [&] { saveDraft(); dialog.accept(); });
-    connect(save, &QPushButton::clicked, &dialog, [&] { saveDraft(); dialog.reject(); });
-    connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
-    bool openDestinationSettings = false;
-    connect(settings, &QPushButton::clicked, &dialog, [&] {
-        saveDraft();
-        openDestinationSettings = true;
-        dialog.reject();
-    });
-    const bool accepted = dialog.exec() == QDialog::Accepted;
-    if (openDestinationSettings) openSettings();
-    return accepted;
+    const QString secondPlatform = detectSecondPlatform();
+    const QStringList categories = {
+        "Gaming", "Fortnite", "Counter-Strike 2", "Valorant", "League of Legends",
+        "Minecraft", "GTA V", "Call of Duty: Warzone", "Apex Legends", "EA Sports FC",
+        "Just Chatting", "Music", "IRL"
+    };
+
+    QString ttTitle = draft.value("streamDraft/title").toString();
+    QString ttCategory = draft.value("streamDraft/category", "Gaming").toString();
+    QString secTitle = draft.value("streamDraft/secondTitle", ttTitle).toString();
+    QString secCategory = draft.value("streamDraft/secondCategory", ttCategory).toString();
+
+    // ---------- Step 1: TikTok LIVE (or primary stream) Title & Category ----------
+    for (;;) {
+        QDialog dlg1(this);
+        dlg1.setWindowTitle(ttLoggedIn ? "TikTok LIVE — Title & Category" : "Prepare Stream — Title & Category");
+        dlg1.resize(520, 0);
+        auto *layout = new QVBoxLayout(&dlg1);
+        layout->setSpacing(10);
+
+        if (ttLoggedIn) {
+            auto *banner = new QLabel(QString("Signed in to TikTok LIVE (%1) — Server URL & Stream Key will be created automatically.").arg(ttDisp));
+            banner->setWordWrap(true);
+            banner->setStyleSheet("background: rgba(74, 222, 128, 22); border: 1px solid rgba(74, 222, 128, 95); border-radius: 6px; padding: 6px 10px; color: #86efac;");
+            layout->addWidget(banner);
+        } else if (!hasManualPrimary) {
+            layout->addWidget(hintLabel("Sign in with TikTok (QR / LIVE Studio) or configure a Server URL & Stream Key in Stream Settings."));
+        }
+
+        auto *form = new QFormLayout;
+        layout->addLayout(form);
+
+        auto *titleEdit = new QLineEdit(ttTitle);
+        titleEdit->setPlaceholderText("Enter your LIVE title…");
+        titleEdit->setMaxLength(64);
+        auto *catCombo = new QComboBox;
+        catCombo->setEditable(true);
+        catCombo->addItems(categories);
+        catCombo->setCurrentText(ttCategory.isEmpty() ? QStringLiteral("Gaming") : ttCategory);
+
+        auto addCopyRow = [&dlg1, form](const QString &label, QWidget *field, auto readText) {
+            auto *row = new QHBoxLayout;
+            row->addWidget(field, 1);
+            auto *copy = new QPushButton("Copy");
+            copy->setAutoDefault(false);
+            connect(copy, &QPushButton::clicked, &dlg1, [readText] {
+                QApplication::clipboard()->setText(readText());
+            });
+            row->addWidget(copy);
+            form->addRow(label, row);
+        };
+        addCopyRow("Title", titleEdit, [titleEdit] { return titleEdit->text(); });
+        addCopyRow("Category / Game", catCombo, [catCombo] { return catCombo->currentText(); });
+
+        auto *buttons = new QDialogButtonBox;
+        auto *nextBtn = buttons->addButton(hasSecond ? QString("Next → %1").arg(secondPlatform) : QString("Start Streaming"), QDialogButtonBox::AcceptRole);
+        nextBtn->setObjectName("primary");
+        nextBtn->setEnabled(canStartPrimary);
+        auto *settingsBtn = buttons->addButton("Stream Settings", QDialogButtonBox::ActionRole);
+        settingsBtn->setVisible(!canStartPrimary);
+        auto *cancelBtn = buttons->addButton("Cancel", QDialogButtonBox::RejectRole);
+        layout->addWidget(buttons);
+
+        bool openDestSettings = false;
+        connect(nextBtn, &QPushButton::clicked, &dlg1, &QDialog::accept);
+        connect(cancelBtn, &QPushButton::clicked, &dlg1, &QDialog::reject);
+        connect(settingsBtn, &QPushButton::clicked, &dlg1, [&] {
+            openDestSettings = true;
+            dlg1.reject();
+        });
+
+        const int res1 = dlg1.exec();
+        ttTitle = titleEdit->text().trimmed();
+        ttCategory = catCombo->currentText().trimmed();
+        draft.setValue("streamDraft/title", ttTitle);
+        draft.setValue("streamDraft/category", ttCategory);
+        if (openDestSettings) { openSettings(); return false; }
+        if (res1 != QDialog::Accepted) return false;
+
+        // ---------- Step 2: Multistream (Second RTMP Output) Title & Category ----------
+        if (!hasSecond) break;
+
+        QDialog dlg2(this);
+        dlg2.setWindowTitle(QString("%1 (Multistream) — Title & Category").arg(secondPlatform));
+        dlg2.resize(520, 0);
+        auto *l2 = new QVBoxLayout(&dlg2);
+        l2->setSpacing(10);
+        l2->addWidget(hintLabel(QString("Set the title and category for your second stream (%1). Use Copy to paste them into %1 if needed.").arg(secondPlatform)));
+
+        auto *f2 = new QFormLayout;
+        l2->addLayout(f2);
+
+        auto *sTitleEdit = new QLineEdit(secTitle.isEmpty() ? ttTitle : secTitle);
+        sTitleEdit->setPlaceholderText(QString("Enter %1 stream title…").arg(secondPlatform));
+        auto *sCatCombo = new QComboBox;
+        sCatCombo->setEditable(true);
+        sCatCombo->addItems(categories);
+        sCatCombo->setCurrentText(secCategory.isEmpty() ? ttCategory : secCategory);
+
+        auto addCopyRow2 = [&dlg2, f2](const QString &label, QWidget *field, auto readText) {
+            auto *row = new QHBoxLayout;
+            row->addWidget(field, 1);
+            auto *copy = new QPushButton("Copy");
+            copy->setAutoDefault(false);
+            connect(copy, &QPushButton::clicked, &dlg2, [readText] {
+                QApplication::clipboard()->setText(readText());
+            });
+            row->addWidget(copy);
+            f2->addRow(label, row);
+        };
+        addCopyRow2("Title", sTitleEdit, [sTitleEdit] { return sTitleEdit->text(); });
+        addCopyRow2("Category / Game", sCatCombo, [sCatCombo] { return sCatCombo->currentText(); });
+
+        auto *sameBtn = new QPushButton("Use same Title & Category as TikTok");
+        sameBtn->setAutoDefault(false);
+        connect(sameBtn, &QPushButton::clicked, &dlg2, [sTitleEdit, sCatCombo, ttTitle, ttCategory] {
+            sTitleEdit->setText(ttTitle);
+            sCatCombo->setCurrentText(ttCategory);
+        });
+        f2->addRow("", sameBtn);
+
+        auto *b2 = new QDialogButtonBox;
+        auto *backBtn = b2->addButton("← Back", QDialogButtonBox::ActionRole);
+        auto *goBtn = b2->addButton("Start Streaming", QDialogButtonBox::AcceptRole);
+        goBtn->setObjectName("primary");
+        auto *c2 = b2->addButton("Cancel", QDialogButtonBox::RejectRole);
+        l2->addWidget(b2);
+
+        bool goBack = false;
+        connect(backBtn, &QPushButton::clicked, &dlg2, [&] { goBack = true; dlg2.reject(); });
+        connect(goBtn, &QPushButton::clicked, &dlg2, &QDialog::accept);
+        connect(c2, &QPushButton::clicked, &dlg2, &QDialog::reject);
+
+        const int res2 = dlg2.exec();
+        secTitle = sTitleEdit->text().trimmed();
+        secCategory = sCatCombo->currentText().trimmed();
+        draft.setValue("streamDraft/secondTitle", secTitle);
+        draft.setValue("streamDraft/secondCategory", secCategory);
+        if (goBack) continue;
+        if (res2 != QDialog::Accepted) return false;
+        break;
+    }
+
+    // ---------- Auto-create TikTok LIVE room when signed in ----------
+    if (ttLoggedIn) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        m_stMsg->setText("Creating TikTok LIVE room…");
+        auto res = std::make_shared<QJsonObject>();
+        QEventLoop loop;
+        auto *worker = QThread::create([res, ttTitle, ttCategory] {
+            *res = EngineHost::instance().callObj("tiktokCreateRoom", {
+                {"title", ttTitle},
+                {"category", ttCategory},
+            });
+        });
+        connect(worker, &QThread::finished, &loop, &QEventLoop::quit);
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+        loop.exec();
+        QApplication::restoreOverrideCursor();
+
+        if ((*res)["ok"].toBool(false)) {
+            m_s["serverUrl"] = (*res)["serverUrl"].toString();
+            m_s["streamKey"] = (*res)["streamKey"].toString();
+            m_stMsg->setText("TikTok LIVE room created — starting stream…");
+            return true;
+        }
+        const QString err = (*res)["error"].toString("Failed to create TikTok LIVE room.");
+        if (hasManualPrimary) {
+            const auto ans = QMessageBox::warning(this, "TikTok LIVE",
+                QString("Could not auto-create TikTok LIVE room:\n%1\n\nStart streaming using your saved manual Server URL & Stream Key instead?").arg(err),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            return ans == QMessageBox::Yes;
+        }
+        QMessageBox::warning(this, "TikTok LIVE",
+            QString("Could not create TikTok LIVE room:\n%1\n\nPlease re-login via QR code in Settings → Stream or enter a manual Server URL & Stream Key.").arg(err));
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::toggleRecord()

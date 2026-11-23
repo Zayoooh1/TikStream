@@ -246,6 +246,14 @@ QWidget *SettingsDialog::pageStream()
     auto *w = page(&v);
     QFormLayout *f;
     v->addWidget(card(w, &f, "Stream Destination", "Paste the server URL and stream key from your streaming platform (e.g., TikTok LIVE, Twitch, or Kick)."));
+    const auto ttInit = EngineHost::instance().callObj("tiktokAccountStatus");
+    if (ttInit["loggedIn"].toBool(false)) {
+        const QString disp = ttInit["displayName"].toString(ttInit["username"].toString());
+        auto *autoBanner = new QLabel(QString("Signed in to TikTok LIVE (%1) — Server URL and Stream Key are generated automatically when you click Start Streaming. Manual fields below are optional.").arg(disp));
+        autoBanner->setWordWrap(true);
+        autoBanner->setStyleSheet("background: rgba(74, 222, 128, 22); border: 1px solid rgba(74, 222, 128, 95); border-radius: 6px; padding: 6px 10px; color: #86efac;");
+        f->addRow(autoBanner);
+    }
     m_server = track(new QLineEdit(m_s["serverUrl"].toString()));
     m_server->setPlaceholderText("rtmps://server-address/app");
     f->addRow("Server", m_server);
