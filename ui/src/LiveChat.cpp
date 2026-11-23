@@ -450,34 +450,48 @@ protected:
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
+
+        // Dedicated horizontal container strip separated above the chat list
+        const QRectF strip(0.5, 0.5, width() - 1.0, height() - 1.0);
+        painter.setPen(QPen(QColor(255, 255, 255, 24), 1.0));
+        painter.setBrush(QColor(18, 20, 28, 210));
+        painter.drawRoundedRect(strip, 6, 6);
+
+        const qreal pad = 4.0;
+        const qreal gap = 5.0;
+        const qreal innerW = std::max(60.0, width() - pad * 2.0);
+        const qreal cardW = (innerW - gap * 2.0) / 3.0;
+        const qreal step = cardW + gap;
+
+        painter.setClipRect(QRectF(pad, pad, innerW, height() - pad * 2.0));
         if (m_turn.state() != QAbstractAnimation::Running) {
-            for (int i = 0; i < m_rows.size(); ++i) paintRow(painter, m_rows[i], i * rowHeight);
+            for (int i = 0; i < m_rows.size(); ++i) paintCard(painter, m_rows[i], pad + i * step, cardW);
             return;
         }
         const qreal phase = m_turn.currentValue().toDouble();
         const qreal fade = std::min(1.0, phase / 0.38);
-        const qreal offset = rowHeight * QEasingCurve(QEasingCurve::OutCubic).valueForProgress(std::max(0.0, (phase - 0.38) / 0.62));
-        if (fade < 1.0) {
+        const qreal offset = step * QEasingCurve(QEasingCurve::OutCubic).valueForProgress(std::max(0.0, (phase - 0.38) / 0.62));
+        if (fade < 1.0 && !m_rows.isEmpty()) {
             painter.setOpacity(1.0 - fade);
-            paintRow(painter, m_rows.front(), 0);
+            paintCard(painter, m_rows.front(), pad, cardW);
             painter.setOpacity(1.0);
         }
-        for (int i = 1; i < m_rows.size(); ++i) paintRow(painter, m_rows[i], i * rowHeight - offset);
-        paintRow(painter, m_waiting.head(), 3 * rowHeight - offset);
+        for (int i = 1; i < m_rows.size(); ++i) paintCard(painter, m_rows[i], pad + i * step - offset, cardW);
+        if (!m_waiting.isEmpty()) paintCard(painter, m_waiting.head(), pad + 3.0 * step - offset, cardW);
     }
 
 private:
-    static constexpr int rowHeight = 44;
+    static constexpr int barHeight = 48;
     QList<Row> m_rows;
     QQueue<Row> m_waiting;
     QVariantAnimation m_turn;
 
     void changed()
     {
-        const int height = int(m_rows.size()) * rowHeight;
-        if (minimumHeight() != height) {
-            setFixedHeight(height);
-            setVisible(height > 0);
+        const int h = m_rows.isEmpty() ? 0 : barHeight;
+        if (minimumHeight() != h || maximumHeight() != h) {
+            setFixedHeight(h);
+            setVisible(h > 0);
         }
         QStringList descriptions;
         for (const auto &row : m_rows) descriptions.append(row.nick + ": " + row.text);
@@ -485,20 +499,30 @@ private:
         update();
     }
 
-    void paintRow(QPainter &painter, const Row &row, qreal top) const
+    void paintCard(QPainter &painter, const Row &row, qreal left, qreal cardW) const
     {
-        const int cardWidth = std::min(width(), 300);
-        const QRectF card(width() - cardWidth, top + 2, cardWidth, rowHeight - 4);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(palette().base());
-        painter.drawRoundedRect(card, 6, 6);
-        const qreal x = card.left() + 8;
-        const int available = std::max(0, cardWidth - 16);
-        const auto fm = painter.fontMetrics();
-        painter.setPen(palette().buttonText().color());
-        painter.drawText(QRectF(x, top + 4, available, 17), Qt::AlignVCenter, fm.elidedText(row.nick, Qt::ElideRight, available));
-        painter.setPen(palette().text().color());
-        painter.drawText(QRectF(x, top + 21, available, 18), Qt::AlignVCenter, fm.elidedText(row.text, Qt::ElideRight, available));
+        const QRectF card(left, 4.0, std::max(24.0, cardW), barHeight - 8.0);
+        painter.setPen(QPen(QColor(255, 196, 61, 95), 1.0));
+        painter.setBrush(QColor(28, 25, 38, 235));
+        painter.drawRoundedRect(card, 5, 5);
+        const qreal x = card.left() + 7.0;
+        const int available = std::max(0, int(card.width()) - 14);
+        QFont nickF = painter.font();
+        nickF.setPixelSize(11);
+        nickF.setBold(true);
+        painter.setFont(nickF);
+        const QFontMetrics nfm(nickF);
+        painter.setPen(QColor(255, 214, 102));
+        painter.drawText(QRectF(x, card.top() + 3.0, available, 16.0), Qt::AlignVCenter | Qt::AlignLeft,
+                         nfm.elidedText(row.nick, Qt::ElideRight, available));
+        QFont giftF = painter.font();
+        giftF.setPixelSize(12);
+        giftF.setBold(false);
+        painter.setFont(giftF);
+        const QFontMetrics gfm(giftF);
+        painter.setPen(QColor(242, 244, 250));
+        painter.drawText(QRectF(x, card.top() + 19.0, available, 18.0), Qt::AlignVCenter | Qt::AlignLeft,
+                         gfm.elidedText(row.text, Qt::ElideRight, available));
     }
 };
 
@@ -566,14 +590,17 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     actions->addWidget(refresh);
     actions->addWidget(open);
 
-    auto *zoomOut = new QPushButton("−", this);
-    zoomOut->setFixedWidth(26);
+    auto *zoomOut = new QPushButton("-", this);
+    zoomOut->setFixedSize(28, 26);
+    zoomOut->setStyleSheet("padding: 0px; font-weight: bold; font-size: 14px;");
     zoomOut->setToolTip("Smaller chat text (Ctrl + Scroll down)");
     m_zoomReset = new QPushButton("100%", this);
-    m_zoomReset->setMinimumWidth(46);
+    m_zoomReset->setMinimumSize(46, 26);
+    m_zoomReset->setStyleSheet("padding: 0px 6px;");
     m_zoomReset->setToolTip("Reset chat zoom to 100% (Ctrl + 0)");
     auto *zoomIn = new QPushButton("+", this);
-    zoomIn->setFixedWidth(26);
+    zoomIn->setFixedSize(28, 26);
+    zoomIn->setStyleSheet("padding: 0px; font-weight: bold; font-size: 14px;");
     zoomIn->setToolTip("Larger chat text (Ctrl + Scroll up)");
     auto *bottomBar = new QHBoxLayout;
     bottomBar->setSpacing(4);
