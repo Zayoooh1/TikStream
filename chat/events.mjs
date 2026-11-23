@@ -19,12 +19,105 @@ export function author(user) {
     return { nick: String(nick).slice(0, 100), avatar: String(avatar).slice(0, 1500) };
 }
 
+const TIKTOK_EMOJIS = {
+    smile: '😊',
+    happy: '😄',
+    angry: '😠',
+    cry: '😢',
+    embarrassed: '😳',
+    surprised: '😮',
+    wronged: '🥺',
+    shout: '😱',
+    flushed: '😳',
+    yummy: '😋',
+    complacent: '😎',
+    drool: '🤤',
+    scream: '😱',
+    weep: '😭',
+    speechless: '😶',
+    funnyface: '😜',
+    laughwithtears: '😂',
+    laughcry: '😂',
+    wicked: '😈',
+    facewithrollingeyes: '🙄',
+    sulk: '😒',
+    thinking: '🤔',
+    lovely: '🥰',
+    greedy: '🤑',
+    wow: '🤩',
+    joyful: '😁',
+    hehe: '😏',
+    slap: '🤦',
+    tears: '🥲',
+    stun: '😲',
+    cute: '🥺',
+    blink: '😉',
+    disdain: '😒',
+    astonish: '😮',
+    rage: '🤬',
+    cool: '😎',
+    excited: '🤩',
+    proud: '😌',
+    smileface: '🙂',
+    evil: '😈',
+    angel: '😇',
+    laugh: '😆',
+    pride: '😤',
+    nap: '😴',
+    loveface: '😍',
+    awkward: '😬',
+    shock: '🤯',
+    thanks: '🙏',
+    thankyou: '🙏',
+    clap: '👏',
+    heart: '❤️',
+    love: '❤️',
+    fire: '🔥',
+    rose: '🌹',
+    thumbsup: '👍',
+    ok: '👌',
+    kiss: '😘',
+    wink: '😉',
+    hug: '🤗',
+    party: '🥳',
+    star: '⭐',
+    crown: '👑',
+    gg: '🎮',
+    rip: '💀',
+    skull: '💀',
+    eyes: '👀',
+    100: '💯',
+    lol: '😂',
+    sad: '😔',
+    mad: '😡',
+    shy: '🙈',
+    sweat: '😅',
+    sick: '🤢',
+    vomit: '🤮',
+    sleep: '😴',
+    ghost: '👻',
+    poop: '💩',
+    clown: '🤡',
+    monkey: '🙈',
+    wave: '👋',
+    pray: '🙏',
+    muscle: '💪',
+    trophy: '🏆',
+};
+
+export function replaceTikTokEmotes(text) {
+    return String(text ?? '').replace(/\[([a-z0-9_ -]{1,32})\]/gi, (match, rawKey) => {
+        const key = rawKey.toLowerCase().replace(/[\s_-]+/g, '');
+        return TIKTOK_EMOJIS[key] ?? match;
+    });
+}
+
 export function extractChatText(event) {
     const raw = event?.content ?? event?.comment ?? '';
-    const trimmed = String(raw).trim();
+    const trimmed = replaceTikTokEmotes(raw).trim();
     if (trimmed) return trimmed.slice(0, 500);
     const emotes = Array.isArray(event?.emotes) ? event.emotes : (Array.isArray(event?.emoteList) ? event.emoteList : []);
-    if (emotes.length > 0) return emotes.length === 1 ? '[emote]' : `[${emotes.length} emotes]`;
+    if (emotes.length > 0) return emotes.length === 1 ? '✨' : '✨'.repeat(Math.min(emotes.length, 5));
     return '';
 }
 
