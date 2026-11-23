@@ -4,12 +4,15 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDesktopServices>
+#include <QEvent>
 #include <QFileInfo>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -19,11 +22,14 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
+#include <QWheelEvent>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 constexpr int historyLimit = 200;
@@ -101,33 +107,54 @@ QPixmap makePlatformBadge(const QString &platform, int sz = 16)
 
 const QPixmap &platformBadgeCached(const QString &platform, int sz = 16)
 {
-    static QPixmap tt16 = makePlatformBadge(QStringLiteral("tiktok"), 16);
-    static QPixmap kk16 = makePlatformBadge(QStringLiteral("kick"), 16);
-    static QPixmap tt20 = makePlatformBadge(QStringLiteral("tiktok"), 20);
-    static QPixmap kk20 = makePlatformBadge(QStringLiteral("kick"), 20);
-    if (sz >= 19) return platform == QStringLiteral("kick") ? kk20 : tt20;
-    return platform == QStringLiteral("kick") ? kk16 : tt16;
+    static QHash<QString, QPixmap> cache;
+    const int clamped = std::clamp(sz, 12, 40);
+    const QString key = (platform == QStringLiteral("kick") ? QStringLiteral("k:") : QStringLiteral("t:")) + QString::number(clamped);
+    auto it = cache.find(key);
+    if (it == cache.end()) it = cache.insert(key, makePlatformBadge(platform, clamped));
+    return it.value();
+}
 }
 
 class ChatMessageDelegate final : public QStyledItemDelegate
 {
 public:
-    explicit ChatMessageDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+    explicit ChatMessageDelegate(QListWidget *list) : QStyledItemDelegate(list), m_list(list) {}
+
+    void setScale(qreal scale) { m_scale = std::clamp(scale, 0.75, 2.20); }
+    qreal scale() const { return m_scale; }
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
-        const QString nick = index.data(RoleNick).toString();
         const QString body = index.data(RoleBody).toString();
         const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         const bool hasAvatar = !avatar.isNull();
-        const int leftOff = 8 + (hasAvatar ? 30 : 0);
-        const int availW = std::max(80, option.rect.width() - leftOff - 8);
-        QFont nickF = option.font; nickF.setBold(true);
+
+        const int pxFont = std::clamp(int(std::lround(13.0 * m_scale)), 10, 32);
+        const int avSz = std::clamp(int(std::lround(24.0 * m_scale)), 18, 52);
+        const int badgeSz = std::clamp(int(std::lround(16.0 * m_scale)), 12, 34);
+        const int padX = std::max(6, int(std::lround(8.0 * m_scale)));
+        const int padY = std::max(4, int(std::lround(5.0 * m_scale)));
+        const int avGap = std::max(5, int(std::lround(6.0 * m_scale)));
+        const int lineGap = std::max(2, int(std::lround(2.0 * m_scale)));
+
+        const int viewW = (m_list && m_list->viewport()->width() > 40)
+            ? m_list->viewport()->width()
+            : std::max(160, option.rect.width());
+        const int leftOff = padX + (hasAvatar ? avSz + avGap : 0);
+        const int availW = std::max(60, viewW - leftOff - padX);
+
+        QFont bodyF = option.font;
+        bodyF.setPixelSize(pxFont);
+        QFont nickF = bodyF;
+        nickF.setBold(true);
         const QFontMetrics nfm(nickF);
-        const QFontMetrics bfm(option.font);
-        const QRect br = bfm.boundingRect(QRect(0, 0, availW, 1000), Qt::TextWordWrap, body);
-        const int h = std::max(hasAvatar ? 36 : 30, 5 + std::max(16, nfm.height()) + 2 + br.height() + 6);
-        return {option.rect.width(), h};
+        const QFontMetrics bfm(bodyF);
+        const int headH = std::max(badgeSz, nfm.height());
+        const QRect br = bfm.boundingRect(QRect(0, 0, availW, 4000), Qt::TextWordWrap | Qt::TextWrapAnywhere, body);
+        const int contentH = padY + headH + lineGap + br.height() + padY + 2;
+        const int minAvatarH = hasAvatar ? (padY * 2 + avSz + 2) : (padY * 2 + headH + 4);
+        return {viewW, std::max(minAvatarH, contentH)};
     }
 
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
@@ -144,46 +171,62 @@ public:
         const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         const bool hasAvatar = !avatar.isNull();
 
-        int x = option.rect.left() + 8;
-        const int top = option.rect.top() + 5;
+        const int pxFont = std::clamp(int(std::lround(13.0 * m_scale)), 10, 32);
+        const int avSz = std::clamp(int(std::lround(24.0 * m_scale)), 18, 52);
+        const int badgeSz = std::clamp(int(std::lround(16.0 * m_scale)), 12, 34);
+        const int padX = std::max(6, int(std::lround(8.0 * m_scale)));
+        const int padY = std::max(4, int(std::lround(5.0 * m_scale)));
+        const int avGap = std::max(5, int(std::lround(6.0 * m_scale)));
+        const int badgeGap = std::max(4, int(std::lround(5.0 * m_scale)));
+        const int lineGap = std::max(2, int(std::lround(2.0 * m_scale)));
+
+        int x = option.rect.left() + padX;
+        const int top = option.rect.top() + padY;
         if (hasAvatar) {
-            const QRect avRect(x, top + 1, 24, 24);
+            const QRect avRect(x, top + 1, avSz, avSz);
             QPainterPath clip;
             clip.addEllipse(avRect);
             p->save();
             p->setClipPath(clip);
             avatar.paint(p, avRect);
             p->restore();
-            x += 30;
+            x += avSz + avGap;
         }
 
-        const int availW = std::max(60, option.rect.right() - x - 8);
-        const QPixmap &badge = platformBadgeCached(platform, 16);
-        p->drawPixmap(x, top + 1, badge);
-
-        QFont nickF = option.font;
+        const int availW = std::max(60, option.rect.right() - x - padX);
+        QFont bodyF = option.font;
+        bodyF.setPixelSize(pxFont);
+        QFont nickF = bodyF;
         nickF.setBold(true);
-        p->setFont(nickF);
         const QFontMetrics nfm(nickF);
+        const int headH = std::max(badgeSz, nfm.height());
+
+        const QPixmap &badge = platformBadgeCached(platform, badgeSz);
+        p->drawPixmap(x, top + (headH - badgeSz) / 2, badge);
+
+        p->setFont(nickF);
         QColor nickCol = (platform == QStringLiteral("kick")) ? QColor(83, 252, 24) : QColor(120, 210, 255);
         if (!colorHex.isEmpty()) {
             const QColor parsed(colorHex);
             if (parsed.isValid() && parsed.lightness() > 55) nickCol = parsed;
         }
         p->setPen(nickCol);
-        const int nickX = x + 21;
-        const int nickW = std::max(40, availW - 21);
-        const int headH = std::max(16, nfm.height());
+        const int nickX = x + badgeSz + badgeGap;
+        const int nickW = std::max(40, availW - badgeSz - badgeGap);
         p->drawText(QRect(nickX, top, nickW, headH), Qt::AlignVCenter | Qt::AlignLeft, nfm.elidedText(nick, Qt::ElideRight, nickW));
 
-        p->setFont(option.font);
+        p->setFont(bodyF);
         p->setPen(QColor(232, 234, 242));
-        const QRect bodyRect(x, top + headH + 2, availW, std::max(16, option.rect.bottom() - (top + headH + 2) - 4));
-        p->drawText(bodyRect, Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, body);
+        const int bodyTop = top + headH + lineGap;
+        const QRect bodyRect(x, bodyTop, availW, std::max(pxFont + 4, option.rect.bottom() - bodyTop - padY + 2));
+        p->drawText(bodyRect, Qt::TextWordWrap | Qt::TextWrapAnywhere | Qt::AlignLeft | Qt::AlignTop, body);
         p->restore();
     }
+
+private:
+    QListWidget *m_list = nullptr;
+    qreal m_scale = 1.0;
 };
-}
 
 class GiftNotifications final : public QWidget
 {
@@ -344,11 +387,15 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_gifts = new GiftNotifications(this);
     m_messages = new QListWidget(this);
     m_messages->setObjectName("liveChatMessages");
-    m_messages->setItemDelegate(new ChatMessageDelegate(m_messages));
+    m_delegate = new ChatMessageDelegate(m_messages);
+    m_messages->setItemDelegate(m_delegate);
     m_messages->setWordWrap(true);
     m_messages->setResizeMode(QListView::Adjust);
     m_messages->setTextElideMode(Qt::ElideNone);
     m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_messages->installEventFilter(this);
+    m_messages->viewport()->installEventFilter(this);
+    installEventFilter(this);
     m_connection = new QPushButton("Pause", this);
     auto *refresh = new QPushButton("Refresh", this);
     refresh->setToolTip("Reconnect TikTok and Kick chat immediately");
@@ -359,6 +406,23 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     actions->addWidget(refresh);
     actions->addWidget(open);
 
+    auto *zoomOut = new QPushButton("−", this);
+    zoomOut->setFixedWidth(26);
+    zoomOut->setToolTip("Smaller chat text (Ctrl + Scroll down)");
+    m_zoomReset = new QPushButton("100%", this);
+    m_zoomReset->setMinimumWidth(46);
+    m_zoomReset->setToolTip("Reset chat zoom to 100% (Ctrl + 0)");
+    auto *zoomIn = new QPushButton("+", this);
+    zoomIn->setFixedWidth(26);
+    zoomIn->setToolTip("Larger chat text (Ctrl + Scroll up)");
+    auto *bottomBar = new QHBoxLayout;
+    bottomBar->setSpacing(4);
+    bottomBar->addWidget(zoomOut);
+    bottomBar->addWidget(m_zoomReset);
+    bottomBar->addWidget(zoomIn);
+    bottomBar->addStretch(1);
+    bottomBar->addWidget(m_taps);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(5);
@@ -368,7 +432,13 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     layout->addWidget(m_gifts);
     layout->addWidget(m_messages, 1);
     layout->addLayout(actions);
-    layout->addWidget(m_taps, 0, Qt::AlignRight);
+    layout->addLayout(bottomBar);
+
+    connect(zoomOut, &QPushButton::clicked, this, [this] { setChatScale(m_chatScale - 0.10); });
+    connect(zoomIn, &QPushButton::clicked, this, [this] { setChatScale(m_chatScale + 0.10); });
+    connect(m_zoomReset, &QPushButton::clicked, this, [this] { setChatScale(1.0); });
+    const qreal savedScale = QSettings("TikStream", "UI2").value("chatScale", 1.0).toDouble();
+    setChatScale(savedScale);
 
     connect(m_accountEdit, &QLineEdit::returnPressed, this, &LiveChat::applyAccountFromInput);
     connect(connectBtn, &QPushButton::clicked, this, &LiveChat::applyAccountFromInput);
@@ -455,6 +525,49 @@ void LiveChat::showEvent(QShowEvent *event)
         m_started = true;
         if (!m_account.isEmpty()) start();
         if (!m_kickAccount.isEmpty()) startKick();
+    }
+}
+
+bool LiveChat::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Wheel) {
+        auto *we = static_cast<QWheelEvent *>(event);
+        if (we->modifiers() & Qt::ControlModifier) {
+            const int dy = we->angleDelta().y();
+            if (dy != 0) setChatScale(m_chatScale + (dy > 0 ? 0.10 : -0.10));
+            we->accept();
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void LiveChat::keyPressEvent(QKeyEvent *event)
+{
+    if (event->modifiers() & Qt::ControlModifier) {
+        if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal) { setChatScale(m_chatScale + 0.10); event->accept(); return; }
+        if (event->key() == Qt::Key_Minus) { setChatScale(m_chatScale - 0.10); event->accept(); return; }
+        if (event->key() == Qt::Key_0) { setChatScale(1.0); event->accept(); return; }
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void LiveChat::setChatScale(qreal scale)
+{
+    const qreal clamped = std::round(std::clamp(scale, 0.75, 2.20) * 20.0) / 20.0;
+    const auto *scroll = m_messages ? m_messages->verticalScrollBar() : nullptr;
+    const bool follow = !scroll || scroll->value() >= scroll->maximum() - 2;
+    m_chatScale = clamped;
+    if (m_delegate) m_delegate->setScale(m_chatScale);
+    if (m_zoomReset) m_zoomReset->setText(QStringLiteral("%1%").arg(int(std::lround(m_chatScale * 100.0))));
+    if (m_messages) {
+        m_messages->doItemsLayout();
+        m_messages->viewport()->update();
+        if (follow) m_messages->scrollToBottom();
+    }
+    if (!QCoreApplication::arguments().contains("--test")) {
+        QSettings qs("TikStream", "UI2");
+        qs.setValue("chatScale", m_chatScale);
     }
 }
 

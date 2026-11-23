@@ -15,6 +15,7 @@ class QListWidget;
 class QPushButton;
 class QJsonArray;
 class GiftNotifications;
+class ChatMessageDelegate;
 
 class LiveChat final : public QWidget
 {
@@ -41,6 +42,8 @@ signals:
 
 protected:
     void showEvent(QShowEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
 
 private:
     void start();
@@ -49,6 +52,7 @@ private:
     void stopKickProcess();
     void applyAccountFromInput();
     void applyKickAccountFromInput();
+    void setChatScale(qreal scale);
     void updateCombinedStatus();
     void notifyOverlay();
     void readEvents();
@@ -62,6 +66,9 @@ private:
     QLabel *m_status;
     QLabel *m_taps;
     QListWidget *m_messages;
+    ChatMessageDelegate *m_delegate = nullptr;
+    QPushButton *m_zoomReset = nullptr;
+    qreal m_chatScale = 1.0;
     GiftNotifications *m_gifts;
     QPushButton *m_connection;
     QString m_account;
