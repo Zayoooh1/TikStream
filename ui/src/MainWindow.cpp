@@ -407,6 +407,8 @@ bool newSourceOptions(QWidget *parent, const QString &type, const QJsonArray &ca
             options["alertFollowSoundPath"] = fSnd->text().trimmed();
             options["alertDurationSec"] = dur->value();
             options["alertVolume"] = vol->value() / 100.0;
+            options["alertGiftVolume"] = vol->value() / 100.0;
+            options["alertFollowVolume"] = vol->value() / 100.0;
             options["volume"] = vol->value() / 100.0;
             options["monitorMode"] = "MonitorAndOutput";
         };
@@ -684,21 +686,32 @@ void MainWindow::buildMenu()
                            "Desktop Duplication → D3D11 → NVENC (zero-copy)<br>GPU: " + m_gpu);
     });
 
-    // Keep top-level menu popups on the same monitor as the clicked menu bar button (fixes multi-monitor + custom QT_SCALE_FACTOR misplacement)
+    // Keep top-level menu popups on the same monitor as the clicked menu bar button using physical Win32 coordinates (bypasses Qt 6 QT_SCALE_FACTOR multi-monitor popup bug)
     for (QMenu *m : {file, edit, view, help}) {
         connect(m, &QMenu::aboutToShow, this, [this, m] {
             QTimer::singleShot(0, m, [this, m] {
                 if (!m->isVisible() || !menuBar()) return;
+                HWND mbHwnd = reinterpret_cast<HWND>(menuBar()->winId());
+                HWND menuHwnd = reinterpret_cast<HWND>(m->winId());
+                HWND mainHwnd = reinterpret_cast<HWND>(winId());
+                if (!mbHwnd || !menuHwnd || !mainHwnd) return;
+                RECT mbRect{}, menuRect{};
+                if (!GetWindowRect(mbHwnd, &mbRect) || !GetWindowRect(menuHwnd, &menuRect)) return;
                 const QRect ar = menuBar()->actionGeometry(m->menuAction());
-                QPoint p = menuBar()->mapToGlobal(ar.bottomLeft());
-                QScreen *scr = screen() ? screen() : QGuiApplication::screenAt(p);
-                if (scr) {
-                    const QRect av = scr->availableGeometry();
-                    const QSize sz = m->sizeHint().expandedTo(m->size());
-                    p.setX(std::clamp(p.x(), av.left(), std::max(av.left(), av.right() - sz.width())));
-                    p.setY(std::clamp(p.y(), av.top(), std::max(av.top(), av.bottom() - sz.height())));
+                const qreal dpr = menuBar()->devicePixelRatioF();
+                int x = mbRect.left + int(std::lround(ar.left() * dpr));
+                int y = mbRect.top + int(std::lround(ar.bottom() * dpr));
+                const int mw = std::max(1, int(menuRect.right - menuRect.left));
+                const int mh = std::max(1, int(menuRect.bottom - menuRect.top));
+                HMONITOR mon = MonitorFromWindow(mainHwnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{};
+                mi.cbSize = sizeof(mi);
+                if (mon && GetMonitorInfoW(mon, &mi)) {
+                    const RECT &w = mi.rcWork;
+                    x = std::clamp(x, int(w.left), std::max(int(w.left), int(w.right) - mw));
+                    y = std::clamp(y, int(w.top), std::max(int(w.top), int(w.bottom) - mh));
                 }
-                m->move(p);
+                SetWindowPos(menuHwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             });
         });
     }
@@ -1636,22 +1649,28 @@ QWidget *MainWindow::pageAlertBox()
     f->addRow("", m_alertOnGift);
     addPicker("Gift Image/GIF", m_alertGiftImage, "Select Gift Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertGiftImagePath");
     addPicker("Gift Sound", m_alertGiftSound, "Select Gift Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertGiftSoundPath");
+    m_alertGiftVolume = new PaddedSpinBox;
+    m_alertGiftVolume->setRange(0, 200);
+    m_alertGiftVolume->setSingleStep(5);
+    m_alertGiftVolume->setSuffix(" %");
+    m_alertGiftVolume->setToolTip("100% = 0 dB (normal), below 100% = quieter, 100-200% = up to +18 dB boost");
+    f->addRow("Gift Sound Volume", m_alertGiftVolume);
 
     m_alertOnFollow = new QCheckBox("Enable Follow alerts");
     f->addRow("", m_alertOnFollow);
     addPicker("Follow Image/GIF", m_alertFollowImage, "Select Follow Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertFollowImagePath");
     addPicker("Follow Sound", m_alertFollowSound, "Select Follow Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertFollowSoundPath");
+    m_alertFollowVolume = new PaddedSpinBox;
+    m_alertFollowVolume->setRange(0, 200);
+    m_alertFollowVolume->setSingleStep(5);
+    m_alertFollowVolume->setSuffix(" %");
+    m_alertFollowVolume->setToolTip("100% = 0 dB (normal), below 100% = quieter, 100-200% = up to +18 dB boost");
+    f->addRow("Follow Sound Volume", m_alertFollowVolume);
 
     m_alertDuration = new PaddedSpinBox;
     m_alertDuration->setRange(2, 15);
     m_alertDuration->setSuffix(" s");
     f->addRow("Duration", m_alertDuration);
-
-    m_alertVolume = new PaddedSpinBox;
-    m_alertVolume->setRange(0, 100);
-    m_alertVolume->setSingleStep(5);
-    m_alertVolume->setSuffix(" %");
-    f->addRow("Sound Volume", m_alertVolume);
 
     auto *testRow = new QHBoxLayout();
     auto *testGift = new QPushButton("Test Gift Alert");
@@ -1661,13 +1680,28 @@ QWidget *MainWindow::pageAlertBox()
     testRow->addWidget(testGift);
     testRow->addWidget(testFollow);
     f->addRow("", testRow);
-    f->addRow("", hintLabel("Animated GIFs, PNG/JPG images, and MP3/WAV sounds play in real time on both your stream and headphones."));
+    f->addRow("", hintLabel("Gift Sound and Follow Sound have separate volume sliders here and in the Audio Mixer."));
 
     connect(m_alertDuration, &QSpinBox::valueChanged, this, [this](int v) {
         if (!m_loading) editSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
     });
-    connect(m_alertVolume, &QSpinBox::valueChanged, this, [this](int v) {
-        if (!m_loading) editSource([v](QJsonObject &s) { s["alertVolume"] = v / 100.0; });
+    connect(m_alertGiftVolume, &QSpinBox::valueChanged, this, [this](int v) {
+        if (m_loading) return;
+        const QString sid = selectedSource()["id"].toString();
+        editSource([v](QJsonObject &s) { s["alertGiftVolume"] = v / 100.0; });
+        if (m_strips.contains(sid + ":gift")) {
+            QSignalBlocker b(m_strips[sid + ":gift"].slider);
+            m_strips[sid + ":gift"].slider->setValue(v);
+        }
+    });
+    connect(m_alertFollowVolume, &QSpinBox::valueChanged, this, [this](int v) {
+        if (m_loading) return;
+        const QString sid = selectedSource()["id"].toString();
+        editSource([v](QJsonObject &s) { s["alertFollowVolume"] = v / 100.0; });
+        if (m_strips.contains(sid + ":follow")) {
+            QSignalBlocker b(m_strips[sid + ":follow"].slider);
+            m_strips[sid + ":follow"].slider->setValue(v);
+        }
     });
     connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
         if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
@@ -2589,7 +2623,9 @@ void MainWindow::loadProperties()
         m_alertFollowImage->setText(src["alertFollowImagePath"].toString().isEmpty() ? fallbackImg : src["alertFollowImagePath"].toString());
         m_alertFollowSound->setText(src["alertFollowSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertFollowSoundPath"].toString());
         m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
-        m_alertVolume->setValue(qRound(src["alertVolume"].toDouble(1.0) * 100.0));
+        const double fallbackVol = src.value("alertVolume").toDouble(1.0);
+        m_alertGiftVolume->setValue(qRound(src.value("alertGiftVolume").toDouble(fallbackVol) * 100.0));
+        m_alertFollowVolume->setValue(qRound(src.value("alertFollowVolume").toDouble(fallbackVol) * 100.0));
         m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
         m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
     }
@@ -2644,17 +2680,32 @@ void MainWindow::rebuildMixer()
         return {true, true};
     };
 
-    QList<QJsonObject> audio;
+    struct MixerEntry {
+        QJsonObject src;
+        QString stripKey;     // matches Engine.Audio.Levels key ("<id>" or "<id>:gift" / "<id>:follow")
+        QString volField;     // "volume" | "alertGiftVolume" | "alertFollowVolume"
+        QString muteField;    // "muted"  | "alertGiftMuted"  | "alertFollowMuted"
+        QString suffix;       // "" | "Gift Sound" | "Follow Sound"
+    };
+    QList<MixerEntry> audio;
     for (const auto &v : sources()) {
         const auto s = v.toObject();
         const QString t = s["type"].toString();
         const auto id = s["id"].toString();
         const bool sceneDevice = sourceTypeInfo(t).audio && !s["globalAudio"].toBool();
         if (sceneDevice && !sceneAudioV.contains(id)) continue;
-        if (sourceTypeInfo(t).audio || t == "Media" || t == "AlertBox" || t == "Browser") {
-            audio << s;
+        if (t == "AlertBox") {
             const auto [onV, onH] = sourceRouting(s);
-            sig << s["id"].toString() + s["name"].toString() + s["deviceId"].toString()
+            audio << MixerEntry{s, id + ":gift", "alertGiftVolume", "alertGiftMuted", "Gift Sound"};
+            audio << MixerEntry{s, id + ":follow", "alertFollowVolume", "alertFollowMuted", "Follow Sound"};
+            sig << id + s["name"].toString()
+                + (s["muted"].toBool() || s["alertGiftMuted"].toBool() ? "mg" : "")
+                + (s["muted"].toBool() || s["alertFollowMuted"].toBool() ? "mf" : "")
+                + (onV ? "V" : "v") + (onH ? "H" : "h");
+        } else if (sourceTypeInfo(t).audio || t == "Media" || t == "Browser") {
+            audio << MixerEntry{s, id, "volume", "muted", ""};
+            const auto [onV, onH] = sourceRouting(s);
+            sig << id + s["name"].toString() + s["deviceId"].toString()
                 + (s["muted"].toBool() ? "m" : "")
                 + (onV ? "V" : "v") + (onH ? "H" : "h");
         }
@@ -2672,8 +2723,19 @@ void MainWindow::rebuildMixer()
     }
     m_strips.clear();
 
-    for (const auto &s : audio) {
+    auto volumeDbTip = [](int val) -> QString {
+        if (val <= 0) return QStringLiteral("0% (-inf dB • Muted)");
+        const double v = val / 100.0;
+        const double db = (v <= 1.0) ? (20.0 * std::log10(std::pow(v, 2.2))) : ((v - 1.0) * 18.0);
+        return QStringLiteral("%1% (%2%3 dB)").arg(val).arg(db >= 0.05 ? "+" : "").arg(QString::number(db, 'f', 1));
+    };
+
+    for (const auto &entry : audio) {
+        const auto &s = entry.src;
         const QString id = s["id"].toString();
+        const QString stripKey = entry.stripKey;
+        const QString volField = entry.volField;
+        const QString muteField = entry.muteField;
         const QString type = s["type"].toString();
         auto *w = new QFrame;
         w->setObjectName("channel");
@@ -2688,8 +2750,8 @@ void MainWindow::rebuildMixer()
         const auto application = s["deviceId"].toString();
         if (type == "AudioApplication" && !application.isEmpty() && !channelName.contains(application, Qt::CaseInsensitive))
             channelName += " · " + application;
-        else if (type == "AlertBox")
-            channelName = channelName.isEmpty() ? "Alert Sounds" : channelName + " · Alert Sounds";
+        else if (!entry.suffix.isEmpty())
+            channelName = channelName.isEmpty() ? entry.suffix : channelName + " · " + entry.suffix;
         auto *name = new QLabel(channelName);
         name->setWordWrap(true);
         name->setObjectName("channelName");
@@ -2822,9 +2884,10 @@ void MainWindow::rebuildMixer()
         }
 
         auto *row = new QHBoxLayout();
-        auto *mute = toolBtn(s["muted"].toBool() ? "speaker-off" : "speaker", "Mute");
+        const bool isMuted = s.value(muteField).toBool(false) || (muteField != "muted" && s.value("muted").toBool(false));
+        auto *mute = toolBtn(isMuted ? "speaker-off" : "speaker", "Mute");
         mute->setCheckable(true);
-        mute->setChecked(s["muted"].toBool());
+        mute->setChecked(isMuted);
         const bool hiddenInScene = !onV && !onH;
         meter->setMuted(mute->isChecked() || hiddenInScene);
         auto *slider = hslider(0, 200);
@@ -2838,34 +2901,50 @@ void MainWindow::rebuildMixer()
             v->addLayout(levels, 1);
         }
         slider->setObjectName("volume");
-        slider->setValue(qRound(s["volume"].toDouble(1) * 100));
+        const double fallbackAlertVol = (type == "AlertBox") ? s.value("alertVolume").toDouble(1.0) : 1.0;
+        const int initVal = qRound(s.value(volField).toDouble(fallbackAlertVol) * 100.0);
+        slider->setValue(std::clamp(initVal, 0, 200));
+        slider->setToolTip(volumeDbTip(slider->value()));
         auto *pct = new QLabel(QString("%1%").arg(slider->value()));
         pct->setObjectName("channelPct");
         pct->setFixedWidth(40);
         pct->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        pct->setToolTip(volumeDbTip(slider->value()));
         row->addWidget(mute);
         if (!m_mixerVertical) row->addWidget(slider, 1);
         else row->addStretch(1);
         row->addWidget(pct);
         v->addLayout(row);
 
-        connect(slider, &QSlider::valueChanged, this, [this, id, pct](int val) {
+        connect(slider, &QSlider::valueChanged, this, [this, id, volField, pct, slider, volumeDbTip](int val) {
             pct->setText(QString("%1%").arg(val));
+            const QString tip = volumeDbTip(val);
+            pct->setToolTip(tip);
+            slider->setToolTip(tip);
             QJsonObject src = sourceById(id);
-            src["volume"] = val / 100.0;
+            src[volField] = val / 100.0;
             setSource(src);
+            if (selectedSource()["id"].toString() == id) {
+                if (volField == "alertGiftVolume" && m_alertGiftVolume) {
+                    QSignalBlocker b(m_alertGiftVolume);
+                    m_alertGiftVolume->setValue(val);
+                } else if (volField == "alertFollowVolume" && m_alertFollowVolume) {
+                    QSignalBlocker b(m_alertFollowVolume);
+                    m_alertFollowVolume->setValue(val);
+                }
+            }
             applySoon();
         });
-        connect(mute, &QToolButton::toggled, this, [this, id, mute, meter, hiddenInScene](bool m) {
+        connect(mute, &QToolButton::toggled, this, [this, id, muteField, mute, meter, hiddenInScene](bool m) {
             mute->setIcon(themedIcon(m ? "speaker-off" : "speaker"));
             meter->setMuted(m || hiddenInScene);
             QJsonObject src = sourceById(id);
-            src["muted"] = m;
+            src[muteField] = m;
             setSource(src);
             applySoon();
         });
         m_mixerLayout->insertWidget(m_mixerLayout->count() - 1, w);
-        m_strips[id] = Strip{meter, db, mute, slider};
+        m_strips[stripKey] = Strip{meter, db, mute, slider};
     }
     if (audio.isEmpty()) {
         auto *l = hintLabel("No audio sources. Add a microphone or desktop audio via \"Add Source\" or in Settings → Audio.");
@@ -3197,8 +3276,9 @@ void MainWindow::showNextAlert()
             if (ev.kind == "gift" && !s["alertOnGift"].toBool(true)) continue;
             if (ev.kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
             maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
-            volume = s["alertVolume"].toDouble(1.0);
-            if (alertSourceId.isEmpty()) alertSourceId = s["id"].toString();
+            const double fallbackVol = s.value("alertVolume").toDouble(1.0);
+            volume = s.value(ev.kind == "gift" ? "alertGiftVolume" : "alertFollowVolume").toDouble(fallbackVol);
+            if (alertSourceId.isEmpty()) alertSourceId = s["id"].toString() + (ev.kind == "gift" ? ":gift" : ":follow");
             if (soundPath.isEmpty()) {
                 soundPath = s[ev.kind == "gift" ? "alertGiftSoundPath" : "alertFollowSoundPath"].toString();
                 if (soundPath.isEmpty()) soundPath = s["alertSoundPath"].toString();

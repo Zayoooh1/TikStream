@@ -49,6 +49,19 @@ public sealed class AudioEngine : IDisposable
     /// <summary>Synchronizes devices (inputs/outputs) with the source list. Media sources register separately.</summary>
     private readonly Dictionary<string, (string Key, DateTime Retry)> _failed = new();
 
+    /// <summary>
+    /// Converts a UI slider value (0..2, i.e. 0%..200%) into linear amplitude gain using an OBS-style perceptual curve:
+    /// 0% = -inf dB, 0..100% = smooth perceptual taper to 0.0 dB unity gain (v^2.2), 100..200% = smooth +0..+18 dB boost.
+    /// </summary>
+    public static float VolumeToGain(float sliderValue)
+    {
+        if (sliderValue <= 0.0001f) return 0f;
+        float v = Math.Clamp(sliderValue, 0f, 2f);
+        if (v <= 1f) return MathF.Pow(v, 2.2f);
+        float boostDb = (v - 1f) * 18f;
+        return MathF.Pow(10f, boostDb / 20f);
+    }
+
     public void SyncDevices(AppSettings settings)
     {
         var audibleV = settings.ActiveScene?.Items.Where(i => i.Visible).Select(i => i.SourceId).ToHashSet();
@@ -92,7 +105,7 @@ public sealed class AudioEngine : IDisposable
                 {
                     bool onV = !d.Muted && (d.GlobalAudio == true ? (d.AudioVertical ?? true) : audibleV?.Contains(d.Id) == true);
                     bool onH = !d.Muted && (d.GlobalAudio == true ? (d.AudioHorizontal ?? true) : audibleH?.Contains(d.Id) == true);
-                    inp.SetVolume((onV || onH) ? d.Volume : 0);
+                    inp.SetVolume((onV || onH) ? VolumeToGain(d.Volume) : 0);
                     inp.SetRouting(onV, onH);
                     inp.SetMonitorMode(d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
@@ -105,7 +118,7 @@ public sealed class AudioEngine : IDisposable
                 {
                     bool onV = !d.Muted && !d.BrowserMuted && (audibleV?.Contains(d.Id) == true);
                     bool onH = !d.Muted && !d.BrowserMuted && (audibleH?.Contains(d.Id) == true);
-                    inp.SetVolume((onV || onH) ? d.Volume : 0);
+                    inp.SetVolume((onV || onH) ? VolumeToGain(d.Volume) : 0);
                     inp.SetRouting(onV, onH);
                     inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
@@ -121,23 +134,31 @@ public sealed class AudioEngine : IDisposable
                     inp.SetRouting(onV, onH);
                 }
             }
+            var alertChannelIds = new HashSet<string>();
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.AlertBox))
             {
-                if (!_inputs.TryGetValue(d.Id, out var inp))
-                {
-                    inp = Input.FromPush(d.Name, _mixer, isAlert: true);
-                    _inputs[d.Id] = inp;
-                }
                 bool onV = !d.Muted && (audibleV?.Contains(d.Id) != false);
                 bool onH = !d.Muted && (audibleH?.Contains(d.Id) != false);
-                inp.SetVolume((onV || onH) ? d.Volume : 0);
-                inp.SetRouting(onV, onH);
-                inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
-                inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
-                    d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                string mon = string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode;
+                void syncAlertChannel(string chId, string chName, float vol, bool muted)
+                {
+                    alertChannelIds.Add(chId);
+                    if (!_inputs.TryGetValue(chId, out var inp))
+                    {
+                        inp = Input.FromPush(chName, _mixer, isAlert: true);
+                        _inputs[chId] = inp;
+                    }
+                    bool active = !muted && (onV || onH);
+                    inp.SetVolume(active ? VolumeToGain(vol) : 0);
+                    inp.SetRouting(onV && !muted, onH && !muted);
+                    inp.SetMonitorMode(mon);
+                    inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
+                        d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                }
+                syncAlertChannel(d.Id + ":gift", d.Name + " · Gift", d.AlertGiftVolume ?? d.AlertVolume, d.AlertGiftMuted);
+                syncAlertChannel(d.Id + ":follow", d.Name + " · Follow", d.AlertFollowVolume ?? d.AlertVolume, d.AlertFollowMuted);
             }
-            var alertIds = settings.Sources.Where(x => x.Type == SourceType.AlertBox).Select(x => x.Id).ToHashSet();
-            foreach (var id in _inputs.Where(kv => kv.Value.IsAlert && !alertIds.Contains(kv.Key)).Select(kv => kv.Key).ToList())
+            foreach (var id in _inputs.Where(kv => kv.Value.IsAlert && !alertChannelIds.Contains(kv.Key)).Select(kv => kv.Key).ToList())
             {
                 _inputs[id].Dispose(_mixer);
                 _inputs.Remove(id);
@@ -179,7 +200,7 @@ public sealed class AudioEngine : IDisposable
 
     public void SetVolume(string id, float v)
     {
-        lock (_lock) if (_inputs.TryGetValue(id, out var i)) i.SetVolume(v);
+        lock (_lock) if (_inputs.TryGetValue(id, out var i)) i.SetVolume(VolumeToGain(v));
     }
 
     public void SetFilters(string id, SourceDef d)
@@ -338,11 +359,16 @@ public sealed class AudioEngine : IDisposable
     public void PlayAlertSound(string sourceId, string path, float volume = 1f)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
-        float vol = Math.Clamp(volume, 0f, 2f);
+        float fallbackGain = VolumeToGain(volume);
         Task.Run(() =>
         {
             try
             {
+                Input? target = null;
+                lock (_lock)
+                {
+                    if (!string.IsNullOrEmpty(sourceId)) _inputs.TryGetValue(sourceId, out target);
+                }
                 float[] samples;
                 using (var reader = new AudioFileReader(path))
                 {
@@ -350,7 +376,9 @@ public sealed class AudioEngine : IDisposable
                     if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
                     else if (sp.WaveFormat.Channels > 2) sp = new MultiplexingSampleProvider(new[] { sp }, 2);
                     if (sp.WaveFormat.SampleRate != SampleRate) sp = new WdlResamplingSampleProvider(sp, SampleRate);
-                    if (Math.Abs(vol - 1f) > 0.001f) sp = new VolumeSampleProvider(sp) { Volume = vol };
+                    // When routed through a dedicated mixer channel (e.g. "<id>:gift"), the channel fader controls gain directly (no double scaling).
+                    float gain = target != null ? 1f : fallbackGain;
+                    if (Math.Abs(gain - 1f) > 0.001f) sp = new VolumeSampleProvider(sp) { Volume = gain };
 
                     var pcm = new List<float>(SampleRate * Channels * 4);
                     var tmp = new float[4096];
@@ -364,11 +392,6 @@ public sealed class AudioEngine : IDisposable
                 }
                 if (samples.Length == 0) return;
 
-                Input? target = null;
-                lock (_lock)
-                {
-                    if (!string.IsNullOrEmpty(sourceId)) _inputs.TryGetValue(sourceId, out target);
-                }
                 if (target != null)
                 {
                     target.Push(samples, samples.Length);
@@ -377,7 +400,7 @@ public sealed class AudioEngine : IDisposable
 
                 // Fallback when no dedicated AlertBox channel is registered
                 lock (_lock) _mixer.AddMixerInput(new OneShotSampleProvider(samples, MixFormat));
-                using var localReader = new AudioFileReader(path) { Volume = Math.Clamp(vol, 0f, 1f) };
+                using var localReader = new AudioFileReader(path) { Volume = Math.Clamp(fallbackGain, 0f, 1f) };
                 using var wo = new WasapiOut(AudioClientShareMode.Shared, 60);
                 using var done = new ManualResetEventSlim(false);
                 wo.PlaybackStopped += (_, _) => done.Set();

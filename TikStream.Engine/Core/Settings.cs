@@ -87,6 +87,12 @@ public sealed record SourceDef
     public string AlertFollowImagePath { get; set; } = "";
     public string AlertFollowSoundPath { get; set; } = "";
     public float AlertVolume { get; set; } = 1.0f;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float? AlertGiftVolume { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float? AlertFollowVolume { get; set; }
+    public bool AlertGiftMuted { get; set; }
+    public bool AlertFollowMuted { get; set; }
     public int AlertDurationSec { get; set; } = 5;
     public bool AlertOnGift { get; set; } = true;
     public bool AlertOnFollow { get; set; } = true;
