@@ -31,14 +31,24 @@
 #include <algorithm>
 #include <cmath>
 
+struct ChatPart {
+    bool isEmote = false;
+    QString text;
+    QString url;
+};
+Q_DECLARE_METATYPE(ChatPart)
+Q_DECLARE_METATYPE(QList<ChatPart>)
+
 namespace {
 constexpr int historyLimit = 200;
 constexpr int imageLimit = 128 * 1024;
+constexpr int emoteImageLimit = 512 * 1024;
 constexpr int RoleAvatarUrl = Qt::UserRole;
 constexpr int RolePlatform = Qt::UserRole + 1;
 constexpr int RoleNick = Qt::UserRole + 2;
 constexpr int RoleBody = Qt::UserRole + 3;
 constexpr int RoleColor = Qt::UserRole + 4;
+constexpr int RoleParts = Qt::UserRole + 5;
 
 QString normalizeAccount(QString raw)
 {
@@ -66,6 +76,151 @@ bool avatarHost(const QString &host)
         if (host == QLatin1StringView(domain) || host.endsWith(QStringLiteral(".") + QLatin1StringView(domain))) return true;
     }
     return false;
+}
+
+bool emoteHost(const QString &host)
+{
+    for (const auto *domain : {"files.kick.com", "static-cdn.jtvnw.net", "cdn.7tv.app", "cdn.betterttv.net", "cdn.frankerfacez.com"}) {
+        if (host == QLatin1StringView(domain) || host.endsWith(QStringLiteral(".") + QLatin1StringView(domain))) return true;
+    }
+    return false;
+}
+
+int layoutMessageBody(QPainter *p,
+                      const QRect &rect,
+                      const QFont &font,
+                      const QString &body,
+                      const QList<ChatPart> &parts,
+                      const QCache<QString, QPixmap> *emotes,
+                      int emoteH)
+{
+    const QFontMetrics fm(font);
+    const int availW = std::max(40, rect.width());
+    if (parts.isEmpty()) {
+        if (p) {
+            p->setFont(font);
+            p->drawText(rect, Qt::TextWordWrap | Qt::TextWrapAnywhere | Qt::AlignLeft | Qt::AlignTop, body);
+        }
+        return fm.boundingRect(QRect(0, 0, availW, 4000), Qt::TextWordWrap | Qt::TextWrapAnywhere, body).height();
+    }
+
+    struct DrawTok {
+        bool isEmote = false;
+        QString text;
+        QPixmap pm;
+        int w = 0;
+        int h = 0;
+    };
+    QList<DrawTok> toks;
+    toks.reserve(parts.size() * 2);
+
+    const int textH = fm.height();
+    const int spaceW = std::max(3, fm.horizontalAdvance(QLatin1Char(' ')));
+
+    auto pushWordChunk = [&](const QString &word) {
+        if (word.isEmpty()) return;
+        const int ww = fm.horizontalAdvance(word);
+        if (ww <= availW) {
+            toks.append({false, word, {}, ww, textH});
+            return;
+        }
+        // Break overly long unbreakable tokens to match TextWrapAnywhere
+        int start = 0;
+        while (start < word.size()) {
+            int len = 1;
+            int chunkW = fm.horizontalAdvance(word.mid(start, 1));
+            while (start + len < word.size()) {
+                const int nextW = fm.horizontalAdvance(word.mid(start, len + 1));
+                if (nextW > availW) break;
+                chunkW = nextW;
+                ++len;
+            }
+            toks.append({false, word.mid(start, len), {}, chunkW, textH});
+            start += len;
+        }
+    };
+
+    for (const auto &part : parts) {
+        if (part.isEmote) {
+            const QPixmap *pm = (emotes && !part.url.isEmpty()) ? emotes->object(part.url) : nullptr;
+            if (pm && !pm->isNull() && pm->height() > 0) {
+                const qreal aspect = qreal(pm->width()) / qreal(pm->height());
+                const int ew = std::clamp(int(std::lround(emoteH * aspect)), emoteH / 2, std::min(availW, emoteH * 3));
+                toks.append({true, part.text, *pm, ew + 2, emoteH});
+            } else {
+                pushWordChunk(part.text);
+            }
+            continue;
+        }
+        // Split text preserving spaces as separate breakable tokens
+        int i = 0;
+        const int n = part.text.size();
+        while (i < n) {
+            if (part.text[i].isSpace()) {
+                while (i < n && part.text[i].isSpace()) ++i;
+                toks.append({false, QStringLiteral(" "), {}, spaceW, textH});
+            } else {
+                const int s = i;
+                while (i < n && !part.text[i].isSpace()) ++i;
+                pushWordChunk(part.text.mid(s, i - s));
+            }
+        }
+    }
+
+    struct LineItem {
+        int tokIdx;
+        int x;
+    };
+    QList<QList<LineItem>> lines;
+    QList<int> lineHeights;
+
+    QList<LineItem> curLine;
+    int curX = 0;
+    int curH = textH;
+
+    for (int i = 0; i < toks.size(); ++i) {
+        const auto &t = toks[i];
+        const bool isSpace = !t.isEmote && t.text == QLatin1StringView(" ");
+        if (isSpace && curX == 0) continue; // drop leading space on wrapped lines
+        if (curX > 0 && curX + t.w > availW) {
+            lines.append(curLine);
+            lineHeights.append(curH);
+            curLine.clear();
+            curX = 0;
+            curH = textH;
+            if (isSpace) continue;
+        }
+        curLine.append({i, curX});
+        curX += t.w;
+        curH = std::max(curH, t.h);
+    }
+    if (!curLine.isEmpty()) {
+        lines.append(curLine);
+        lineHeights.append(curH);
+    }
+
+    const int lineGap = 2;
+    int totalH = 0;
+    if (p) p->setFont(font);
+    for (int li = 0; li < lines.size(); ++li) {
+        const int lh = lineHeights[li];
+        const int y = rect.top() + totalH;
+        if (p) {
+            for (const auto &item : lines[li]) {
+                const auto &t = toks[item.tokIdx];
+                if (t.isEmote) {
+                    const int drawW = std::max(1, t.w - 2);
+                    const QRect dst(rect.left() + item.x + 1, y + (lh - t.h) / 2, drawW, t.h);
+                    p->drawPixmap(dst, t.pm);
+                } else {
+                    const QRect dst(rect.left() + item.x, y, t.w + 2, lh);
+                    p->drawText(dst, Qt::AlignLeft | Qt::AlignVCenter, t.text);
+                }
+            }
+        }
+        totalH += lh + (li + 1 < lines.size() ? lineGap : 0);
+    }
+    return std::max(textH, totalH);
 }
 
 QPixmap makePlatformBadge(const QString &platform, int sz = 16)
@@ -119,7 +274,8 @@ const QPixmap &platformBadgeCached(const QString &platform, int sz = 16)
 class ChatMessageDelegate final : public QStyledItemDelegate
 {
 public:
-    explicit ChatMessageDelegate(QListWidget *list) : QStyledItemDelegate(list), m_list(list) {}
+    explicit ChatMessageDelegate(QListWidget *list, const QCache<QString, QPixmap> *emotes)
+        : QStyledItemDelegate(list), m_list(list), m_emotes(emotes) {}
 
     void setScale(qreal scale) { m_scale = std::clamp(scale, 0.75, 2.20); }
     qreal scale() const { return m_scale; }
@@ -127,12 +283,14 @@ public:
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
         const QString body = index.data(RoleBody).toString();
+        const auto parts = index.data(RoleParts).value<QList<ChatPart>>();
         const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         const bool hasAvatar = !avatar.isNull();
 
         const int pxFont = std::clamp(int(std::lround(13.0 * m_scale)), 10, 32);
         const int avSz = std::clamp(int(std::lround(24.0 * m_scale)), 18, 52);
         const int badgeSz = std::clamp(int(std::lround(16.0 * m_scale)), 12, 34);
+        const int emoteH = std::clamp(int(std::lround(pxFont * 1.55)), 16, 48);
         const int padX = std::max(6, int(std::lround(8.0 * m_scale)));
         const int padY = std::max(4, int(std::lround(5.0 * m_scale)));
         const int avGap = std::max(5, int(std::lround(6.0 * m_scale)));
@@ -149,10 +307,9 @@ public:
         QFont nickF = bodyF;
         nickF.setBold(true);
         const QFontMetrics nfm(nickF);
-        const QFontMetrics bfm(bodyF);
         const int headH = std::max(badgeSz, nfm.height());
-        const QRect br = bfm.boundingRect(QRect(0, 0, availW, 4000), Qt::TextWordWrap | Qt::TextWrapAnywhere, body);
-        const int contentH = padY + headH + lineGap + br.height() + padY + 2;
+        const int bodyH = layoutMessageBody(nullptr, QRect(0, 0, availW, 4000), bodyF, body, parts, m_emotes, emoteH);
+        const int contentH = padY + headH + lineGap + bodyH + padY + 2;
         const int minAvatarH = hasAvatar ? (padY * 2 + avSz + 2) : (padY * 2 + headH + 4);
         return {viewW, std::max(minAvatarH, contentH)};
     }
@@ -167,6 +324,7 @@ public:
         const QString platform = index.data(RolePlatform).toString();
         const QString nick = index.data(RoleNick).toString();
         const QString body = index.data(RoleBody).toString();
+        const auto parts = index.data(RoleParts).value<QList<ChatPart>>();
         const QString colorHex = index.data(RoleColor).toString();
         const QIcon avatar = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         const bool hasAvatar = !avatar.isNull();
@@ -174,6 +332,7 @@ public:
         const int pxFont = std::clamp(int(std::lround(13.0 * m_scale)), 10, 32);
         const int avSz = std::clamp(int(std::lround(24.0 * m_scale)), 18, 52);
         const int badgeSz = std::clamp(int(std::lround(16.0 * m_scale)), 12, 34);
+        const int emoteH = std::clamp(int(std::lround(pxFont * 1.55)), 16, 48);
         const int padX = std::max(6, int(std::lround(8.0 * m_scale)));
         const int padY = std::max(4, int(std::lround(5.0 * m_scale)));
         const int avGap = std::max(5, int(std::lround(6.0 * m_scale)));
@@ -219,12 +378,13 @@ public:
         p->setPen(QColor(232, 234, 242));
         const int bodyTop = top + headH + lineGap;
         const QRect bodyRect(x, bodyTop, availW, std::max(pxFont + 4, option.rect.bottom() - bodyTop - padY + 2));
-        p->drawText(bodyRect, Qt::TextWordWrap | Qt::TextWrapAnywhere | Qt::AlignLeft | Qt::AlignTop, body);
+        layoutMessageBody(p, bodyRect, bodyF, body, parts, m_emotes, emoteH);
         p->restore();
     }
 
 private:
     QListWidget *m_list = nullptr;
+    const QCache<QString, QPixmap> *m_emotes = nullptr;
     qreal m_scale = 1.0;
 };
 
@@ -387,7 +547,7 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_gifts = new GiftNotifications(this);
     m_messages = new QListWidget(this);
     m_messages->setObjectName("liveChatMessages");
-    m_delegate = new ChatMessageDelegate(m_messages);
+    m_delegate = new ChatMessageDelegate(m_messages, &m_emotes);
     m_messages->setItemDelegate(m_delegate);
     m_messages->setWordWrap(true);
     m_messages->setResizeMode(QListView::Adjust);
@@ -666,7 +826,7 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
 
     // 3. Chat messages from bottom to top (most recent visible)
     if (showChat && bottomY > topY + 40) {
-        struct Msg { QString platform, nick, text, color; QIcon icon; };
+        struct Msg { QString platform, nick, text, color; QIcon icon; QList<ChatPart> parts; };
         QList<Msg> msgs;
         const int count = m_messages->count();
         for (int i = std::max(0, count - 10); i < count; ++i) {
@@ -677,18 +837,18 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
                 it->data(RoleBody).toString(),
                 it->data(RoleColor).toString(),
                 it->icon(),
+                it->data(RoleParts).value<QList<ChatPart>>(),
             });
         }
         if (m_demoPreview && msgs.isEmpty()) {
-            msgs.append({"tiktok", "alex_gg", "Let's get the win today! 🔥", "", QIcon()});
-            msgs.append({"kick", "zayosh_fan", "Crisp quality and smooth 60 FPS!", "", QIcon()});
-            msgs.append({"tiktok", "mark99", "Shoutout from the stream!", "", QIcon()});
+            msgs.append({"tiktok", "alex_gg", "Let's get the win today! 🔥", "", QIcon(), {}});
+            msgs.append({"kick", "zayosh_fan", "Crisp quality and smooth 60 FPS!", "", QIcon(), {}});
+            msgs.append({"tiktok", "mark99", "Shoutout from the stream!", "", QIcon(), {}});
         }
 
         QFont nickF("Segoe UI", 14, QFont::Bold);
         QFont bodyF("Segoe UI", 15, QFont::Normal);
         const QFontMetrics nfm(nickF);
-        const QFontMetrics bfm(bodyF);
         int curBottom = bottomY;
         for (int i = msgs.size() - 1; i >= 0; --i) {
             const auto &m = msgs[i];
@@ -696,9 +856,9 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
             const int iconSz = hasIcon ? 32 : 0;
             const int leftOff = 12 + (hasIcon ? iconSz + 10 : 0);
             const int textW = std::max(80, availW - leftOff - 12);
-            const QRect bodyRect = bfm.boundingRect(QRect(0, 0, textW, 200), Qt::TextWordWrap, m.text);
+            const int bodyH = layoutMessageBody(nullptr, QRect(0, 0, textW, 200), bodyF, m.text, m.parts, &m_emotes, 26);
             const int headH = std::max(20, nfm.height());
-            const int cardH = std::max(hasIcon ? 50 : 44, 8 + headH + 2 + bodyRect.height() + 10);
+            const int cardH = std::max(hasIcon ? 50 : 44, 8 + headH + 2 + bodyH + 10);
             if (curBottom - cardH < topY) break;
             const QRectF card(pad, curBottom - cardH, availW, cardH);
             p.setPen(QPen(QColor(255, 255, 255, 36), 1.0));
@@ -721,7 +881,8 @@ QImage LiveChat::renderOverlay(int width, int height, bool showChat, bool showGi
                        Qt::AlignVCenter, nfm.elidedText(m.nick, Qt::ElideRight, std::max(40, textW - 26)));
             p.setFont(bodyF);
             p.setPen(QColor(245, 247, 252));
-            p.drawText(QRectF(pad + leftOff, card.top() + 10 + headH, textW, bodyRect.height() + 4), Qt::TextWordWrap, m.text);
+            layoutMessageBody(&p, QRect(pad + leftOff, int(card.top()) + 10 + headH, textW, bodyH + 4),
+                              bodyF, m.text, m.parts, &m_emotes, 26);
             curBottom = int(card.top()) - 8;
         }
     }
@@ -971,6 +1132,25 @@ void LiveChat::appendMessages(const QJsonArray &messages)
         item->setData(RoleBody, text);
         item->setData(RoleColor, color);
         item->setData(RoleAvatarUrl, url);
+        if (message.contains("parts")) {
+            const auto arr = message.value("parts").toArray();
+            QList<ChatPart> parts;
+            parts.reserve(arr.size());
+            for (const auto &pv : arr) {
+                const auto po = pv.toObject();
+                const QString kind = po.value("t").toString();
+                if (kind == QLatin1StringView("e")) {
+                    const QString eUrl = po.value("url").toString().left(512);
+                    const QString eName = po.value("name").toString().left(64);
+                    parts.append({true, eName, eUrl});
+                    if (!eUrl.isEmpty() && !m_emotes.contains(eUrl)) requestEmote(eUrl);
+                } else {
+                    const QString s = po.value("v").toString();
+                    if (!s.isEmpty()) parts.append({false, s, {}});
+                }
+            }
+            if (!parts.isEmpty()) item->setData(RoleParts, QVariant::fromValue(parts));
+        }
         if (!url.isEmpty()) {
             if (const auto *cached = m_avatars.object(url)) item->setIcon(*cached);
             else requestAvatar(url);
@@ -1022,6 +1202,56 @@ void LiveChat::startAvatar(const QString &address)
         for (int i = m_messages->count() - 1; i >= 0; --i) {
             auto *item = m_messages->item(i);
             if (item->data(RoleAvatarUrl).toString() == address) item->setIcon(icon);
+        }
+        notifyOverlay();
+    });
+}
+
+void LiveChat::requestEmote(const QString &address)
+{
+    if (m_emotes.contains(address) || m_emoteRequests.contains(address) || m_emoteRequests.size() >= historyLimit) return;
+    const QUrl url(address, QUrl::StrictMode);
+    if (url.scheme() != "https" || !url.userInfo().isEmpty() || !emoteHost(url.host())) return;
+    m_emoteRequests.insert(address);
+    if (m_emoteRequests.size() <= 8) startEmote(address);
+    else m_emoteQueue.enqueue(address);
+}
+
+void LiveChat::startEmote(const QString &address)
+{
+    QNetworkRequest request{QUrl(address)};
+    request.setTransferTimeout(5000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    auto *reply = m_network.get(request);
+    reply->setReadBufferSize(emoteImageLimit + 1);
+    connect(reply, &QNetworkReply::readyRead, this, [reply] {
+        if (reply->bytesAvailable() > emoteImageLimit) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, address] {
+        m_emoteRequests.remove(address);
+        reply->deleteLater();
+        if (!m_emoteQueue.isEmpty()) startEmote(m_emoteQueue.dequeue());
+        if (reply->error() != QNetworkReply::NoError || reply->bytesAvailable() > emoteImageLimit) return;
+        QBuffer imageData;
+        imageData.setData(reply->readAll());
+        imageData.open(QIODevice::ReadOnly);
+        QImageReader reader(&imageData);
+        reader.setAutoTransform(true);
+        const auto size = reader.size();
+        if (!size.isValid() || size.width() > 1024 || size.height() > 1024) return;
+        if (size.height() > 64) {
+            const int targetW = std::max(1, int(std::lround(qreal(size.width()) * 64.0 / qreal(size.height()))));
+            reader.setScaledSize(QSize(std::min(256, targetW), 64));
+        }
+        const auto pixmap = QPixmap::fromImage(reader.read());
+        if (pixmap.isNull()) return;
+        m_emotes.insert(address, new QPixmap(pixmap));
+        const auto *scroll = m_messages ? m_messages->verticalScrollBar() : nullptr;
+        const bool follow = !scroll || scroll->value() >= scroll->maximum() - 2;
+        if (m_messages) {
+            m_messages->doItemsLayout();
+            m_messages->viewport()->update();
+            if (follow) m_messages->scrollToBottom();
         }
         notifyOverlay();
     });

@@ -4,6 +4,7 @@
 #include <QIcon>
 #include <QImage>
 #include <QNetworkAccessManager>
+#include <QPixmap>
 #include <QProcess>
 #include <QQueue>
 #include <QSet>
@@ -60,6 +61,8 @@ private:
     void appendMessages(const QJsonArray &messages);
     void requestAvatar(const QString &url);
     void startAvatar(const QString &url);
+    void requestEmote(const QString &url);
+    void startEmote(const QString &url);
 
     QLineEdit *m_accountEdit = nullptr;
     QLineEdit *m_kickAccountEdit = nullptr;
@@ -78,6 +81,9 @@ private:
     QCache<QString, QIcon> m_avatars{128};
     QSet<QString> m_requests;
     QQueue<QString> m_avatarQueue;
+    QCache<QString, QPixmap> m_emotes{256};
+    QSet<QString> m_emoteRequests;
+    QQueue<QString> m_emoteQueue;
     QByteArray m_input;
     QByteArray m_kickInput;
     bool m_started = false;
