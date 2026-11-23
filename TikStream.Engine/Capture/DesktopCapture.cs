@@ -250,16 +250,16 @@ public sealed unsafe class DesktopCapture : IDisposable
 
     private void HandleLost(SharpGen.Runtime.Result res)
     {
-        // ACCESS_LOST: mode change, UAC, fullscreen game switched mode -> recreate
+        // ACCESS_LOST: mode change, UAC, fullscreen game switched mode -> recreate quickly
         Log.Warn($"Desktop Duplication lost ({res.Code:X8}) — recreating.");
         _dup?.Dispose(); _dup = null;
-        _nextRetryTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
+        _nextRetryTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 20; // 50 ms first retry
     }
 
     private void TryRecreate()
     {
         if (Stopwatch.GetTimestamp() < _nextRetryTicks) return;
-        _nextRetryTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 2;
+        _nextRetryTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4; // 250 ms subsequent retries
         try
         {
             var (adapter, output) = FindOutput(_gpu.Factory, _monitor);

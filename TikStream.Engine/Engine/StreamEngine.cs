@@ -298,7 +298,7 @@ public sealed unsafe class StreamEngine : IDisposable
                     SourceType.Screen => new CaptureRt(Gpu, d, _monitors) { ConfigKey = key },
                     SourceType.Window or SourceType.Game when d.CaptureFromDesktop =>
                         new DesktopWindowRt(_monitors) { Def = d, ConfigKey = key },
-                    SourceType.Window or SourceType.Game => new WindowCaptureRt { Def = d, ConfigKey = key },
+                    SourceType.Window or SourceType.Game => new WindowCaptureRt(_monitors) { Def = d, ConfigKey = key },
                     SourceType.Camera => new CameraRt(d, _fps) { ConfigKey = key },
                     SourceType.Media => new MediaRt(d, Audio) { ConfigKey = key },
                     SourceType.Color => new ColorRt(d, _comp, Gpu) { ConfigKey = key },

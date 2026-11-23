@@ -44,7 +44,7 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
             _nextResolve = now + Stopwatch.Frequency / 2;
             if (WindowCaptureRt.IsFullscreenMode(Def))
             {
-                var target = WindowCaptureRt.ResolveTarget(Def);
+                var target = WindowCaptureRt.ResolveFullscreenTarget(_target, _monitor);
                 if (target != IntPtr.Zero || !Native.IsWindow(_target)) SetTarget(target);
             }
             else if (_resolving == null && !string.IsNullOrEmpty(Def.CaptureId))
@@ -60,15 +60,20 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
             _status = "Waiting for selected window…";
             return;
         }
-        if (Native.IsIconic(_target) || WindowCaptureRt.GetForegroundWindow() != _target)
+        if (Native.IsIconic(_target) || !Native.IsWindowVisible(_target))
         {
-            _status = Ready ? "Window in background • last frame" : "Switch to selected window";
+            _status = Ready ? "Window minimized • last frame" : "Window minimized";
             return;
         }
         if (Native.DwmGetWindowAttribute(_target, Native.DWMWA_EXTENDED_FRAME_BOUNDS,
                 out Native.RECT rect, 16) != 0) return;
 
         var monitor = Native.MonitorFromWindow(_target, 2);
+        if (IsOccludedOnSameMonitor(_target, monitor, rect))
+        {
+            _status = Ready ? "Window covered on same display • last frame" : "Switch to selected window";
+            return;
+        }
         if (monitor != _monitor)
         {
             if (_entry != null) monitors.Release(_entry);
@@ -111,6 +116,32 @@ internal sealed class DesktopWindowRt(MonitorCapturePool monitors) : RtSource
         gpu.Context.CopySubresourceRegion(_texture, 0, 0, 0, 0, image, 0, new Box(left, top, 0, right, bottom, 1));
         Frames++;
         _status = $"{Width}×{Height} • DXGI borderless";
+    }
+
+    /// <summary>Returns true only if a visible, non-cloaked window above <paramref name="target"/> on the SAME monitor completely covers its bounds.</summary>
+    private static bool IsOccludedOnSameMonitor(IntPtr target, IntPtr targetMonitor, in Native.RECT targetRect)
+    {
+        if (targetRect.Right <= targetRect.Left || targetRect.Bottom <= targetRect.Top) return false;
+        IntPtr cur = Native.GetWindow(target, Native.GW_HWNDPREV);
+        int guard = 0;
+        while (cur != IntPtr.Zero && ++guard < 64)
+        {
+            if (Native.IsWindowVisible(cur) && !Native.IsIconic(cur))
+            {
+                long exStyle = Native.GetWindowLongPtrW(cur, Native.GWL_EXSTYLE);
+                if ((exStyle & Native.WS_EX_TOOLWINDOW) == 0 &&
+                    (Native.DwmGetWindowAttribute(cur, Native.DWMWA_CLOAKED, out int cloaked, 4) != 0 || cloaked == 0) &&
+                    Native.MonitorFromWindow(cur, 2) == targetMonitor &&
+                    Native.DwmGetWindowAttribute(cur, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out Native.RECT r, 16) == 0)
+                {
+                    if (r.Left <= targetRect.Left && r.Top <= targetRect.Top &&
+                        r.Right >= targetRect.Right && r.Bottom >= targetRect.Bottom)
+                        return true;
+                }
+            }
+            cur = Native.GetWindow(cur, Native.GW_HWNDPREV);
+        }
+        return false;
     }
 
     private void SetTarget(IntPtr target)

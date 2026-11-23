@@ -1,8 +1,31 @@
+export function toPositiveInt(value) {
+    if (typeof value === 'bigint') {
+        return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+    }
+    const n = typeof value === 'number'
+        ? value
+        : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 export function author(user) {
-    const nick = user?.uniqueId || user?.nickname;
+    const nick = user?.displayId || user?.uniqueId || user?.nickname;
     if (!nick) return null;
-    const avatar = user.avatarThumb?.urlList?.[0] || user.avatarLarge?.urlList?.[0] || '';
-    return { nick: String(nick).slice(0, 100), avatar: avatar.slice(0, 1500) };
+    const avatar = user.avatarThumb?.urlList?.[0]
+        || user.avatarMedium?.urlList?.[0]
+        || user.avatarLarge?.urlList?.[0]
+        || user.avatarThumb?.url
+        || '';
+    return { nick: String(nick).slice(0, 100), avatar: String(avatar).slice(0, 1500) };
+}
+
+export function extractChatText(event) {
+    const raw = event?.content ?? event?.comment ?? '';
+    const trimmed = String(raw).trim();
+    if (trimmed) return trimmed.slice(0, 500);
+    const emotes = Array.isArray(event?.emotes) ? event.emotes : (Array.isArray(event?.emoteList) ? event.emoteList : []);
+    if (emotes.length > 0) return emotes.length === 1 ? '[emote]' : `[${emotes.length} emotes]`;
+    return '';
 }
 
 function numericCode(value) {
@@ -72,21 +95,36 @@ export function liveEvents() {
             remember(follows, key, now);
             return { ...sender, kind: 'follow', text: 'just followed!' };
         },
-        like(event) {
-            const total = event.totalLikeCount;
-            if (Number.isSafeInteger(total) && total > 0) {
-                if (taps && !taps.partial && total <= taps.count) return null;
-                taps = { count: total, partial: false };
-            } else {
-                const delta = event.likeCount;
-                if ((taps && !taps.partial) || !Number.isSafeInteger(delta) || delta <= 0) return null;
-                taps = { count: (taps?.count ?? 0) + delta, partial: true };
-            }
+        seedLikes(rawTotal) {
+            const total = toPositiveInt(rawTotal);
+            if (!total) return null;
+            if (taps && total <= taps.count) return null;
+            taps = { count: total, partial: false };
             return taps;
         },
+        like(event) {
+            const total = toPositiveInt(event?.total ?? event?.totalLikeCount);
+            const delta = toPositiveInt(event?.count ?? event?.likeCount);
+            if (total) {
+                const next = taps ? Math.max(taps.count, total) : total;
+                if (taps && !taps.partial && next <= taps.count) {
+                    if (!delta) return null;
+                    taps = { count: taps.count + delta, partial: false };
+                    return taps;
+                }
+                taps = { count: next, partial: false };
+                return taps;
+            }
+            if (delta) {
+                taps = { count: (taps?.count ?? 0) + delta, partial: !(taps && !taps.partial) };
+                return taps;
+            }
+            return null;
+        },
         gift(event, now = Date.now()) {
-            const details = event.giftDetails;
-            const streak = details?.giftType === 1 || (!details?.giftType && details?.combo === true);
+            const details = event.gift ?? event.giftDetails ?? event.extendedGiftInfo;
+            const gType = details?.type ?? details?.giftType;
+            const streak = gType === 1 || (!gType && details?.combo === true);
             const sender = author(event.user);
             if (!sender) return null;
             const id = event.common?.msgId;
@@ -95,10 +133,10 @@ export function liveEvents() {
                 gifts.add(id);
                 if (gifts.size > 512) gifts.delete(gifts.values().next().value);
             }
-            const name = (details?.giftName || (event.giftId ? `Gift #${event.giftId}` : 'Gift')).slice(0, 180);
+            const name = String(details?.name || details?.giftName || (event.giftId ? `Gift #${event.giftId}` : 'Gift')).slice(0, 180);
             const senderId = event.user?.id && event.user.id !== '0' ? String(event.user.id) : sender.nick;
             const key = JSON.stringify([senderId, event.giftId || details?.id || name]);
-            let count = Math.max(1, event.repeatCount || event.comboCount || event.groupCount || 1);
+            let count = Math.max(1, toPositiveInt(event.repeatCount) || toPositiveInt(event.comboCount) || toPositiveInt(event.groupCount) || 1);
             let continuing = false;
             if (streak) {
                 const group = event.groupId && event.groupId !== '0' ? event.groupId : '';

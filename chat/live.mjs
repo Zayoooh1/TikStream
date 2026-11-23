@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { TikTokLiveConnection, WebcastEvent, ControlEvent } from 'tiktok-live-connector';
-import { author, classifyError, liveEvents } from './events.mjs';
+import { author, classifyError, extractChatText, liveEvents } from './events.mjs';
 
 const account = process.argv[2];
 if (!/^[a-z\d_.]{1,24}$/i.test(account ?? '')) process.exit(2);
@@ -46,11 +46,15 @@ for (;;) {
     status('connecting');
     const client = new TikTokLiveConnection(account, {
         processInitialData: false,
+        fetchRoomInfoOnConnect: true,
         webClientOptions: { timeout: { request: 10000 } },
         wsClientOptions: { handshakeTimeout: 10000 },
         ...(process.env.TIKSTREAM_EULER_API_KEY ? { signApiKey: process.env.TIKSTREAM_EULER_API_KEY } : {}),
     });
-    client.on(ControlEvent.ERROR, () => {});
+    client.on(ControlEvent.ERROR, err => {
+        const msg = err?.info || err?.exception?.message || err?.message || String(err ?? '');
+        if (msg) process.stderr.write(`[tiktok-chat] ${msg.slice(0, 240)}\n`);
+    });
     const updateRoom = id => {
         if (!events.enterRoom(id)) return;
         pending = pending.filter(message => message.kind !== 'gift');
@@ -60,8 +64,16 @@ for (;;) {
     };
     client.on(WebcastEvent.CHAT, event => {
         const sender = author(event.user);
-        if (sender && event.comment) enqueue({ ...sender, text: String(event.comment).slice(0, 500) });
+        const text = extractChatText(event);
+        if (sender && text) enqueue({ platform: 'tiktok', ...sender, text });
     });
+    if (WebcastEvent.EMOTE) {
+        client.on(WebcastEvent.EMOTE, event => {
+            const sender = author(event.user);
+            const text = extractChatText(event);
+            if (sender && text) enqueue({ platform: 'tiktok', ...sender, text });
+        });
+    }
     client.on(WebcastEvent.GIFT, event => {
         updateRoom(client.roomId || event.common?.roomId);
         const gift = events.gift(event);
@@ -97,6 +109,15 @@ for (;;) {
     try {
         const connection = await client.connect();
         updateRoom(connection.roomId);
+        const initialLikes = connection?.roomInfo?.likeCount
+            ?? connection?.roomInfo?.stats?.likeCount
+            ?? connection?.roomInfo?.like_count
+            ?? connection?.roomInfo?.data?.like_count;
+        const seeded = events.seedLikes(initialLikes);
+        if (seeded) {
+            taps = seeded;
+            scheduleTaps();
+        }
         status('connected');
         const disconnectEvent = await disconnected;
         if (streamEnded) {

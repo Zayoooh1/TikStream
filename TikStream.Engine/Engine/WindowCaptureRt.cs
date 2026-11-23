@@ -14,10 +14,11 @@ using ID3D11Texture2D = Vortice.Direct3D11.ID3D11Texture2D;
 
 namespace TikStream.Engine;
 
-internal sealed unsafe class WindowCaptureRt : RtSource
+internal sealed unsafe class WindowCaptureRt(MonitorCapturePool? monitors = null) : RtSource
 {
-    private IntPtr _target;
+    private IntPtr _target, _targetMonitor;
     private long _nextResolve;
+    private Task<IntPtr>? _resolving;
     private GraphicsCaptureSession? _session;
     private Direct3D11CaptureFramePool? _pool;
     private IDirect3DDevice? _device;
@@ -27,15 +28,29 @@ internal sealed unsafe class WindowCaptureRt : RtSource
     private volatile bool _closed;
     private string _status = "Waiting for window…";
     private bool _cursor;
+    private bool _borderlessFallback;
+    private DesktopWindowRt? _dxgiFallback;
 
-    public override string Status => _status;
+    public override string Status => _dxgiFallback?.Status ?? _status;
+    public override bool IsHdr => _dxgiFallback?.IsHdr ?? false;
 
     public override void Update(GpuDevice gpu, Compositor comp)
     {
+        if (_borderlessFallback && monitors != null)
+        {
+            _dxgiFallback ??= new DesktopWindowRt(monitors) { Def = Def };
+            _dxgiFallback.Def = Def;
+            _dxgiFallback.Update(gpu, comp);
+            Srv = _dxgiFallback.Srv;
+            Width = _dxgiFallback.Width;
+            Height = _dxgiFallback.Height;
+            Frames = _dxgiFallback.Frames;
+            return;
+        }
         try { UpdateCapture(gpu); }
         catch (Exception ex)
         {
-            Dispose();
+            DisposeWgc();
             _status = "System does not expose this window's video";
             _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
             Log.Warn($"Capture '{Def.Name}': {ex.Message}");
@@ -44,12 +59,27 @@ internal sealed unsafe class WindowCaptureRt : RtSource
 
     private void UpdateCapture(GpuDevice gpu)
     {
-        if (Stopwatch.GetTimestamp() >= _nextResolve)
+        if (_resolving is { IsCompleted: true } resolved)
         {
-            _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
-            Resolve(gpu);
+            _resolving = null;
+            ApplyResolvedTarget(gpu, resolved.GetAwaiter().GetResult());
         }
-        if (_pool == null) return;
+        var now = Stopwatch.GetTimestamp();
+        if (now >= _nextResolve)
+        {
+            _nextResolve = now + Stopwatch.Frequency;
+            if (IsFullscreenMode(Def))
+            {
+                ApplyResolvedTarget(gpu, ResolveFullscreenTarget(_target, _targetMonitor));
+            }
+            else if (_resolving == null)
+            {
+                // Window and process enumeration can block the render thread; run off-thread.
+                var def = Def;
+                _resolving = Task.Run(() => ResolveTarget(def));
+            }
+        }
+        if (_borderlessFallback || _pool == null) return;
         if (Native.IsIconic(_target))
         {
             _status = "Window minimized • last available frame";
@@ -58,8 +88,16 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         _status = Ready ? $"{Width}×{Height} • Windows Graphics Capture" : "Waiting for frame…";
         if (_cursor != Def.CaptureCursor && _session != null)
             _session.IsCursorCaptureEnabled = _cursor = Def.CaptureCursor;
-        using var frame = _pool.TryGetNextFrame();
-        if (frame == null) return;
+
+        // Drain pool to the newest frame so background FPS fluctuations never queue latency.
+        Direct3D11CaptureFrame? latest = null;
+        while (_pool.TryGetNextFrame() is { } next)
+        {
+            latest?.Dispose();
+            latest = next;
+        }
+        if (latest == null) return;
+        using var frame = latest;
         var size = frame.ContentSize;
         if (size.Width <= 0 || size.Height <= 0) return;
         if (size.Width != _poolSize.Width || size.Height != _poolSize.Height)
@@ -88,13 +126,12 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         Frames++;
     }
 
-    private void Resolve(GpuDevice gpu)
+    private void ApplyResolvedTarget(GpuDevice gpu, IntPtr target)
     {
         bool fullscreen = IsFullscreenMode(Def);
-        IntPtr target = ResolveTarget(Def);
         if (fullscreen && target == IntPtr.Zero && _target != IntPtr.Zero && !_closed && Native.IsWindow(_target)) return;
         if (_pool != null && !_closed && target == _target) return;
-        Dispose();
+        DisposeWgc();
         _status = fullscreen ? "Waiting for fullscreen application…" : "Waiting for selected window…";
         if (target == IntPtr.Zero) return;
         if (Native.IsIconic(target))
@@ -102,7 +139,16 @@ internal sealed unsafe class WindowCaptureRt : RtSource
             _status = "Window minimized • waiting for first frame";
             return;
         }
-        if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows Graphics Capture");
+        if (!GraphicsCaptureSession.IsSupported())
+        {
+            if (monitors != null)
+            {
+                Log.Warn($"Capture '{Def.Name}': WGC unsupported — falling back to borderless DXGI Desktop Duplication.");
+                _borderlessFallback = true;
+                return;
+            }
+            throw new NotSupportedException("Windows Graphics Capture");
+        }
         using var dxgi = gpu.Device.QueryInterface<IDXGIDevice>();
         Marshal.ThrowExceptionForHR(CreateDirect3D11DeviceFromDXGIDevice(dxgi.NativePointer, out var abiDevice));
         try { _device = MarshalInterface<IDirect3DDevice>.FromAbi(abiDevice); }
@@ -114,20 +160,34 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         _pool = Direct3D11CaptureFramePool.CreateFreeThreaded(_device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, _poolSize);
         _session = _pool.CreateCaptureSession(item);
         _session.IsCursorCaptureEnabled = _cursor = Def.CaptureCursor;
-        ConfigureSessionCapabilities(_session);
+        if (!ConfigureSessionCapabilities(_session, Def.Name) && monitors != null)
+        {
+            Log.Warn($"Capture '{Def.Name}': WGC cannot disable yellow border — switching to borderless DXGI Desktop Duplication.");
+            DisposeWgc();
+            _borderlessFallback = true;
+            return;
+        }
         _session.StartCapture();
         _target = target;
+        _targetMonitor = Native.MonitorFromWindow(target, 2);
     }
 
-    private static void ConfigureSessionCapabilities(GraphicsCaptureSession session)
+    private static bool ConfigureSessionCapabilities(GraphicsCaptureSession session, string sourceName)
     {
         const string cls = "Windows.Graphics.Capture.GraphicsCaptureSession";
+        bool borderDisabled = false;
         try
         {
             if (Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(cls, "IsBorderRequired"))
+            {
                 session.IsBorderRequired = false;
+                borderDisabled = !session.IsBorderRequired;
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log.Warn($"Capture '{sourceName}': IsBorderRequired=false failed ({ex.Message})");
+        }
         try
         {
             if (Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(cls, "MinUpdateInterval"))
@@ -140,11 +200,29 @@ internal sealed unsafe class WindowCaptureRt : RtSource
                 session.DirtyRegionMode = GraphicsCaptureDirtyRegionMode.ReportAndRender;
         }
         catch { }
+        return borderDisabled;
     }
 
     private void ItemClosed(GraphicsCaptureItem sender, object args) => _closed = true;
 
     internal static bool IsFullscreenMode(SourceDef def) => def.Type == SourceType.Game && def.GameMode == "Fullscreen";
+
+    internal static IntPtr ResolveFullscreenTarget(IntPtr currentTarget, IntPtr currentMonitor)
+    {
+        var fg = FullscreenWindow();
+        if (currentTarget != IntPtr.Zero && Native.IsWindow(currentTarget) && !Native.IsIconic(currentTarget) && Native.IsWindowVisible(currentTarget))
+        {
+            // Keep capturing the game on its monitor when the user clicks a window (e.g. Discord/browser) on another monitor.
+            if (fg == IntPtr.Zero) return currentTarget;
+            if (fg != currentTarget)
+            {
+                var fgMon = Native.MonitorFromWindow(fg, 2);
+                var curMon = currentMonitor != IntPtr.Zero ? currentMonitor : Native.MonitorFromWindow(currentTarget, 2);
+                if (fgMon != curMon) return currentTarget;
+            }
+        }
+        return fg;
+    }
 
     internal static IntPtr ResolveTarget(SourceDef def)
     {
@@ -214,7 +292,7 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         finally { MarshalInterface<IDirect3DSurface>.DisposeMarshaler(marshaler); }
     }
 
-    public override void Dispose()
+    private void DisposeWgc()
     {
         if (_item != null) _item.Closed -= ItemClosed;
         _item = null;
@@ -228,8 +306,17 @@ internal sealed unsafe class WindowCaptureRt : RtSource
         _device = null;
         _texture = null;
         Srv = null;
-        _target = IntPtr.Zero;
+        _target = _targetMonitor = IntPtr.Zero;
         Width = Height = 0;
+    }
+
+    public override void Dispose()
+    {
+        _resolving = null;
+        DisposeWgc();
+        _dxgiFallback?.Dispose();
+        _dxgiFallback = null;
+        _borderlessFallback = false;
     }
 
     [StructLayout(LayoutKind.Sequential)]

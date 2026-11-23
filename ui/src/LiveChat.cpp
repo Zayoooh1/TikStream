@@ -2,6 +2,7 @@
 
 #include <QBuffer>
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -338,6 +339,8 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_status->setWordWrap(true);
     m_taps = new QLabel("Likes: —", this);
     m_taps->setObjectName("liveChatTaps");
+    m_taps->setMinimumHeight(26);
+    m_taps->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     m_gifts = new GiftNotifications(this);
     m_messages = new QListWidget(this);
     m_messages->setObjectName("liveChatMessages");
@@ -403,6 +406,10 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     });
 
     connect(&m_process, &QProcess::readyReadStandardOutput, this, &LiveChat::readEvents);
+    connect(&m_process, &QProcess::readyReadStandardError, this, [this] {
+        const QString err = QString::fromUtf8(m_process.readAllStandardError()).trimmed();
+        if (!err.isEmpty()) qWarning().noquote() << "TikTokChat:" << err.left(300);
+    });
     connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
             m_ttStatus = QStringLiteral("TikTok: failed to start");
@@ -717,7 +724,6 @@ void LiveChat::start()
         return;
     }
     m_ttStatus = QStringLiteral("TikTok: connecting @%1…").arg(m_account);
-    m_process.setStandardErrorFile(QProcess::nullDevice());
     m_process.start(node, {script, m_account});
     updateCombinedStatus();
 }

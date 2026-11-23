@@ -72,6 +72,7 @@ internal static partial class Native
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(System.Drawing.Point pt, uint flags);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
 
+    public const uint GW_HWNDPREV = 3;
     public const uint GW_OWNER = 4;
     public const int GWL_EXSTYLE = -20;
     public const long WS_EX_TOOLWINDOW = 0x80;
