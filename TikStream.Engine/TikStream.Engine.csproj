@@ -12,9 +12,9 @@
     <SelfContained>false</SelfContained>
     <RootNamespace>TikStream</RootNamespace>
     <AssemblyName>TikStream.Engine</AssemblyName>
-    <Version>1.5.18</Version>
-    <AssemblyVersion>1.5.18.0</AssemblyVersion>
-    <FileVersion>1.5.18.0</FileVersion>
+    <Version>1.5.19</Version>
+    <AssemblyVersion>1.5.19.0</AssemblyVersion>
+    <FileVersion>1.5.19.0</FileVersion>
     <!-- Library loaded in-process from C++ via hostfxr -->
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>

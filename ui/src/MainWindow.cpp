@@ -662,6 +662,7 @@ void MainWindow::buildMenu()
     view->addSeparator();
     auto *panels = view->addMenu("Dock Layout");
     panels->setObjectName("panelsMenu");
+    panels->addAction("Studio Grid (All Docks Visible)", this, &MainWindow::arrangeStudioGrid);
     panels->addAction("Side Docks", this, [this] { arrangeDocks(false); });
     panels->addAction("Horizontal Docks Below Preview", this, [this] { arrangeDocks(true); });
     auto *verticalMixer = view->addAction("Vertical Mixer Bars");
@@ -946,7 +947,7 @@ void MainWindow::buildDocks()
     // ---------- Properties ----------
     auto *props = new QWidget;
     buildProperties(props);
-    props->setMinimumWidth(300);
+    props->setMinimumWidth(210);
     auto *dProps = makeDock("Properties", "dockProps", props, Qt::RightDockWidgetArea);
 
     // ---------- Mixer ----------
@@ -1006,7 +1007,7 @@ void MainWindow::buildDocks()
     // ---------- Detached Horizontal Dual-Canvas Preview Dock ----------
     m_dualPreview = new PreviewWidget;
     m_dualPreview->setCanvasSize(m_s["dualCanvasWidth"].toInt(1920), m_s["dualCanvasHeight"].toInt(1080));
-    m_dualPreview->setMinimumSize(360, 220);
+    m_dualPreview->setMinimumSize(220, 140);
     m_dualPreviewDock = new QDockWidget("Horizontal Preview (Dual-Canvas)", this);
     m_dualPreviewDock->setObjectName("dockDualPreview");
     m_dualPreviewDock->setWidget(m_dualPreview);
@@ -1095,10 +1096,185 @@ void MainWindow::arrangeDocks(bool horizontal)
     for (auto *dock : {scenesDock, sourcesDock, propertiesDock, mixerDock, controlsDock}) dock->show();
 }
 
+void MainWindow::arrangeStudioGrid()
+{
+    auto *chatDock = findChild<QDockWidget *>("dockLiveChat");
+    auto *scenesDock = findChild<QDockWidget *>("dockScenes");
+    auto *sourcesDock = findChild<QDockWidget *>("dockSources");
+    auto *propertiesDock = findChild<QDockWidget *>("dockProps");
+    auto *mixerDock = findChild<QDockWidget *>("dockMixer");
+    auto *controlsDock = findChild<QDockWidget *>("dockControls");
+    auto *alertsDock = m_alertBoxDock;
+    auto *dualDock = m_dualPreviewDock;
+
+    const bool showDual = dualDock && (dualDock->isVisible() || m_s["dualCanvasEnabled"].toBool(false) || m_s["secondStreamEnabled"].toBool(false));
+    QList<QDockWidget *> managed = {scenesDock, sourcesDock, propertiesDock, mixerDock, controlsDock};
+    if (chatDock) managed.append(chatDock);
+    if (alertsDock) managed.append(alertsDock);
+    if (showDual && dualDock) managed.append(dualDock);
+
+    for (auto *dock : managed) {
+        if (!dock) continue;
+        dock->setFloating(false);
+        removeDockWidget(dock);
+    }
+
+    // Left column: Horizontal Preview (top) + LIVE Chat (bottom)
+    if (showDual && dualDock && chatDock) {
+        addDockWidget(Qt::LeftDockWidgetArea, dualDock);
+        addDockWidget(Qt::LeftDockWidgetArea, chatDock);
+        splitDockWidget(dualDock, chatDock, Qt::Vertical);
+    } else if (chatDock) {
+        addDockWidget(Qt::LeftDockWidgetArea, chatDock);
+    } else if (showDual && dualDock) {
+        addDockWidget(Qt::LeftDockWidgetArea, dualDock);
+    }
+
+    // Right column: Properties (top) + TikTok LIVE Alerts (bottom)
+    addDockWidget(Qt::RightDockWidgetArea, propertiesDock);
+    if (alertsDock) {
+        addDockWidget(Qt::RightDockWidgetArea, alertsDock);
+        splitDockWidget(propertiesDock, alertsDock, Qt::Vertical);
+    }
+
+    // Bottom strip (OBS-style): Scenes | Sources | Audio Mixer | Controls side-by-side
+    for (auto *dock : {scenesDock, sourcesDock, mixerDock, controlsDock})
+        addDockWidget(Qt::BottomDockWidgetArea, dock, Qt::Horizontal);
+
+    for (auto *dock : managed) {
+        if (dock) dock->show();
+    }
+
+    // Switch mixer to vertical bars so many audio channels fit cleanly across the wide bottom strip
+    if (!m_mixerVertical) {
+        m_mixerVertical = true;
+        QSettings("TikStream", "UI2").setValue("mixerVertical", true);
+        m_mixerSignature.clear();
+        rebuildMixer();
+    }
+
+    const int w = std::max(1000, width());
+    const int h = std::max(640, height());
+    const int sideW = std::clamp(int(w * 0.25), 240, 440);
+    const int botH = std::clamp(int(h * 0.25), 180, 290);
+    const int topH = std::max(300, h - botH - 80);
+
+    if (chatDock) resizeDocks({chatDock}, {sideW}, Qt::Horizontal);
+    else if (showDual && dualDock) resizeDocks({dualDock}, {sideW}, Qt::Horizontal);
+    if (propertiesDock) resizeDocks({propertiesDock}, {sideW}, Qt::Horizontal);
+
+    if (showDual && dualDock && chatDock)
+        resizeDocks({dualDock, chatDock}, {int(topH * 0.38), int(topH * 0.62)}, Qt::Vertical);
+    if (propertiesDock && alertsDock)
+        resizeDocks({propertiesDock, alertsDock}, {int(topH * 0.44), int(topH * 0.56)}, Qt::Vertical);
+
+    resizeDocks({scenesDock, sourcesDock, mixerDock, controlsDock},
+                {int(w * 0.13), int(w * 0.23), int(w * 0.46), int(w * 0.18)}, Qt::Horizontal);
+    resizeDocks({mixerDock}, {botH}, Qt::Vertical);
+
+    if (m_layoutReady) saveDockLayout();
+    m_stMsg->setText("Applied Studio Grid layout — all docks visible.");
+}
+
+void MainWindow::setUiZoom(double scale)
+{
+    const double clamped = std::round(std::clamp(scale, 0.65, 1.25) * 20.0) / 20.0;
+    m_uiZoom = clamped;
+    if (m_uiZoomReset) m_uiZoomReset->setText(QStringLiteral("%1%").arg(int(std::lround(m_uiZoom * 100.0))));
+
+    if (m_baseQss.isEmpty()) m_baseQss = qApp->styleSheet();
+
+    QFont f("Segoe UI");
+    f.setPointSizeF(std::max(6.5, 9.0 * m_uiZoom));
+    f.setHintingPreference(QFont::PreferNoHinting);
+    qApp->setFont(f);
+
+    const int padV = std::max(2, int(std::lround(4.0 * m_uiZoom)));
+    const int padH = std::max(4, int(std::lround(9.0 * m_uiZoom)));
+    const int titlePad = std::max(2, int(std::lround(4.0 * m_uiZoom)));
+    const int titleFont = std::max(9, int(std::lround(11.0 * m_uiZoom)));
+    const int tabPadV = std::max(2, int(std::lround(4.0 * m_uiZoom)));
+    const int tabPadH = std::max(6, int(std::lround(10.0 * m_uiZoom)));
+    const int btnMinH = std::max(20, int(std::lround(26.0 * m_uiZoom)));
+    const int ctlBtnH = std::max(22, int(std::lround(30.0 * m_uiZoom)));
+    const int streamBtnH = std::max(28, int(std::lround(38.0 * m_uiZoom)));
+
+    const QString zoomCss = QStringLiteral(
+        "\n/* Live UI Zoom (%1%) */\n"
+        "QWidget { font-size: %2pt; }\n"
+        "QPushButton, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { padding: %3px %4px; min-height: %5px; }\n"
+        "QDockWidget::title { padding: %6px 8px; font-size: %7px; }\n"
+        "QTabBar::tab { padding: %8px %9px; }\n"
+        "QMenuBar::item { padding: %3px %4px; }\n"
+    ).arg(int(std::lround(m_uiZoom * 100.0)))
+     .arg(QString::number(std::max(6.5, 9.0 * m_uiZoom), 'f', 2))
+     .arg(padV).arg(padH).arg(btnMinH)
+     .arg(titlePad).arg(titleFont)
+     .arg(tabPadV).arg(tabPadH);
+
+    qApp->setStyleSheet(m_baseQss + zoomCss);
+
+    if (m_btnStream) m_btnStream->setMinimumHeight(streamBtnH);
+    for (auto *b : {m_btnRecord, m_btnReplay, m_btnSaveReplay})
+        if (b) b->setMinimumHeight(ctlBtnH);
+
+    if (m_sourceList) {
+        const int rowH = std::max(24, int(std::lround(34.0 * m_uiZoom)));
+        for (int i = 0; i < m_sourceList->count(); ++i)
+            m_sourceList->item(i)->setSizeHint(QSize(0, rowH));
+    }
+
+    if (!QCoreApplication::arguments().contains("--test")) {
+        QSettings qs("TikStream", "UI2");
+        qs.setValue("uiLiveZoom", m_uiZoom);
+    }
+}
+
 void MainWindow::buildStatusBar()
 {
     auto *sb = statusBar();
     sb->setSizeGripEnabled(false);
+
+    auto *zoomHost = new QWidget;
+    auto *zl = new QHBoxLayout(zoomHost);
+    zl->setContentsMargins(4, 0, 6, 0);
+    zl->setSpacing(3);
+
+    auto *zoomOut = new QPushButton("-");
+    zoomOut->setFixedSize(24, 20);
+    zoomOut->setStyleSheet("padding: 0px; min-height: 0px; font-weight: bold; font-size: 13px;");
+    zoomOut->setToolTip("Shrink all UI panels and text at once");
+
+    m_uiZoomReset = new QPushButton("100%");
+    m_uiZoomReset->setFixedSize(44, 20);
+    m_uiZoomReset->setStyleSheet("padding: 0px 4px; min-height: 0px; font-size: 11px;");
+    m_uiZoomReset->setToolTip("Reset global UI zoom to 100%");
+
+    auto *zoomIn = new QPushButton("+");
+    zoomIn->setFixedSize(24, 20);
+    zoomIn->setStyleSheet("padding: 0px; min-height: 0px; font-weight: bold; font-size: 13px;");
+    zoomIn->setToolTip("Enlarge all UI panels and text at once");
+
+    auto *gridBtn = new QPushButton("Studio Grid");
+    gridBtn->setFixedHeight(20);
+    gridBtn->setStyleSheet("padding: 0px 8px; min-height: 0px; font-size: 11px;");
+    gridBtn->setToolTip("Auto-arrange all docks (Horizontal Preview, Chat, Properties, Alerts, Scenes, Sources, Mixer, Controls) so every panel is visible at once");
+
+    zl->addWidget(zoomOut);
+    zl->addWidget(m_uiZoomReset);
+    zl->addWidget(zoomIn);
+    zl->addSpacing(4);
+    zl->addWidget(gridBtn);
+    sb->addWidget(zoomHost);
+
+    connect(zoomOut, &QPushButton::clicked, this, [this] { setUiZoom(m_uiZoom - 0.05); });
+    connect(zoomIn, &QPushButton::clicked, this, [this] { setUiZoom(m_uiZoom + 0.05); });
+    connect(m_uiZoomReset, &QPushButton::clicked, this, [this] { setUiZoom(1.0); });
+    connect(gridBtn, &QPushButton::clicked, this, &MainWindow::arrangeStudioGrid);
+
+    const double savedZoom = QSettings("TikStream", "UI2").value("uiLiveZoom", 1.0).toDouble();
+    if (std::abs(savedZoom - 1.0) > 0.01) QTimer::singleShot(0, this, [this, savedZoom] { setUiZoom(savedZoom); });
+
     m_stMsg = new QLabel;
     m_stMsg->setObjectName("statusMsg");
     sb->addWidget(m_stMsg, 1);

@@ -61,6 +61,8 @@ private:
     void refreshAudioDevices(bool force = false);
     void populateAudioDeviceChoice();
     void arrangeDocks(bool horizontal);
+    void arrangeStudioGrid();
+    void setUiZoom(double scale);
     QWidget *pageCamera();
     QWidget *pageImage();
     QWidget *pageText();
@@ -265,7 +267,9 @@ private:
     QHash<QString, Strip> m_strips;
 
     // controls panel
-    QPushButton *m_btnStream = nullptr, *m_btnRecord = nullptr, *m_btnReplay = nullptr, *m_btnSaveReplay = nullptr;
+    QPushButton *m_btnStream = nullptr, *m_btnRecord = nullptr, *m_btnReplay = nullptr, *m_btnSaveReplay = nullptr, *m_uiZoomReset = nullptr;
+    double m_uiZoom = 1.0;
+    QString m_baseQss;
 
     // status bar
     QLabel *m_stLive = nullptr, *m_stRec = nullptr, *m_stCpu = nullptr, *m_stFps = nullptr,
