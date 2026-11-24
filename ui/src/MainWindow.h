@@ -75,7 +75,7 @@ private:
     void openBrowserInteractDialog(const QString &sourceId);
     void toggleSelectedItemLock();
     void triggerAlert(const QString &kind, const QString &user, const QString &detail);
-    void showNextAlert();
+    void showNextAlert(int slotIdx);
     void updateAlertOverlays();
 
     // ---------- model ----------
@@ -192,20 +192,24 @@ private:
     QRectF m_startRect;
     double m_startCropL = 0, m_startCropR = 0, m_startCropT = 0, m_startCropB = 0;
 
-    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertTimer = nullptr, *m_alertAnimTimer = nullptr, *m_layoutSaveTimer = nullptr;
+    QTimer *m_applyTimer = nullptr, *m_statsTimer = nullptr, *m_levelsTimer = nullptr, *m_updateTimer = nullptr, *m_alertAnimTimer = nullptr, *m_layoutSaveTimer = nullptr;
     bool m_updateCheckPending = false;
     bool m_reallyQuit = false;
     QString m_skippedUpdateVersion;
     struct AlertEvent { QString kind, user, detail; };
-    QQueue<AlertEvent> m_alertQueue;
-    QString m_alertKind, m_alertUser, m_alertDetail;
-    qint64 m_alertStartMs = 0;
-    int m_alertDurMs = 5000;
-    quint64 m_alertRevision = 0;
-    QMovie *m_alertMovie = nullptr;
-    QImage m_alertCachedImg, m_alertUserImg, m_alertDetailImg, m_alertCanvas;
-    int m_alertGapAfterImg = 0, m_alertLineGap = 0, m_alertPad = 48;
-    qreal m_alertScaleRef = 1.0;
+    struct AlertSlot {
+        QQueue<AlertEvent> queue;
+        QString kind, user, detail;
+        qint64 startMs = 0;
+        int durMs = 5000;
+        quint64 revision = 0;
+        QMovie *movie = nullptr;
+        QImage cachedImg, userImg, detailImg, canvas;
+        int gapAfterImg = 0, lineGap = 0, pad = 48;
+        qreal scaleRef = 1.0;
+        QTimer *timer = nullptr;
+    };
+    AlertSlot m_alertSlots[2]; // 0 = gift, 1 = follow (fully independent & concurrent)
     QSystemTrayIcon *m_tray = nullptr;
     QList<double> m_histFps, m_histRenderMs, m_histKbps;
     QPointer<QWidget> m_statsGraphWidget;

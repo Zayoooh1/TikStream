@@ -483,23 +483,33 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     buildStatusBar();
     setupTray();
 
-    m_alertTimer = new QTimer(this);
-    m_alertTimer->setSingleShot(true);
-    connect(m_alertTimer, &QTimer::timeout, this, [this] {
-        if (m_alertAnimTimer) m_alertAnimTimer->stop();
-        if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
-        m_alertKind.clear();
-        m_alertUser.clear();
-        m_alertDetail.clear();
-        ++m_alertRevision;
-        updateAlertOverlays();
-        if (!m_alertQueue.isEmpty()) QTimer::singleShot(250, this, &MainWindow::showNextAlert);
-    });
+    for (int si = 0; si < 2; ++si) {
+        m_alertSlots[si].timer = new QTimer(this);
+        m_alertSlots[si].timer->setSingleShot(true);
+        connect(m_alertSlots[si].timer, &QTimer::timeout, this, [this, si] {
+            auto &slot = m_alertSlots[si];
+            if (slot.movie) { slot.movie->stop(); delete slot.movie; slot.movie = nullptr; }
+            slot.kind.clear();
+            slot.user.clear();
+            slot.detail.clear();
+            ++slot.revision;
+            if (m_alertSlots[0].kind.isEmpty() && m_alertSlots[1].kind.isEmpty() && m_alertAnimTimer)
+                m_alertAnimTimer->stop();
+            updateAlertOverlays();
+            if (!slot.queue.isEmpty()) QTimer::singleShot(200, this, [this, si] { showNextAlert(si); });
+        });
+    }
     m_alertAnimTimer = new QTimer(this);
     m_alertAnimTimer->setTimerType(Qt::PreciseTimer);
     connect(m_alertAnimTimer, &QTimer::timeout, this, [this] {
-        if (m_alertKind.isEmpty()) { m_alertAnimTimer->stop(); return; }
-        ++m_alertRevision;
+        bool anyActive = false;
+        for (int si = 0; si < 2; ++si) {
+            if (!m_alertSlots[si].kind.isEmpty()) {
+                ++m_alertSlots[si].revision;
+                anyActive = true;
+            }
+        }
+        if (!anyActive) { m_alertAnimTimer->stop(); return; }
         updateAlertOverlays();
     });
 
@@ -3430,14 +3440,18 @@ void MainWindow::updateChatOverlays()
 
 void MainWindow::triggerAlert(const QString &kind, const QString &user, const QString &detail)
 {
-    if (m_alertQueue.size() < 32) m_alertQueue.enqueue({kind, user, detail});
-    if (m_alertKind.isEmpty()) showNextAlert();
+    const int si = (kind == "follow") ? 1 : 0;
+    auto &slot = m_alertSlots[si];
+    if (slot.queue.size() < 32) slot.queue.enqueue({kind, user, detail});
+    if (slot.kind.isEmpty()) showNextAlert(si);
 }
 
-void MainWindow::showNextAlert()
+void MainWindow::showNextAlert(int slotIdx)
 {
-    while (!m_alertQueue.isEmpty()) {
-        const auto ev = m_alertQueue.dequeue();
+    if (slotIdx < 0 || slotIdx > 1) return;
+    auto &slot = m_alertSlots[slotIdx];
+    while (!slot.queue.isEmpty()) {
+        const auto ev = slot.queue.dequeue();
         int maxDur = 0;
         QString soundPath, imagePath, alertSourceId;
         double volume = 1.0;
@@ -3463,8 +3477,8 @@ void MainWindow::showNextAlert()
         }
         if (maxDur <= 0) continue;
 
-        if (m_alertMovie) { m_alertMovie->stop(); delete m_alertMovie; m_alertMovie = nullptr; }
-        m_alertCachedImg = QImage();
+        if (slot.movie) { slot.movie->stop(); delete slot.movie; slot.movie = nullptr; }
+        slot.cachedImg = QImage();
         auto trimAlpha = [](const QImage &srcImg) -> QImage {
             if (srcImg.isNull()) return {};
             const QImage img = srcImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
@@ -3495,28 +3509,29 @@ void MainWindow::showNextAlert()
         };
 
         if (!imagePath.isEmpty() && imagePath.endsWith(".gif", Qt::CaseInsensitive) && QFileInfo::exists(imagePath)) {
-            m_alertMovie = new QMovie(imagePath, QByteArray(), this);
-            if (m_alertMovie->isValid()) {
-                connect(m_alertMovie, &QMovie::frameChanged, this, [this, scaleAlertImg] {
-                    if (m_alertMovie) m_alertCachedImg = scaleAlertImg(m_alertMovie->currentImage());
+            slot.movie = new QMovie(imagePath, QByteArray(), this);
+            if (slot.movie->isValid()) {
+                connect(slot.movie, &QMovie::frameChanged, this, [this, slotIdx, scaleAlertImg] {
+                    auto &sl = m_alertSlots[slotIdx];
+                    if (sl.movie) sl.cachedImg = scaleAlertImg(sl.movie->currentImage());
                 });
-                m_alertMovie->start();
-                m_alertCachedImg = scaleAlertImg(m_alertMovie->currentImage());
+                slot.movie->start();
+                slot.cachedImg = scaleAlertImg(slot.movie->currentImage());
             } else {
-                delete m_alertMovie;
-                m_alertMovie = nullptr;
+                delete slot.movie;
+                slot.movie = nullptr;
             }
         } else if (!imagePath.isEmpty()) {
-            m_alertCachedImg = scaleAlertImg(QImage(imagePath));
+            slot.cachedImg = scaleAlertImg(QImage(imagePath));
         }
 
         // Pre-rasterize outlined bold text ONCE per alert (instead of every frame) so animations run at full 60+ FPS!
         const QColor accent = ev.kind == "gift" ? QColor(254, 44, 85) : QColor(37, 244, 238);
-        const int refW = m_alertCachedImg.isNull() ? 500 : std::clamp(m_alertCachedImg.width(), 340, 560);
-        m_alertScaleRef = refW / 500.0;
-        m_alertPad = std::max(26, int(30 * m_alertScaleRef));
-        m_alertGapAfterImg = m_alertCachedImg.isNull() ? 0 : std::max(10, int(12 * m_alertScaleRef));
-        m_alertLineGap = 0;
+        const int refW = slot.cachedImg.isNull() ? 500 : std::clamp(slot.cachedImg.width(), 340, 560);
+        slot.scaleRef = refW / 500.0;
+        slot.pad = std::max(26, int(30 * slot.scaleRef));
+        slot.gapAfterImg = slot.cachedImg.isNull() ? 0 : std::max(10, int(12 * slot.scaleRef));
+        slot.lineGap = 0;
 
         auto prerenderText = [](const QString &text, int pixelSize, const QColor &fillColor) -> QImage {
             if (text.isEmpty()) return {};
@@ -3545,29 +3560,29 @@ void MainWindow::showNextAlert()
             return out;
         };
 
-        m_alertUserImg = prerenderText(ev.user, std::max(38, int(54 * m_alertScaleRef)), accent);
-        m_alertDetailImg = prerenderText(ev.detail, std::max(26, int(36 * m_alertScaleRef)), Qt::white);
+        slot.userImg = prerenderText(ev.user, std::max(38, int(54 * slot.scaleRef)), accent);
+        slot.detailImg = prerenderText(ev.detail, std::max(26, int(36 * slot.scaleRef)), Qt::white);
 
-        const int contentW = std::max({m_alertCachedImg.width(), m_alertUserImg.width(), m_alertDetailImg.width(), 180});
-        const int aw = contentW + m_alertPad * 2;
-        const int ah = m_alertPad + m_alertCachedImg.height() + m_alertGapAfterImg
-                     + m_alertUserImg.height() + (!m_alertUserImg.isNull() && !m_alertDetailImg.isNull() ? m_alertLineGap : 0)
-                     + m_alertDetailImg.height() + m_alertPad;
-        m_alertCanvas = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
+        const int contentW = std::max({slot.cachedImg.width(), slot.userImg.width(), slot.detailImg.width(), 180});
+        const int aw = contentW + slot.pad * 2;
+        const int ah = slot.pad + slot.cachedImg.height() + slot.gapAfterImg
+                     + slot.userImg.height() + (!slot.userImg.isNull() && !slot.detailImg.isNull() ? slot.lineGap : 0)
+                     + slot.detailImg.height() + slot.pad;
+        slot.canvas = QImage(aw, ah, QImage::Format_ARGB32_Premultiplied);
 
-        m_alertKind = ev.kind;
-        m_alertUser = ev.user;
-        m_alertDetail = ev.detail;
-        m_alertStartMs = QDateTime::currentMSecsSinceEpoch();
-        m_alertDurMs = maxDur * 1000;
-        ++m_alertRevision;
+        slot.kind = ev.kind;
+        slot.user = ev.user;
+        slot.detail = ev.detail;
+        slot.startMs = QDateTime::currentMSecsSinceEpoch();
+        slot.durMs = maxDur * 1000;
+        ++slot.revision;
         updateAlertOverlays();
         if (!soundPath.isEmpty())
             EngineHost::instance().call("playAlertSound", {{"sourceId", alertSourceId}, {"path", soundPath}, {"volume", volume}});
         const int targetFps = std::clamp(m_s["fps"].toInt(60), 15, 120);
         m_alertAnimTimer->setInterval(std::max(8, int(std::lround(1000.0 / targetFps))));
-        m_alertAnimTimer->start();
-        m_alertTimer->start(m_alertDurMs);
+        if (!m_alertAnimTimer->isActive()) m_alertAnimTimer->start();
+        slot.timer->start(slot.durMs);
         return;
     }
 }
@@ -3721,7 +3736,10 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                   .arg(m_liveChat ? m_liveChat->overlayRevision() : 0);
     } else if (type == "AlertBox") {
         if (m_liveChat) m_liveChat->ensureStarted();
-        key = QString("alert|%1|%2|%3").arg(m_alertRevision).arg(src["alertImagePath"].toString()).arg(m_alertKind);
+        const QString role = src["alertRole"].toString();
+        const int si = (role == "follow") ? 1 : (role == "gift" ? 0 : (!m_alertSlots[0].kind.isEmpty() ? 0 : 1));
+        const auto &slot = m_alertSlots[si];
+        key = QString("alert|%1|%2|%3|%4").arg(si).arg(slot.revision).arg(src["alertImagePath"].toString()).arg(slot.kind);
     } else {
         key = rasterKey(src);
     }
@@ -3733,16 +3751,18 @@ void MainWindow::uploadRaster(const QJsonObject &src)
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
             const QString role = src["alertRole"].toString();
-            const bool roleMatch = role.isEmpty() || role == m_alertKind;
-            const bool enabledMatch = (m_alertKind == "gift" && src["alertOnGift"].toBool(true))
-                                   || (m_alertKind == "follow" && src["alertOnFollow"].toBool(true));
-            if (!m_alertKind.isEmpty() && !m_alertCanvas.isNull() && roleMatch && enabledMatch) {
-                const int aw = m_alertCanvas.width();
-                const qreal sc = m_alertScaleRef;
+            const int si = (role == "follow") ? 1 : (role == "gift" ? 0 : (!m_alertSlots[0].kind.isEmpty() ? 0 : 1));
+            auto &slot = m_alertSlots[si];
+            const bool roleMatch = role.isEmpty() || role == slot.kind;
+            const bool enabledMatch = (slot.kind == "gift" && src["alertOnGift"].toBool(true))
+                                   || (slot.kind == "follow" && src["alertOnFollow"].toBool(true));
+            if (!slot.kind.isEmpty() && !slot.canvas.isNull() && roleMatch && enabledMatch) {
+                const int aw = slot.canvas.width();
+                const qreal sc = slot.scaleRef;
 
                 // Smooth easing helpers for entrance, idle motion, and exit
-                const double elapsedMs = std::max(0.0, double(QDateTime::currentMSecsSinceEpoch() - m_alertStartMs));
-                const double durMs = std::max(1000.0, double(m_alertDurMs));
+                const double elapsedMs = std::max(0.0, double(QDateTime::currentMSecsSinceEpoch() - slot.startMs));
+                const double durMs = std::max(1000.0, double(slot.durMs));
                 const double remainMs = std::max(0.0, durMs - elapsedMs);
                 auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
                 auto easeOutCubic = [](double t) { return 1.0 - std::pow(1.0 - t, 3.0); };
@@ -3760,20 +3780,20 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                 const double imgFloatY = std::sin(elapsedMs * 0.0042) * (7.0 * sc);
                 const double imgTiltDeg = std::sin(elapsedMs * 0.0028) * 2.6;
 
-                m_alertCanvas.fill(Qt::transparent);
-                QPainter p(&m_alertCanvas);
+                slot.canvas.fill(Qt::transparent);
+                QPainter p(&slot.canvas);
                 p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-                int y = m_alertPad;
-                if (!m_alertCachedImg.isNull()) {
+                int y = slot.pad;
+                if (!slot.cachedImg.isNull()) {
                     p.save();
                     p.setOpacity(masterAlpha);
-                    p.translate(aw / 2.0, y + m_alertCachedImg.height() / 2.0 + imgFloatY);
+                    p.translate(aw / 2.0, y + slot.cachedImg.height() / 2.0 + imgFloatY);
                     p.rotate(imgTiltDeg);
                     p.scale(imgScale, imgScale);
-                    p.drawImage(-m_alertCachedImg.width() / 2.0, -m_alertCachedImg.height() / 2.0, m_alertCachedImg);
+                    p.drawImage(-slot.cachedImg.width() / 2.0, -slot.cachedImg.height() / 2.0, slot.cachedImg);
                     p.restore();
-                    y += m_alertCachedImg.height() + m_alertGapAfterImg;
+                    y += slot.cachedImg.height() + slot.gapAfterImg;
                 }
 
                 auto drawAnimText = [&](const QImage &txtImg, int topY, double delayMs, double phase) {
@@ -3792,14 +3812,14 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                     p.restore();
                 };
 
-                if (!m_alertUserImg.isNull()) {
-                    drawAnimText(m_alertUserImg, y, 70.0, 0.0);
-                    y += m_alertUserImg.height() + m_alertLineGap;
+                if (!slot.userImg.isNull()) {
+                    drawAnimText(slot.userImg, y, 70.0, 0.0);
+                    y += slot.userImg.height() + slot.lineGap;
                 }
-                if (!m_alertDetailImg.isNull()) {
-                    drawAnimText(m_alertDetailImg, y, 150.0, 1.1);
+                if (!slot.detailImg.isNull()) {
+                    drawAnimText(slot.detailImg, y, 150.0, 1.1);
                 }
-                img = m_alertCanvas;
+                img = slot.canvas;
             }
         } else {
             img = rasterizeSource(src);
