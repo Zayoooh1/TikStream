@@ -154,8 +154,9 @@ private:
     void importSceneCollection();
     void openStatsGraphDialog();
     void syncDualPreviewDock();
-    QJsonObject alertBoxSource() const;
-    void editAlertBoxSource(const std::function<void(QJsonObject &)> &fn);
+    QJsonObject alertBoxSource(const QString &role = {}) const;
+    void editAlertBoxSource(const QString &role, const std::function<void(QJsonObject &)> &fn);
+    void ensureSeparateAlertBoxes();
     void loadAlertBoxDock();
     void saveDockLayout();
     void ensureDockOnScreen(QDockWidget *dock);

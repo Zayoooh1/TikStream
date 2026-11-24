@@ -137,8 +137,9 @@ public sealed class AudioEngine : IDisposable
             var alertChannelIds = new HashSet<string>();
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.AlertBox))
             {
+                // TikTok LIVE AlertBox sounds are strictly Vertical (TikTok) only — never routed to Horizontal streams/recordings.
                 bool onV = !d.Muted && (audibleV?.Contains(d.Id) != false);
-                bool onH = !d.Muted && (audibleH?.Contains(d.Id) != false);
+                const bool onH = false;
                 string mon = string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode;
                 void syncAlertChannel(string chId, string chName, float vol, bool muted)
                 {
@@ -148,15 +149,18 @@ public sealed class AudioEngine : IDisposable
                         inp = Input.FromPush(chName, _mixer, isAlert: true);
                         _inputs[chId] = inp;
                     }
-                    bool active = !muted && (onV || onH);
+                    bool active = !muted && onV;
                     inp.SetVolume(active ? VolumeToGain(vol) : 0);
-                    inp.SetRouting(onV && !muted, onH && !muted);
+                    inp.SetRouting(onV && !muted, onH);
                     inp.SetMonitorMode(mon);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
                 }
-                syncAlertChannel(d.Id + ":gift", d.Name + " · Gift", d.AlertGiftVolume ?? d.AlertVolume, d.AlertGiftMuted);
-                syncAlertChannel(d.Id + ":follow", d.Name + " · Follow", d.AlertFollowVolume ?? d.AlertVolume, d.AlertFollowMuted);
+                string role = (d.AlertRole ?? "").Trim().ToLowerInvariant();
+                if (role != "follow")
+                    syncAlertChannel(d.Id + ":gift", d.Name + " · Gift", d.AlertGiftVolume ?? d.AlertVolume, d.AlertGiftMuted);
+                if (role != "gift")
+                    syncAlertChannel(d.Id + ":follow", d.Name + " · Follow", d.AlertFollowVolume ?? d.AlertVolume, d.AlertFollowMuted);
             }
             foreach (var id in _inputs.Where(kv => kv.Value.IsAlert && !alertChannelIds.Contains(kv.Key)).Select(kv => kv.Key).ToList())
             {

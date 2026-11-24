@@ -569,6 +569,7 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     QTimer::singleShot(500, this, [this] { m_layoutReady = true; });
 
     for (const auto &v : sources()) uploadRaster(v.toObject());
+    ensureSeparateAlertBoxes();
     refreshCaptureList();
     refreshCameras();
     rebuildScenes();
@@ -1644,52 +1645,141 @@ QWidget *MainWindow::pageBrowser()
     return w;
 }
 
-QJsonObject MainWindow::alertBoxSource() const
+QJsonObject MainWindow::alertBoxSource(const QString &role) const
 {
-    // Prefer an AlertBox present in the active scene, otherwise the first AlertBox source in settings.
-    for (const auto &v : activeScene()["items"].toArray()) {
-        const auto s = sourceById(v.toObject()["sourceId"].toString());
-        if (s["type"].toString() == "AlertBox") return s;
-    }
-    for (const auto &v : sources()) {
-        const auto s = v.toObject();
-        if (s["type"].toString() == "AlertBox") return s;
+    auto matches = [&](const QJsonObject &s) {
+        if (s["type"].toString() != "AlertBox") return false;
+        if (role.isEmpty()) return true;
+        const QString r = s["alertRole"].toString();
+        return r == role || r.isEmpty();
+    };
+    // Prefer an exact role match in the active scene, then any match in active scene, then global sources.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto &v : activeScene()["items"].toArray()) {
+            const auto s = sourceById(v.toObject()["sourceId"].toString());
+            if (!matches(s)) continue;
+            if (pass == 0 && !role.isEmpty() && s["alertRole"].toString() != role) continue;
+            return s;
+        }
+        for (const auto &v : sources()) {
+            const auto s = v.toObject();
+            if (!matches(s)) continue;
+            if (pass == 0 && !role.isEmpty() && s["alertRole"].toString() != role) continue;
+            return s;
+        }
     }
     return {};
 }
 
-void MainWindow::editAlertBoxSource(const std::function<void(QJsonObject &)> &fn)
+void MainWindow::editAlertBoxSource(const QString &role, const std::function<void(QJsonObject &)> &fn)
 {
-    QJsonObject s = alertBoxSource();
+    if (role.isEmpty()) {
+        // Apply to all AlertBox sources (e.g. shared Duration setting)
+        QJsonArray arr = sources();
+        bool changed = false;
+        for (int i = 0; i < arr.size(); ++i) {
+            QJsonObject s = arr[i].toObject();
+            if (s["type"].toString() != "AlertBox") continue;
+            fn(s);
+            arr[i] = s;
+            changed = true;
+        }
+        if (changed) { m_s["sources"] = arr; applySoon(); }
+        return;
+    }
+    QJsonObject s = alertBoxSource(role);
     if (s.isEmpty()) return;
     fn(s);
     setSource(s);
     applySoon();
 }
 
+void MainWindow::ensureSeparateAlertBoxes()
+{
+    // Migrate legacy combined AlertBox (alertRole == "") into independent Gift Alert & Follow Alert sources
+    // so users can position and resize Gift and Follow alerts separately on every scene.
+    QJsonArray srcs = sources();
+    QJsonArray scs = scenes();
+    bool changed = false;
+    for (int i = 0; i < srcs.size(); ++i) {
+        QJsonObject s = srcs[i].toObject();
+        if (s["type"].toString() != "AlertBox") continue;
+        if (!s["alertRole"].toString().isEmpty()) continue;
+
+        const QString origId = s["id"].toString();
+        const QString followId = newId();
+        QJsonObject followSrc = s;
+        followSrc["id"] = followId;
+        followSrc["alertRole"] = "follow";
+        followSrc["name"] = "TikTok Follow Alert";
+
+        s["alertRole"] = "gift";
+        if (s["name"].toString().isEmpty() || s["name"].toString() == "TikTok LIVE Alert Box")
+            s["name"] = "TikTok Gift Alert";
+        srcs[i] = s;
+        srcs.append(followSrc);
+
+        for (int si = 0; si < scs.size(); ++si) {
+            QJsonObject sc = scs[si].toObject();
+            QJsonArray items = sc["items"].toArray();
+            bool sceneAdded = false;
+            for (int ii = 0; ii < items.size(); ++ii) {
+                const QJsonObject it = items[ii].toObject();
+                if (it["sourceId"].toString() != origId) continue;
+                QJsonObject fit = it;
+                fit["id"] = newId();
+                fit["sourceId"] = followId;
+                fit["y"] = std::min(0.72, it["y"].toDouble(0.15) + 0.14);
+                if (it["hasDualLayout"].toBool())
+                    fit["dualY"] = std::min(0.72, it["dualY"].toDouble(0.15) + 0.14);
+                items.append(fit);
+                sceneAdded = true;
+                break;
+            }
+            if (sceneAdded) {
+                sc["items"] = items;
+                scs[si] = sc;
+            }
+        }
+        changed = true;
+    }
+    if (changed) {
+        m_s["sources"] = srcs;
+        m_s["scenes"] = scs;
+        applySoon();
+    }
+}
+
 void MainWindow::loadAlertBoxDock()
 {
     if (!m_alertBoxForm || !m_alertBoxEmpty) return;
-    const QJsonObject src = alertBoxSource();
-    const bool has = !src.isEmpty();
+    const QJsonObject giftSrc = alertBoxSource("gift");
+    const QJsonObject followSrc = alertBoxSource("follow");
+    const QJsonObject anySrc = !giftSrc.isEmpty() ? giftSrc : followSrc;
+    const bool has = !anySrc.isEmpty();
     m_alertBoxEmpty->setVisible(!has);
     m_alertBoxForm->setVisible(has);
     if (!has) return;
 
     const bool prevLoading = m_loading;
     m_loading = true;
-    const QString fallbackImg = src["alertImagePath"].toString();
-    const QString fallbackSnd = src["alertSoundPath"].toString();
-    m_alertGiftImage->setText(src["alertGiftImagePath"].toString().isEmpty() ? fallbackImg : src["alertGiftImagePath"].toString());
-    m_alertGiftSound->setText(src["alertGiftSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertGiftSoundPath"].toString());
-    m_alertFollowImage->setText(src["alertFollowImagePath"].toString().isEmpty() ? fallbackImg : src["alertFollowImagePath"].toString());
-    m_alertFollowSound->setText(src["alertFollowSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertFollowSoundPath"].toString());
-    m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
-    const double fallbackVol = src.value("alertVolume").toDouble(1.0);
-    m_alertGiftVolume->setValue(qRound(src.value("alertGiftVolume").toDouble(fallbackVol) * 100.0));
-    m_alertFollowVolume->setValue(qRound(src.value("alertFollowVolume").toDouble(fallbackVol) * 100.0));
-    m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
-    m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
+    const QJsonObject &g = !giftSrc.isEmpty() ? giftSrc : anySrc;
+    const QJsonObject &fl = !followSrc.isEmpty() ? followSrc : anySrc;
+    const QString gFallbackImg = g["alertImagePath"].toString();
+    const QString gFallbackSnd = g["alertSoundPath"].toString();
+    const QString fFallbackImg = fl["alertImagePath"].toString();
+    const QString fFallbackSnd = fl["alertSoundPath"].toString();
+    m_alertGiftImage->setText(g["alertGiftImagePath"].toString().isEmpty() ? gFallbackImg : g["alertGiftImagePath"].toString());
+    m_alertGiftSound->setText(g["alertGiftSoundPath"].toString().isEmpty() ? gFallbackSnd : g["alertGiftSoundPath"].toString());
+    m_alertFollowImage->setText(fl["alertFollowImagePath"].toString().isEmpty() ? fFallbackImg : fl["alertFollowImagePath"].toString());
+    m_alertFollowSound->setText(fl["alertFollowSoundPath"].toString().isEmpty() ? fFallbackSnd : fl["alertFollowSoundPath"].toString());
+    m_alertDuration->setValue(anySrc["alertDurationSec"].toInt(5));
+    const double gFallbackVol = g.value("alertVolume").toDouble(1.0);
+    const double fFallbackVol = fl.value("alertVolume").toDouble(1.0);
+    m_alertGiftVolume->setValue(qRound(g.value("alertGiftVolume").toDouble(gFallbackVol) * 100.0));
+    m_alertFollowVolume->setValue(qRound(fl.value("alertFollowVolume").toDouble(fFallbackVol) * 100.0));
+    m_alertOnGift->setChecked(g["alertOnGift"].toBool(true));
+    m_alertOnFollow->setChecked(fl["alertOnFollow"].toBool(true));
     m_loading = prevLoading;
 }
 
@@ -1707,7 +1797,7 @@ QWidget *MainWindow::pageAlertBox()
     m_alertBoxForm = new QWidget;
     auto *f = form(m_alertBoxForm);
 
-    auto addPicker = [&](const QString &rowLabel, QLineEdit *&edit, const QString &title, const QString &filter, const QString &placeholder, const char *jsonKey) {
+    auto addPicker = [&](const QString &role, const QString &rowLabel, QLineEdit *&edit, const QString &title, const QString &filter, const QString &placeholder, const char *jsonKey) {
         auto *row = new QHBoxLayout();
         edit = new QLineEdit;
         edit->setPlaceholderText(placeholder);
@@ -1715,22 +1805,22 @@ QWidget *MainWindow::pageAlertBox()
         row->addWidget(edit, 1);
         row->addWidget(btn);
         f->addRow(rowLabel, row);
-        connect(btn, &QPushButton::clicked, this, [this, edit, title, filter, jsonKey] {
+        connect(btn, &QPushButton::clicked, this, [this, role, edit, title, filter, jsonKey] {
             const QString p = QFileDialog::getOpenFileName(this, title, {}, filter);
             if (p.isEmpty()) return;
             const QString nat = QDir::toNativeSeparators(p);
             edit->setText(nat);
-            editAlertBoxSource([nat, jsonKey](QJsonObject &s) { s[jsonKey] = nat; });
+            editAlertBoxSource(role, [nat, jsonKey](QJsonObject &s) { s[jsonKey] = nat; });
         });
-        connect(edit, &QLineEdit::editingFinished, this, [this, edit, jsonKey] {
-            if (!m_loading) editAlertBoxSource([edit, jsonKey](QJsonObject &s) { s[jsonKey] = edit->text().trimmed(); });
+        connect(edit, &QLineEdit::editingFinished, this, [this, role, edit, jsonKey] {
+            if (!m_loading) editAlertBoxSource(role, [edit, jsonKey](QJsonObject &s) { s[jsonKey] = edit->text().trimmed(); });
         });
     };
 
     m_alertOnGift = new QCheckBox("Enable Gift alerts");
     f->addRow("", m_alertOnGift);
-    addPicker("Gift Image/GIF", m_alertGiftImage, "Select Gift Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertGiftImagePath");
-    addPicker("Gift Sound", m_alertGiftSound, "Select Gift Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertGiftSoundPath");
+    addPicker("gift", "Gift Image/GIF", m_alertGiftImage, "Select Gift Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertGiftImagePath");
+    addPicker("gift", "Gift Sound", m_alertGiftSound, "Select Gift Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertGiftSoundPath");
     m_alertGiftVolume = new PaddedSpinBox;
     m_alertGiftVolume->setRange(0, 200);
     m_alertGiftVolume->setSingleStep(5);
@@ -1740,8 +1830,8 @@ QWidget *MainWindow::pageAlertBox()
 
     m_alertOnFollow = new QCheckBox("Enable Follow alerts");
     f->addRow("", m_alertOnFollow);
-    addPicker("Follow Image/GIF", m_alertFollowImage, "Select Follow Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertFollowImagePath");
-    addPicker("Follow Sound", m_alertFollowSound, "Select Follow Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertFollowSoundPath");
+    addPicker("follow", "Follow Image/GIF", m_alertFollowImage, "Select Follow Image / GIF", "Images & GIFs (*.gif *.png *.jpg *.jpeg *.webp)", "GIF / PNG / JPG", "alertFollowImagePath");
+    addPicker("follow", "Follow Sound", m_alertFollowSound, "Select Follow Sound", "Audio (*.mp3 *.wav)", "MP3 / WAV", "alertFollowSoundPath");
     m_alertFollowVolume = new PaddedSpinBox;
     m_alertFollowVolume->setRange(0, 200);
     m_alertFollowVolume->setSingleStep(5);
@@ -1762,18 +1852,18 @@ QWidget *MainWindow::pageAlertBox()
     testRow->addWidget(testGift);
     testRow->addWidget(testFollow);
     f->addRow("", testRow);
-    f->addRow("", hintLabel("Gift Sound and Follow Sound have separate volume sliders here and in the Audio Mixer."));
+    f->addRow("", hintLabel("Gift Alert and Follow Alert can be moved and resized independently on every scene."));
 
     ov->addWidget(m_alertBoxForm);
     ov->addStretch(1);
 
     connect(m_alertDuration, &QSpinBox::valueChanged, this, [this](int v) {
-        if (!m_loading) editAlertBoxSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
+        if (!m_loading) editAlertBoxSource({}, [v](QJsonObject &s) { s["alertDurationSec"] = v; });
     });
     connect(m_alertGiftVolume, &QSpinBox::valueChanged, this, [this](int v) {
         if (m_loading) return;
-        const QString sid = alertBoxSource()["id"].toString();
-        editAlertBoxSource([v](QJsonObject &s) { s["alertGiftVolume"] = v / 100.0; });
+        const QString sid = alertBoxSource("gift")["id"].toString();
+        editAlertBoxSource("gift", [v](QJsonObject &s) { s["alertGiftVolume"] = v / 100.0; });
         if (m_strips.contains(sid + ":gift")) {
             QSignalBlocker b(m_strips[sid + ":gift"].slider);
             m_strips[sid + ":gift"].slider->setValue(v);
@@ -1781,18 +1871,18 @@ QWidget *MainWindow::pageAlertBox()
     });
     connect(m_alertFollowVolume, &QSpinBox::valueChanged, this, [this](int v) {
         if (m_loading) return;
-        const QString sid = alertBoxSource()["id"].toString();
-        editAlertBoxSource([v](QJsonObject &s) { s["alertFollowVolume"] = v / 100.0; });
+        const QString sid = alertBoxSource("follow")["id"].toString();
+        editAlertBoxSource("follow", [v](QJsonObject &s) { s["alertFollowVolume"] = v / 100.0; });
         if (m_strips.contains(sid + ":follow")) {
             QSignalBlocker b(m_strips[sid + ":follow"].slider);
             m_strips[sid + ":follow"].slider->setValue(v);
         }
     });
     connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
-        if (!m_loading) editAlertBoxSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
+        if (!m_loading) editAlertBoxSource("gift", [on](QJsonObject &s) { s["alertOnGift"] = on; });
     });
     connect(m_alertOnFollow, &QCheckBox::toggled, this, [this](bool on) {
-        if (!m_loading) editAlertBoxSource([on](QJsonObject &s) { s["alertOnFollow"] = on; });
+        if (!m_loading) editAlertBoxSource("follow", [on](QJsonObject &s) { s["alertOnFollow"] = on; });
     });
     connect(testGift, &QPushButton::clicked, this, [this] { triggerAlert("gift", "alex_gg", "🎁 Rose ×10"); });
     connect(testFollow, &QPushButton::clicked, this, [this] { triggerAlert("follow", "maya_live", "just followed!"); });
@@ -2746,6 +2836,10 @@ void MainWindow::rebuildMixer()
     }
     auto sourceRouting = [&](const QJsonObject &s) -> QPair<bool, bool> {
         const QString id = s["id"].toString();
+        if (s["type"].toString() == "AlertBox") {
+            const bool onV = sceneAudioV.contains(id) ? sceneAudioV.value(id) : true;
+            return {onV, false}; // TikTok LIVE AlertBox audio is always TikTok (Vertical) only
+        }
         if (s["globalAudio"].toBool()) {
             return {s.value("audioVertical").toBool(true), s.value("audioHorizontal").toBool(true)};
         }
@@ -2771,9 +2865,12 @@ void MainWindow::rebuildMixer()
         if (sceneDevice && !sceneAudioV.contains(id)) continue;
         if (t == "AlertBox") {
             const auto [onV, onH] = sourceRouting(s);
-            audio << MixerEntry{s, id + ":gift", "alertGiftVolume", "alertGiftMuted", "Gift Sound"};
-            audio << MixerEntry{s, id + ":follow", "alertFollowVolume", "alertFollowMuted", "Follow Sound"};
-            sig << id + s["name"].toString()
+            const QString role = s["alertRole"].toString();
+            if (role != "follow")
+                audio << MixerEntry{s, id + ":gift", "alertGiftVolume", "alertGiftMuted", "Gift Sound"};
+            if (role != "gift")
+                audio << MixerEntry{s, id + ":follow", "alertFollowVolume", "alertFollowMuted", "Follow Sound"};
+            sig << id + s["name"].toString() + role
                 + (s["muted"].toBool() || s["alertGiftMuted"].toBool() ? "mg" : "")
                 + (s["muted"].toBool() || s["alertFollowMuted"].toBool() ? "mf" : "")
                 + (onV ? "V" : "v") + (onH ? "H" : "h");
@@ -2826,7 +2923,7 @@ void MainWindow::rebuildMixer()
         if (type == "AudioApplication" && !application.isEmpty() && !channelName.contains(application, Qt::CaseInsensitive))
             channelName += " · " + application;
         else if (!entry.suffix.isEmpty())
-            channelName = channelName.isEmpty() ? entry.suffix : channelName + " · " + entry.suffix;
+            channelName = m_mixerVertical ? entry.suffix : (channelName.isEmpty() ? entry.suffix : channelName + " · " + entry.suffix);
         auto *name = new QLabel(channelName);
         name->setWordWrap(true);
         name->setObjectName("channelName");
@@ -2915,12 +3012,13 @@ void MainWindow::rebuildMixer()
         gear->setMenu(menu);
 
         const auto [onV, onH] = sourceRouting(s);
+        const QString effectiveVertPlatform = (type == "AlertBox") ? QStringLiteral("TikTok") : vertPlatform;
         QLabel *routeBadge = nullptr;
         if (onV != onH || (!onV && !onH)) {
             routeBadge = new QLabel;
             if (onV && !onH) {
-                routeBadge->setText(QStringLiteral("%1 only").arg(vertPlatform));
-                routeBadge->setToolTip(QStringLiteral("Audio is heard ONLY on %1 (Vertical 9:16)").arg(vertPlatform));
+                routeBadge->setText(QStringLiteral("%1 only").arg(effectiveVertPlatform));
+                routeBadge->setToolTip(QStringLiteral("Audio is heard ONLY on %1 (Vertical 9:16) — muted on Horizontal").arg(effectiveVertPlatform));
                 routeBadge->setStyleSheet("background: rgba(254, 44, 85, 38); border: 1px solid rgba(37, 244, 238, 140); border-radius: 4px; padding: 1px 6px; color: #25f4ee; font-size: 10px; font-weight: 700;");
             } else if (!onV && onH) {
                 routeBadge->setText(QStringLiteral("%1 only").arg(horizPlatform));
@@ -2999,14 +3097,12 @@ void MainWindow::rebuildMixer()
             QJsonObject src = sourceById(id);
             src[volField] = val / 100.0;
             setSource(src);
-            if (alertBoxSource()["id"].toString() == id) {
-                if (volField == "alertGiftVolume" && m_alertGiftVolume) {
-                    QSignalBlocker b(m_alertGiftVolume);
-                    m_alertGiftVolume->setValue(val);
-                } else if (volField == "alertFollowVolume" && m_alertFollowVolume) {
-                    QSignalBlocker b(m_alertFollowVolume);
-                    m_alertFollowVolume->setValue(val);
-                }
+            if (volField == "alertGiftVolume" && alertBoxSource("gift")["id"].toString() == id && m_alertGiftVolume) {
+                QSignalBlocker b(m_alertGiftVolume);
+                m_alertGiftVolume->setValue(val);
+            } else if (volField == "alertFollowVolume" && alertBoxSource("follow")["id"].toString() == id && m_alertFollowVolume) {
+                QSignalBlocker b(m_alertFollowVolume);
+                m_alertFollowVolume->setValue(val);
             }
             applySoon();
         });
@@ -3348,6 +3444,8 @@ void MainWindow::showNextAlert()
         for (const auto &v : sources()) {
             const auto s = v.toObject();
             if (s["type"].toString() != "AlertBox") continue;
+            const QString role = s["alertRole"].toString();
+            if (!role.isEmpty() && role != ev.kind) continue;
             if (ev.kind == "gift" && !s["alertOnGift"].toBool(true)) continue;
             if (ev.kind == "follow" && !s["alertOnFollow"].toBool(true)) continue;
             maxDur = std::max(maxDur, std::clamp(s["alertDurationSec"].toInt(5), 2, 15));
@@ -3634,7 +3732,11 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
         } else if (type == "AlertBox") {
-            if (!m_alertKind.isEmpty() && !m_alertCanvas.isNull()) {
+            const QString role = src["alertRole"].toString();
+            const bool roleMatch = role.isEmpty() || role == m_alertKind;
+            const bool enabledMatch = (m_alertKind == "gift" && src["alertOnGift"].toBool(true))
+                                   || (m_alertKind == "follow" && src["alertOnFollow"].toBool(true));
+            if (!m_alertKind.isEmpty() && !m_alertCanvas.isNull() && roleMatch && enabledMatch) {
                 const int aw = m_alertCanvas.width();
                 const qreal sc = m_alertScaleRef;
 

@@ -80,6 +80,7 @@ public sealed record SourceDef
     public int BrowserReloadNonce { get; set; }
 
     // native TikTok LIVE alert box
+    public string AlertRole { get; set; } = ""; // "" (combined) | "gift" | "follow"
     public string AlertSoundPath { get; set; } = "";
     public string AlertImagePath { get; set; } = "";
     public string AlertGiftImagePath { get; set; } = "";
