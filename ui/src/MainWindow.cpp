@@ -978,8 +978,19 @@ void MainWindow::buildDocks()
     connect(btnSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
     auto *dCtl = makeDock("Controls", "dockControls", ctl, Qt::RightDockWidgetArea);
 
+    auto *alertScroll = new QScrollArea;
+    alertScroll->setWidgetResizable(true);
+    alertScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    alertScroll->setFrameShape(QFrame::NoFrame);
+    alertScroll->setWidget(pageAlertBox());
+    m_alertBoxDock = makeDock("TikTok LIVE Alerts", "dockAlertBox", alertScroll, Qt::RightDockWidgetArea);
+    m_alertBoxDock->setFeatures(m_alertBoxDock->features() | QDockWidget::DockWidgetClosable);
+    if (auto *pm = findChild<QMenu *>("panelsMenu"))
+        pm->addAction(m_alertBoxDock->toggleViewAction());
+
     splitDockWidget(dProps, dMix, Qt::Vertical);
     splitDockWidget(dMix, dCtl, Qt::Vertical);
+    splitDockWidget(dCtl, m_alertBoxDock, Qt::Vertical);
 
     // ---------- Detached Horizontal Dual-Canvas Preview Dock ----------
     m_dualPreview = new PreviewWidget;
@@ -1153,7 +1164,20 @@ void MainWindow::buildProperties(QWidget *host)
     m_pages->addWidget(pageColor());
     m_pages->addWidget(pageMedia());
     m_pages->addWidget(pageBrowser());
-    m_pages->addWidget(pageAlertBox());
+    {
+        auto *abHint = new QWidget;
+        auto *av = new QVBoxLayout(abHint);
+        av->setContentsMargins(0, 4, 0, 4);
+        av->setSpacing(8);
+        av->addWidget(hintLabel("TikTok LIVE Alert Box settings are always available in the \"TikTok LIVE Alerts\" dock."));
+        auto *showBtn = new QPushButton("Show TikTok LIVE Alerts Dock");
+        showBtn->setCursor(Qt::PointingHandCursor);
+        connect(showBtn, &QPushButton::clicked, this, [this] {
+            if (m_alertBoxDock) { m_alertBoxDock->show(); m_alertBoxDock->raise(); }
+        });
+        av->addWidget(showBtn);
+        m_pages->addWidget(abHint);
+    }
     m_pages->addWidget(pageChatOverlay());
     m_pages->addWidget(pageApplicationAudio());
     m_pages->addWidget(pageAudioDevice());
@@ -1163,8 +1187,7 @@ void MainWindow::buildProperties(QWidget *host)
     m_srcStatus->setObjectName("statusPill");
     cv->addWidget(m_srcStatus);
     m_transform = buildTransform();
-    m_transform->setMinimumWidth(0);
-    cv->addWidget(m_transform);
+    m_transform->hide();
     cv->addStretch();
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
@@ -1621,10 +1644,68 @@ QWidget *MainWindow::pageBrowser()
     return w;
 }
 
+QJsonObject MainWindow::alertBoxSource() const
+{
+    // Prefer an AlertBox present in the active scene, otherwise the first AlertBox source in settings.
+    for (const auto &v : activeScene()["items"].toArray()) {
+        const auto s = sourceById(v.toObject()["sourceId"].toString());
+        if (s["type"].toString() == "AlertBox") return s;
+    }
+    for (const auto &v : sources()) {
+        const auto s = v.toObject();
+        if (s["type"].toString() == "AlertBox") return s;
+    }
+    return {};
+}
+
+void MainWindow::editAlertBoxSource(const std::function<void(QJsonObject &)> &fn)
+{
+    QJsonObject s = alertBoxSource();
+    if (s.isEmpty()) return;
+    fn(s);
+    setSource(s);
+    applySoon();
+}
+
+void MainWindow::loadAlertBoxDock()
+{
+    if (!m_alertBoxForm || !m_alertBoxEmpty) return;
+    const QJsonObject src = alertBoxSource();
+    const bool has = !src.isEmpty();
+    m_alertBoxEmpty->setVisible(!has);
+    m_alertBoxForm->setVisible(has);
+    if (!has) return;
+
+    const bool prevLoading = m_loading;
+    m_loading = true;
+    const QString fallbackImg = src["alertImagePath"].toString();
+    const QString fallbackSnd = src["alertSoundPath"].toString();
+    m_alertGiftImage->setText(src["alertGiftImagePath"].toString().isEmpty() ? fallbackImg : src["alertGiftImagePath"].toString());
+    m_alertGiftSound->setText(src["alertGiftSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertGiftSoundPath"].toString());
+    m_alertFollowImage->setText(src["alertFollowImagePath"].toString().isEmpty() ? fallbackImg : src["alertFollowImagePath"].toString());
+    m_alertFollowSound->setText(src["alertFollowSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertFollowSoundPath"].toString());
+    m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
+    const double fallbackVol = src.value("alertVolume").toDouble(1.0);
+    m_alertGiftVolume->setValue(qRound(src.value("alertGiftVolume").toDouble(fallbackVol) * 100.0));
+    m_alertFollowVolume->setValue(qRound(src.value("alertFollowVolume").toDouble(fallbackVol) * 100.0));
+    m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
+    m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
+    m_loading = prevLoading;
+}
+
 QWidget *MainWindow::pageAlertBox()
 {
-    auto *w = new QWidget;
-    auto *f = form(w);
+    auto *outer = new QWidget;
+    auto *ov = new QVBoxLayout(outer);
+    ov->setContentsMargins(10, 10, 10, 10);
+    ov->setSpacing(8);
+
+    m_alertBoxEmpty = hintLabel("No TikTok LIVE Alert Box added yet.\nClick + in Sources → TikTok LIVE Alert Box to enable alerts.");
+    m_alertBoxEmpty->setAlignment(Qt::AlignCenter);
+    ov->addWidget(m_alertBoxEmpty);
+
+    m_alertBoxForm = new QWidget;
+    auto *f = form(m_alertBoxForm);
 
     auto addPicker = [&](const QString &rowLabel, QLineEdit *&edit, const QString &title, const QString &filter, const QString &placeholder, const char *jsonKey) {
         auto *row = new QHBoxLayout();
@@ -1639,10 +1720,10 @@ QWidget *MainWindow::pageAlertBox()
             if (p.isEmpty()) return;
             const QString nat = QDir::toNativeSeparators(p);
             edit->setText(nat);
-            editSource([nat, jsonKey](QJsonObject &s) { s[jsonKey] = nat; });
+            editAlertBoxSource([nat, jsonKey](QJsonObject &s) { s[jsonKey] = nat; });
         });
         connect(edit, &QLineEdit::editingFinished, this, [this, edit, jsonKey] {
-            if (!m_loading) editSource([edit, jsonKey](QJsonObject &s) { s[jsonKey] = edit->text().trimmed(); });
+            if (!m_loading) editAlertBoxSource([edit, jsonKey](QJsonObject &s) { s[jsonKey] = edit->text().trimmed(); });
         });
     };
 
@@ -1683,13 +1764,16 @@ QWidget *MainWindow::pageAlertBox()
     f->addRow("", testRow);
     f->addRow("", hintLabel("Gift Sound and Follow Sound have separate volume sliders here and in the Audio Mixer."));
 
+    ov->addWidget(m_alertBoxForm);
+    ov->addStretch(1);
+
     connect(m_alertDuration, &QSpinBox::valueChanged, this, [this](int v) {
-        if (!m_loading) editSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
+        if (!m_loading) editAlertBoxSource([v](QJsonObject &s) { s["alertDurationSec"] = v; });
     });
     connect(m_alertGiftVolume, &QSpinBox::valueChanged, this, [this](int v) {
         if (m_loading) return;
-        const QString sid = selectedSource()["id"].toString();
-        editSource([v](QJsonObject &s) { s["alertGiftVolume"] = v / 100.0; });
+        const QString sid = alertBoxSource()["id"].toString();
+        editAlertBoxSource([v](QJsonObject &s) { s["alertGiftVolume"] = v / 100.0; });
         if (m_strips.contains(sid + ":gift")) {
             QSignalBlocker b(m_strips[sid + ":gift"].slider);
             m_strips[sid + ":gift"].slider->setValue(v);
@@ -1697,22 +1781,22 @@ QWidget *MainWindow::pageAlertBox()
     });
     connect(m_alertFollowVolume, &QSpinBox::valueChanged, this, [this](int v) {
         if (m_loading) return;
-        const QString sid = selectedSource()["id"].toString();
-        editSource([v](QJsonObject &s) { s["alertFollowVolume"] = v / 100.0; });
+        const QString sid = alertBoxSource()["id"].toString();
+        editAlertBoxSource([v](QJsonObject &s) { s["alertFollowVolume"] = v / 100.0; });
         if (m_strips.contains(sid + ":follow")) {
             QSignalBlocker b(m_strips[sid + ":follow"].slider);
             m_strips[sid + ":follow"].slider->setValue(v);
         }
     });
     connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
-        if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
+        if (!m_loading) editAlertBoxSource([on](QJsonObject &s) { s["alertOnGift"] = on; });
     });
     connect(m_alertOnFollow, &QCheckBox::toggled, this, [this](bool on) {
-        if (!m_loading) editSource([on](QJsonObject &s) { s["alertOnFollow"] = on; });
+        if (!m_loading) editAlertBoxSource([on](QJsonObject &s) { s["alertOnFollow"] = on; });
     });
     connect(testGift, &QPushButton::clicked, this, [this] { triggerAlert("gift", "alex_gg", "🎁 Rose ×10"); });
     connect(testFollow, &QPushButton::clicked, this, [this] { triggerAlert("follow", "maya_live", "just followed!"); });
-    return w;
+    return outer;
 }
 
 QWidget *MainWindow::pageChatOverlay()
@@ -2504,6 +2588,7 @@ void MainWindow::selectItem(const QString &itemId)
 
 void MainWindow::loadProperties()
 {
+    loadAlertBoxDock();
     const QJsonObject item = selectedItem();
     const QJsonObject src = sourceById(item["sourceId"].toString());
     const bool has = !src.isEmpty();
@@ -2617,21 +2702,10 @@ void MainWindow::loadProperties()
         m_browserCss->setPlainText(src["browserCss"].toString("body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"));
         m_browserMuted->setChecked(src["browserMuted"].toBool(false));
     } else if (type == "AlertBox") {
-        const QString fallbackImg = src["alertImagePath"].toString();
-        const QString fallbackSnd = src["alertSoundPath"].toString();
-        m_alertGiftImage->setText(src["alertGiftImagePath"].toString().isEmpty() ? fallbackImg : src["alertGiftImagePath"].toString());
-        m_alertGiftSound->setText(src["alertGiftSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertGiftSoundPath"].toString());
-        m_alertFollowImage->setText(src["alertFollowImagePath"].toString().isEmpty() ? fallbackImg : src["alertFollowImagePath"].toString());
-        m_alertFollowSound->setText(src["alertFollowSoundPath"].toString().isEmpty() ? fallbackSnd : src["alertFollowSoundPath"].toString());
-        m_alertDuration->setValue(src["alertDurationSec"].toInt(5));
-        const double fallbackVol = src.value("alertVolume").toDouble(1.0);
-        m_alertGiftVolume->setValue(qRound(src.value("alertGiftVolume").toDouble(fallbackVol) * 100.0));
-        m_alertFollowVolume->setValue(qRound(src.value("alertFollowVolume").toDouble(fallbackVol) * 100.0));
-        m_alertOnGift->setChecked(src["alertOnGift"].toBool(true));
-        m_alertOnFollow->setChecked(src["alertOnFollow"].toBool(true));
+        loadAlertBoxDock();
     }
 
-    m_transform->setVisible(!info.audio);
+    m_transform->hide();
     m_fit->setCurrentIndex(std::max(0, m_fit->findData(item["fit"].toString("Free"))));
     m_cropRows->setVisible(croppable(type));
     m_zoom->setValue(qRound(item["zoom"].toDouble(1) * 100));
@@ -2925,7 +2999,7 @@ void MainWindow::rebuildMixer()
             QJsonObject src = sourceById(id);
             src[volField] = val / 100.0;
             setSource(src);
-            if (selectedSource()["id"].toString() == id) {
+            if (alertBoxSource()["id"].toString() == id) {
                 if (volField == "alertGiftVolume" && m_alertGiftVolume) {
                     QSignalBlocker b(m_alertGiftVolume);
                     m_alertGiftVolume->setValue(val);

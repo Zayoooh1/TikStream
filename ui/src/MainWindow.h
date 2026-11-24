@@ -154,6 +154,9 @@ private:
     void importSceneCollection();
     void openStatsGraphDialog();
     void syncDualPreviewDock();
+    QJsonObject alertBoxSource() const;
+    void editAlertBoxSource(const std::function<void(QJsonObject &)> &fn);
+    void loadAlertBoxDock();
     void saveDockLayout();
     void ensureDockOnScreen(QDockWidget *dock);
     void pollStats();
@@ -209,6 +212,9 @@ private:
 
     PreviewWidget *m_preview = nullptr, *m_dualPreview = nullptr;
     QDockWidget *m_dualPreviewDock = nullptr;
+    QDockWidget *m_alertBoxDock = nullptr;
+    QWidget *m_alertBoxForm = nullptr;
+    QLabel *m_alertBoxEmpty = nullptr;
     bool m_dualDockPositioned = false;
     bool m_layoutReady = false;
     QStackedWidget *m_previewStack = nullptr;
