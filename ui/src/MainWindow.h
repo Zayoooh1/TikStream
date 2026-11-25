@@ -145,7 +145,7 @@ private:
 
     // ---------- live ----------
     void toggleStream();
-    bool prepareStream();
+    bool prepareStream(QJsonObject *startArgs = nullptr);
     void toggleRecord();
     void toggleReplay();
     void saveReplay();

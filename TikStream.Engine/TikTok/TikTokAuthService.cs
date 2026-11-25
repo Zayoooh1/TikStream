@@ -618,18 +618,37 @@ public sealed class TikTokAuthService
                 if (data.TryGetProperty("stream_url", out var su) && su.ValueKind == JsonValueKind.Object)
                 {
                     pushUrl = ReadStr(su, "rtmp_push_url");
-                    if (string.IsNullOrEmpty(pushUrl) && su.TryGetProperty("rtmp_push_url_params", out _))
-                        pushUrl = ReadStr(su, "rtmp_push_url");
+                    if (string.IsNullOrEmpty(pushUrl) && su.TryGetProperty("push_urls", out var pushArr) && pushArr.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var item in pushArr.EnumerateArray())
+                        {
+                            var cand = item.ValueKind == JsonValueKind.String ? (item.GetString() ?? "").Trim() : "";
+                            if (!string.IsNullOrEmpty(cand)) { pushUrl = cand; break; }
+                        }
+                    }
                 }
                 if (string.IsNullOrEmpty(pushUrl))
                 {
                     lastError = "TikTok created the room but did not return an RTMP push URL.";
                     continue;
                 }
+                if (!pushUrl.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase)
+                    && !pushUrl.StartsWith("rtmps://", StringComparison.OrdinalIgnoreCase))
+                {
+                    lastError = "TikTok returned an unsupported RTMP push URL format.";
+                    Log.Warn($"TikTok room/create returned unsupported URL on {host} (room_id={roomId})");
+                    continue;
+                }
 
                 var (serverUrl, streamKey) = SplitRtmpUrl(pushUrl);
+                if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(streamKey))
+                {
+                    lastError = "TikTok created the room but did not return a valid RTMP server URL and stream key.";
+                    Log.Warn($"TikTok room/create missing stream key in push URL on {host} (room_id={roomId}, target={MaskRtmpUrl(pushUrl)})");
+                    continue;
+                }
                 session.WebcastDomain = host;
-                Log.Info($"TikTok room/create OK on {host} (room_id={roomId}, server={serverUrl})");
+                Log.Info($"TikTok room/create OK on {host} (room_id={roomId}, target={MaskRtmpUrl(pushUrl)})");
                 return new TikTokCreateRoomResult(true, roomId, serverUrl, streamKey, pushUrl, shareUrl);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -709,6 +728,17 @@ public sealed class TikTokAuthService
         int lastSlash = withoutQuery.LastIndexOf('/');
         if (lastSlash <= 8) return (trimmed, "");
         return (trimmed[..lastSlash], trimmed[(lastSlash + 1)..]);
+    }
+
+    private static string MaskRtmpUrl(string fullUrl)
+    {
+        var trimmed = (fullUrl ?? "").Trim();
+        int q = trimmed.IndexOf('?');
+        string withoutQuery = q >= 0 ? trimmed[..q] : trimmed;
+        int lastSlash = withoutQuery.LastIndexOf('/');
+        if (lastSlash <= 8)
+            return Uri.TryCreate(withoutQuery, UriKind.Absolute, out var uri) ? $"{uri.Scheme}://{uri.Host}/***" : "***";
+        return withoutQuery[..lastSlash] + "/***";
     }
 
     private static async Task<JsonDocument> SendSignedJsonAsync(

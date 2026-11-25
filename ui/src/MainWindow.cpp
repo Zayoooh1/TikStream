@@ -4585,27 +4585,28 @@ void MainWindow::onCanvasWheelAt(int delta, bool dual)
 void MainWindow::toggleStream()
 {
     const bool wasStreaming = m_streaming;
+    QJsonObject startArgs;
     if (!wasStreaming) {
-        if (!prepareStream()) return;
+        if (!prepareStream(&startArgs)) return;
     } else if (m_s["confirmStreamStop"].toBool(true) &&
                QMessageBox::question(this, "Streaming", "Stop streaming?") != QMessageBox::Yes) {
         return;
     }
     pushSettings();
     m_btnStream->setEnabled(false);
-    const auto r = EngineHost::instance().callObj(wasStreaming ? "stopStream" : "startStream");
+    const auto r = EngineHost::instance().callObj(wasStreaming ? "stopStream" : "startStream", wasStreaming ? QJsonObject{} : startArgs);
     if (r.contains("error")) QMessageBox::warning(this, "Streaming", r["error"].toString());
     if (wasStreaming) EngineHost::instance().callObj("tiktokFinishRoom");
     m_btnStream->setEnabled(true);
     pollStats();
 }
 
-bool MainWindow::prepareStream()
+bool MainWindow::prepareStream(QJsonObject *startArgs)
 {
     QSettings draft("TikStream", "UI2");
-    const auto ttAcc = EngineHost::instance().callObj("tiktokAccountStatus");
+    const auto ttStatus = EngineHost::instance().callObj("tiktokAccountStatus");
+    const auto ttAcc = ttStatus["account"].isObject() ? ttStatus["account"].toObject() : ttStatus;
     const bool ttLoggedIn = ttAcc["loggedIn"].toBool(false);
-    const QString ttDisp = ttAcc["displayName"].toString(ttAcc["username"].toString());
     const bool hasManualPrimary = !m_s["serverUrl"].toString().trimmed().isEmpty()
         && !m_s["streamKey"].toString().trimmed().isEmpty();
     const bool canStartPrimary = ttLoggedIn || hasManualPrimary;
@@ -4641,12 +4642,7 @@ bool MainWindow::prepareStream()
         auto *layout = new QVBoxLayout(&dlg1);
         layout->setSpacing(10);
 
-        if (ttLoggedIn) {
-            auto *banner = new QLabel(QString("Signed in to TikTok LIVE (%1) — Server URL & Stream Key will be created automatically.").arg(ttDisp));
-            banner->setWordWrap(true);
-            banner->setStyleSheet("background: rgba(74, 222, 128, 22); border: 1px solid rgba(74, 222, 128, 95); border-radius: 6px; padding: 6px 10px; color: #86efac;");
-            layout->addWidget(banner);
-        } else if (!hasManualPrimary) {
+        if (!ttLoggedIn && !hasManualPrimary) {
             layout->addWidget(hintLabel("Sign in with TikTok (QR / LIVE Studio) or configure a Server URL & Stream Key in Stream Settings."));
         }
 
@@ -4661,19 +4657,8 @@ bool MainWindow::prepareStream()
         catCombo->addItems(categories);
         catCombo->setCurrentText(ttCategory.isEmpty() ? QStringLiteral("Gaming") : ttCategory);
 
-        auto addCopyRow = [&dlg1, form](const QString &label, QWidget *field, auto readText) {
-            auto *row = new QHBoxLayout;
-            row->addWidget(field, 1);
-            auto *copy = new QPushButton("Copy");
-            copy->setAutoDefault(false);
-            connect(copy, &QPushButton::clicked, &dlg1, [readText] {
-                QApplication::clipboard()->setText(readText());
-            });
-            row->addWidget(copy);
-            form->addRow(label, row);
-        };
-        addCopyRow("Title", titleEdit, [titleEdit] { return titleEdit->text(); });
-        addCopyRow("Category / Game", catCombo, [catCombo] { return catCombo->currentText(); });
+        form->addRow("Title", titleEdit);
+        form->addRow("Category / Game", catCombo);
 
         auto *buttons = new QDialogButtonBox;
         auto *nextBtn = buttons->addButton(hasSecond ? QString("Next → %1").arg(secondPlatform) : QString("Start Streaming"), QDialogButtonBox::AcceptRole);
@@ -4782,13 +4767,19 @@ bool MainWindow::prepareStream()
         loop.exec();
         QApplication::restoreOverrideCursor();
 
-        if ((*res)["ok"].toBool(false)) {
-            m_s["serverUrl"] = (*res)["serverUrl"].toString();
-            m_s["streamKey"] = (*res)["streamKey"].toString();
+        const bool hasDynamicRtmp = !(*res)["fullRtmpUrl"].toString().trimmed().isEmpty()
+            || (!(*res)["serverUrl"].toString().trimmed().isEmpty() && !(*res)["streamKey"].toString().trimmed().isEmpty());
+        if ((*res)["ok"].toBool(false) && hasDynamicRtmp) {
+            if (startArgs) (*startArgs)["useTikTokRoom"] = true;
             m_stMsg->setText("TikTok LIVE room created — starting stream…");
             return true;
         }
-        const QString err = (*res)["error"].toString("Failed to create TikTok LIVE room.");
+        if ((*res)["ok"].toBool(false))
+            EngineHost::instance().callObj("tiktokFinishRoom");
+        const QString err = (*res)["error"].toString(
+            (*res)["ok"].toBool(false)
+                ? QStringLiteral("TikTok created the LIVE room but did not return a valid RTMP URL and stream key.")
+                : QStringLiteral("Failed to create TikTok LIVE room."));
         if (hasManualPrimary) {
             const auto ans = QMessageBox::warning(this, "TikTok LIVE",
                 QString("Could not auto-create TikTok LIVE room:\n%1\n\nStart streaming using your saved manual Server URL & Stream Key instead?").arg(err),

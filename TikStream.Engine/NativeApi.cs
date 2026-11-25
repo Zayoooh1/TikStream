@@ -22,6 +22,7 @@ public static unsafe class NativeApi
     private static readonly TikTokLogin TikTok = new();
     private static readonly TikTokAuthService TikTokAuth = new();
     private static string _activeTikTokRoomId = "";
+    private static string _activeTikTokRtmpUrl = "";
     private static JsonSerializerOptions Json => AppSettings.JsonOpts;
 
     [UnmanagedCallersOnly]
@@ -274,6 +275,8 @@ public static unsafe class NativeApi
                 TikTokAuth.CancelQrLogin();
                 lock (Lock)
                 {
+                    _activeTikTokRtmpUrl = "";
+                    FinishActiveTikTokRoomLocked();
                     _settings.TikTokSessionJson = "";
                     ScheduleSave();
                 }
@@ -318,17 +321,24 @@ public static unsafe class NativeApi
                 if (!task.Wait(30000))
                     return JsonSerializer.Serialize(new { ok = false, error = "Timed out waiting for TikTok webcast/room/create/." }, Json);
                 var res = task.Result;
+                if (res.Ok && (string.IsNullOrWhiteSpace(res.FullRtmpUrl) || string.IsNullOrWhiteSpace(res.ServerUrl) || string.IsNullOrWhiteSpace(res.StreamKey)))
+                    res = res with { Ok = false, Error = "TikTok created the room but did not return a valid RTMP server URL and stream key." };
                 if (res.Ok)
                 {
-                    _activeTikTokRoomId = res.RoomId;
-                    SaveTikTokSession(sess);
+                    // Keep the dynamic room RTMP URL in session memory only — never overwrite manual settings or write one-time keys to settings.json.
                     lock (Lock)
                     {
-                        var prev = _settings;
-                        _settings.ServerUrl = res.ServerUrl;
-                        _settings.StreamKey = res.StreamKey;
-                        ScheduleSave();
-                        Engine().ApplySettings(_settings, prev);
+                        _activeTikTokRoomId = res.RoomId;
+                        _activeTikTokRtmpUrl = res.FullRtmpUrl;
+                    }
+                    SaveTikTokSession(sess);
+                }
+                else
+                {
+                    lock (Lock)
+                    {
+                        _activeTikTokRtmpUrl = "";
+                        if (_engine?.IsStreaming != true) _activeTikTokRoomId = "";
                     }
                 }
                 return JsonSerializer.Serialize(res, Json);
@@ -336,23 +346,33 @@ public static unsafe class NativeApi
 
             case "tiktokFinishRoom":
             {
-                var roomId = _activeTikTokRoomId;
-                _activeTikTokRoomId = "";
-                if (string.IsNullOrEmpty(roomId)) return Ok();
-                TikTokSessionData? sess;
-                string signerKey, signerUrl;
                 lock (Lock)
                 {
-                    sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
-                    signerKey = _settings.TikTokSignerKey;
-                    signerUrl = _settings.TikTokSignerUrl;
+                    _activeTikTokRtmpUrl = "";
+                    FinishActiveTikTokRoomLocked();
                 }
-                if (sess != null && sess.HasSessionCookie)
-                    _ = Task.Run(() => TikTokAuthService.FinishRoomAsync(sess, roomId, signerKey, signerUrl));
                 return Ok();
             }
-            case "startStream": return Result(Engine().StartStreamAsync());
-            case "stopStream": return Result(Engine().StopStreamAsync());
+            case "startStream":
+            {
+                var overrideUrl = ResolveStreamOverrideUrl(j, out bool usedTikTokRoom);
+                if ((j["useTikTokRoom"]?.GetValue<bool>() ?? false) && string.IsNullOrWhiteSpace(overrideUrl))
+                    return JsonSerializer.Serialize(new { error = "TikTok LIVE room did not provide an active RTMP URL. Please try again." }, Json);
+                var err = RunTask(Engine().StartStreamAsync(overrideUrl));
+                if (err != null && usedTikTokRoom)
+                {
+                    _activeTikTokRtmpUrl = "";
+                    FinishActiveTikTokRoomLocked();
+                }
+                return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
+            }
+            case "stopStream":
+            {
+                var err = RunTask(Engine().StopStreamAsync());
+                _activeTikTokRtmpUrl = "";
+                FinishActiveTikTokRoomLocked();
+                return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
+            }
             case "startRecord": return Result(Engine().StartRecordAsync());
             case "stopRecord": return Result(Engine().StopRecordAsync());
             case "startReplay": return Result(Engine().StartReplayAsync());
@@ -435,6 +455,8 @@ public static unsafe class NativeApi
             case "shutdown":
                 TikTok.Clear();
                 TikTokAuth.CancelQrLogin();
+                _activeTikTokRtmpUrl = "";
+                FinishActiveTikTokRoomLocked();
                 _saveTimer?.Dispose();
                 _settings.Save();
                 _engine?.Dispose();
@@ -445,6 +467,40 @@ public static unsafe class NativeApi
             default:
                 throw new InvalidOperationException("Unknown method: " + method);
         }
+    }
+
+    private static string? ResolveStreamOverrideUrl(JsonObject j, out bool usedTikTokRoom)
+    {
+        usedTikTokRoom = false;
+        var explicitRtmp = j["rtmpUrl"]?.GetValue<string>()?.Trim();
+        if (!string.IsNullOrEmpty(explicitRtmp))
+            return explicitRtmp;
+
+        var explicitServer = j["serverUrl"]?.GetValue<string>()?.Trim() ?? "";
+        var explicitKey = j["streamKey"]?.GetValue<string>()?.Trim().TrimStart('/') ?? "";
+        if (explicitServer.Length > 0 && explicitKey.Length > 0)
+            return explicitServer.TrimEnd('/') + "/" + explicitKey;
+
+        bool requestTikTokRoom = j["useTikTokRoom"]?.GetValue<bool>() ?? false;
+        bool hasManual = !string.IsNullOrWhiteSpace(_settings.ServerUrl) && !string.IsNullOrWhiteSpace(_settings.StreamKey);
+        if ((requestTikTokRoom || !hasManual) && !string.IsNullOrWhiteSpace(_activeTikTokRtmpUrl))
+        {
+            usedTikTokRoom = true;
+            return _activeTikTokRtmpUrl;
+        }
+        return null;
+    }
+
+    private static void FinishActiveTikTokRoomLocked()
+    {
+        var roomId = _activeTikTokRoomId;
+        _activeTikTokRoomId = "";
+        if (string.IsNullOrEmpty(roomId)) return;
+        var sess = TikTokSessionData.FromJson(_settings.TikTokSessionJson);
+        var signerKey = _settings.TikTokSignerKey;
+        var signerUrl = _settings.TikTokSignerUrl;
+        if (sess != null && sess.HasSessionCookie)
+            _ = Task.Run(() => TikTokAuthService.FinishRoomAsync(sess, roomId, signerKey, signerUrl));
     }
 
     private static void SaveTikTokSession(TikTokSessionData session)
@@ -458,9 +514,11 @@ public static unsafe class NativeApi
         }
     }
 
+    private static string? RunTask(Task<string?> t) => t.Wait(15000) ? t.Result : "Operation timed out";
+
     private static string Result(Task<string?> t)
     {
-        var err = t.Wait(15000) ? t.Result : "Operation timed out";
+        var err = RunTask(t);
         return err == null ? Ok() : JsonSerializer.Serialize(new { error = err }, Json);
     }
 

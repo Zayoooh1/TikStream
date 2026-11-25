@@ -338,12 +338,17 @@ public sealed unsafe class StreamEngine : IDisposable
 
     // ===================== streaming / recording =====================
 
-    public Task<string?> StartStreamAsync() => RunOnRender(() =>
+    public Task<string?> StartStreamAsync(string? overrideRtmpUrl = null) => RunOnRender(() =>
     {
         if (IsStreaming) return;
-        var url = _scene.BuildRtmpUrl();
-        if (url.Length == 0 || string.IsNullOrWhiteSpace(_scene.StreamKey))
+        bool hasOverride = !string.IsNullOrWhiteSpace(overrideRtmpUrl);
+        var url = hasOverride ? overrideRtmpUrl!.Trim() : _scene.BuildRtmpUrl();
+        if (url.Length == 0 || (!hasOverride && string.IsNullOrWhiteSpace(_scene.StreamKey)))
             throw new InvalidOperationException("Missing server URL or stream key (Settings → Stream).");
+        if (hasOverride && !url.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase)
+            && !url.StartsWith("rtmps://", StringComparison.OrdinalIgnoreCase)
+            && !url.StartsWith("srt://", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("TikTok LIVE returned an invalid RTMP server URL.");
         EnsureEncoders();
         var opts = new OutputOptions(_scene.AutoReconnect, _scene.ReconnectDelaySec, _scene.ReconnectMaxRetries);
         AddOutput(new StreamOutput("Stream", url, _venc!, _aenc!, _fps, opts, RequestKeyframe));
