@@ -173,6 +173,18 @@ QListWidget::item:selected {
     background: #1b1d26;
     border: 1px solid #2c3040;
 }
+#liveChatViewers {
+    font-size: 12px;
+    font-weight: 700;
+    color: #25f4ee;
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: #1b1d26;
+    border: 1px solid #2c3040;
+}
+#liveChatViewers[active="false"] {
+    color: #8b8fa3;
+}
 
 #settingsNav {
     background: #1e1f27;

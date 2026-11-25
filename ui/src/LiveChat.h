@@ -15,6 +15,7 @@ class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QJsonArray;
+class QJsonObject;
 class GiftNotifications;
 class ChatMessageDelegate;
 
@@ -32,6 +33,7 @@ public:
     void ensureStarted();
     void setDemoPreview(bool enabled);
     bool demoPreview() const { return m_demoPreview; }
+    int viewerCount() const;
     quint64 overlayRevision() const { return m_overlayRevision; }
     QImage renderOverlay(int width, int height, bool showChat, bool showGifts, bool showTaps) const;
 
@@ -39,6 +41,7 @@ signals:
     void overlayChanged();
     void accountChanged(const QString &username);
     void kickAccountChanged(const QString &channel);
+    void viewerCountChanged(int count);
     void alertTriggered(const QString &kind, const QString &user, const QString &detail);
 
 protected:
@@ -57,6 +60,9 @@ private:
     void setAutoScroll(bool enabled);
     void updateGiftStats();
     void updateCombinedStatus();
+    void handleViewerEvent(const QJsonObject &event, const QString &defaultPlatform);
+    void setPlatformViewers(const QString &platform, qint64 count);
+    void updateViewerCount();
     void notifyOverlay();
     void readEvents();
     void readKickEvents();
@@ -69,11 +75,15 @@ private:
     QLineEdit *m_accountEdit = nullptr;
     QLineEdit *m_kickAccountEdit = nullptr;
     QLabel *m_status;
+    QLabel *m_viewers = nullptr;
     QLabel *m_taps;
     QLabel *m_giftTotal = nullptr;
     QLabel *m_giftEarned = nullptr;
     qint64 m_totalGifts = 0;
     qint64 m_totalDiamonds = 0;
+    qint64 m_ttViewers = -1;
+    qint64 m_kickViewers = -1;
+    int m_lastEmittedViewers = -1;
     QListWidget *m_messages;
     ChatMessageDelegate *m_delegate = nullptr;
     QPushButton *m_zoomReset = nullptr;

@@ -8,6 +8,38 @@ export function toPositiveInt(value) {
     return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
+export function toNonNegativeInt(value) {
+    if (typeof value === 'bigint') {
+        return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+    }
+    const n = typeof value === 'number'
+        ? value
+        : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN);
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+export function extractViewerCount(event) {
+    return toNonNegativeInt(event?.viewerCount ?? event?.total);
+}
+
+export function extractInitialViewerCount(roomInfo) {
+    return toNonNegativeInt(
+        roomInfo?.viewerCount
+        ?? roomInfo?.userCount
+        ?? roomInfo?.user_count
+        ?? roomInfo?.viewer_count
+        ?? roomInfo?.stats?.viewerCount
+        ?? roomInfo?.stats?.userCount
+        ?? roomInfo?.stats?.user_count
+        ?? roomInfo?.data?.user_count
+        ?? roomInfo?.data?.viewer_count
+        ?? roomInfo?.data?.viewerCount
+        ?? roomInfo?.data?.userCount
+        ?? roomInfo?.data?.stats?.user_count
+        ?? roomInfo?.data?.stats?.viewerCount
+    );
+}
+
 export function author(user) {
     const nick = user?.displayId || user?.uniqueId || user?.nickname;
     if (!nick) return null;

@@ -24,12 +24,14 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 struct ChatPart {
     bool isEmote = false;
@@ -49,6 +51,14 @@ constexpr int RoleNick = Qt::UserRole + 2;
 constexpr int RoleBody = Qt::UserRole + 3;
 constexpr int RoleColor = Qt::UserRole + 4;
 constexpr int RoleParts = Qt::UserRole + 5;
+
+QString formatViewerCount(qint64 count)
+{
+    QString s = QString::number(std::max<qint64>(0, count));
+    for (int i = s.size() - 3; i > 0; i -= 3)
+        s.insert(i, QLatin1Char(' '));
+    return s;
+}
 
 QString normalizeAccount(QString raw)
 {
@@ -564,6 +574,15 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
 
     m_status = new QLabel("Enter a TikTok or Kick channel above to connect.", this);
     m_status->setWordWrap(true);
+    m_viewers = new QLabel(this);
+    m_viewers->setObjectName("liveChatViewers");
+    m_viewers->setAlignment(Qt::AlignCenter);
+    m_viewers->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    updateViewerCount();
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setSpacing(6);
+    statusRow->addWidget(m_status, 1);
+    statusRow->addWidget(m_viewers, 0, Qt::AlignVCenter);
     m_taps = new QLabel("Likes: —", this);
     m_taps->setObjectName("liveChatTaps");
     m_taps->setMinimumHeight(26);
@@ -632,7 +651,7 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     layout->setSpacing(5);
     layout->addLayout(accRow);
     layout->addLayout(kickRow);
-    layout->addWidget(m_status);
+    layout->addLayout(statusRow);
     layout->addWidget(m_gifts);
     layout->addWidget(m_messages, 1);
     layout->addLayout(actions);
@@ -662,6 +681,9 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     connect(refresh, &QPushButton::clicked, this, [this] {
         m_paused = false;
         m_messages->clear();
+        m_ttViewers = -1;
+        m_kickViewers = -1;
+        updateViewerCount();
         notifyOverlay();
         stopProcess();
         stopKickProcess();
@@ -674,6 +696,9 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
             m_paused = true;
             stopProcess();
             stopKickProcess();
+            m_ttViewers = -1;
+            m_kickViewers = -1;
+            updateViewerCount();
             if (!m_account.isEmpty()) m_ttStatus = QStringLiteral("TikTok: paused");
             if (!m_kickAccount.isEmpty()) m_kickStatus = QStringLiteral("Kick: paused");
             m_connection->setText("Resume");
@@ -692,11 +717,13 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     });
     connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
+            setPlatformViewers(QStringLiteral("tiktok"), -1);
             m_ttStatus = QStringLiteral("TikTok: failed to start");
             updateCombinedStatus();
         }
     });
     connect(&m_process, &QProcess::finished, this, [this] {
+        setPlatformViewers(QStringLiteral("tiktok"), -1);
         m_ttStatus = m_paused ? QStringLiteral("TikTok: paused") : QStringLiteral("TikTok: ended");
         updateCombinedStatus();
     });
@@ -704,11 +731,13 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     connect(&m_kickProcess, &QProcess::readyReadStandardOutput, this, &LiveChat::readKickEvents);
     connect(&m_kickProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
+            setPlatformViewers(QStringLiteral("kick"), -1);
             m_kickStatus = QStringLiteral("Kick: failed to start");
             updateCombinedStatus();
         }
     });
     connect(&m_kickProcess, &QProcess::finished, this, [this] {
+        setPlatformViewers(QStringLiteral("kick"), -1);
         m_kickStatus = m_paused ? QStringLiteral("Kick: paused") : QStringLiteral("Kick: ended");
         updateCombinedStatus();
     });
@@ -807,6 +836,72 @@ void LiveChat::updateGiftStats()
     if (m_giftEarned) {
         const double usd = double(m_totalDiamonds) * 0.005;
         m_giftEarned->setText(QStringLiteral("Earned: ~$%1").arg(QString::number(usd, 'f', 2)));
+    }
+}
+
+int LiveChat::viewerCount() const
+{
+    const bool hasTt = m_ttViewers >= 0;
+    const bool hasKick = m_kickViewers >= 0;
+    if (!hasTt && !hasKick) return -1;
+    const qint64 total = (hasTt ? m_ttViewers : 0) + (hasKick ? m_kickViewers : 0);
+    return int(std::min<qint64>(total, std::numeric_limits<int>::max()));
+}
+
+void LiveChat::handleViewerEvent(const QJsonObject &event, const QString &defaultPlatform)
+{
+    const QString platform = event["platform"].toString(defaultPlatform).trimmed().toLower();
+    const auto countVal = event["count"];
+    const qint64 count = countVal.isDouble() ? countVal.toInteger(-1) : -1;
+    setPlatformViewers(platform.isEmpty() ? defaultPlatform : platform, count >= 0 ? count : -1);
+}
+
+void LiveChat::setPlatformViewers(const QString &platform, qint64 count)
+{
+    const qint64 normalized = count >= 0 ? count : -1;
+    if (platform == QLatin1StringView("kick")) {
+        if (m_kickViewers == normalized) return;
+        m_kickViewers = normalized;
+    } else {
+        if (m_ttViewers == normalized) return;
+        m_ttViewers = normalized;
+    }
+    updateViewerCount();
+}
+
+void LiveChat::updateViewerCount()
+{
+    const bool hasTt = m_ttViewers >= 0;
+    const bool hasKick = m_kickViewers >= 0;
+    const int total = viewerCount();
+    const bool active = total >= 0;
+
+    if (m_viewers) {
+        m_viewers->setText(active
+            ? QStringLiteral("Viewers: %1").arg(formatViewerCount(total))
+            : QStringLiteral("Viewers: —"));
+        if (hasTt && hasKick) {
+            m_viewers->setToolTip(QStringLiteral("Live viewers: %1 (TikTok: %2 · Kick: %3)")
+                .arg(formatViewerCount(total), formatViewerCount(m_ttViewers), formatViewerCount(m_kickViewers)));
+        } else if (hasTt) {
+            m_viewers->setToolTip(QStringLiteral("TikTok LIVE viewers: %1").arg(formatViewerCount(m_ttViewers)));
+        } else if (hasKick) {
+            m_viewers->setToolTip(QStringLiteral("Kick LIVE viewers: %1").arg(formatViewerCount(m_kickViewers)));
+        } else {
+            m_viewers->setToolTip(QStringLiteral("Current LIVE viewer count"));
+        }
+        if (!m_viewers->property("active").isValid() || m_viewers->property("active").toBool() != active) {
+            m_viewers->setProperty("active", active);
+            if (auto *st = m_viewers->style()) {
+                st->unpolish(m_viewers);
+                st->polish(m_viewers);
+            }
+        }
+    }
+
+    if (m_lastEmittedViewers != total) {
+        m_lastEmittedViewers = total;
+        emit viewerCountChanged(total);
     }
 }
 
@@ -996,6 +1091,7 @@ void LiveChat::setAccount(const QString &username)
     updateGiftStats();
     m_tapsText.clear();
     m_taps->setText("Likes: —");
+    setPlatformViewers(QStringLiteral("tiktok"), -1);
     notifyOverlay();
     stopProcess();
     if (m_account.isEmpty()) {
@@ -1016,6 +1112,7 @@ void LiveChat::setKickAccount(const QString &channel)
     if (m_kickAccountEdit && m_kickAccountEdit->text() != norm) m_kickAccountEdit->setText(norm);
     if (m_kickAccount == norm) return;
     m_kickAccount = norm;
+    setPlatformViewers(QStringLiteral("kick"), -1);
     stopKickProcess();
     if (m_kickAccount.isEmpty()) {
         m_kickStatus.clear();
@@ -1045,6 +1142,7 @@ void LiveChat::applyAccountFromInput()
         notifyOverlay();
         emit accountChanged(m_account);
     }
+    setPlatformViewers(QStringLiteral("tiktok"), -1);
     stopProcess();
     m_paused = false;
     m_started = true;
@@ -1058,6 +1156,7 @@ void LiveChat::applyKickAccountFromInput()
     const bool changed = (norm != m_kickAccount);
     m_kickAccount = norm;
     if (changed) emit kickAccountChanged(m_kickAccount);
+    setPlatformViewers(QStringLiteral("kick"), -1);
     stopKickProcess();
     m_paused = false;
     m_started = true;
@@ -1066,6 +1165,7 @@ void LiveChat::applyKickAccountFromInput()
 
 void LiveChat::start()
 {
+    setPlatformViewers(QStringLiteral("tiktok"), -1);
     if (m_account.isEmpty()) {
         m_ttStatus.clear();
         updateCombinedStatus();
@@ -1089,6 +1189,7 @@ void LiveChat::start()
 
 void LiveChat::startKick()
 {
+    setPlatformViewers(QStringLiteral("kick"), -1);
     if (m_kickAccount.isEmpty()) {
         m_kickStatus.clear();
         updateCombinedStatus();
@@ -1141,8 +1242,13 @@ void LiveChat::readEvents()
             }
             notifyOverlay();
         }
+        if (event["type"] == "viewers") {
+            handleViewerEvent(event, QStringLiteral("tiktok"));
+            continue;
+        }
         if (event["type"] != "status") continue;
         const auto state = event["state"].toString();
+        if (state != "connected") setPlatformViewers(QStringLiteral("tiktok"), -1);
         const auto codeVal = event["code"];
         const QString codeText = codeVal.isDouble()
             ? QStringLiteral(" (%1)").arg(codeVal.toInteger())
@@ -1172,8 +1278,13 @@ void LiveChat::readKickEvents()
         if (end - consumed > 512 * 1024) continue;
         const auto event = QJsonDocument::fromJson(m_kickInput.mid(consumed, end - consumed)).object();
         if (event["type"] == "messages") appendMessages(event["messages"].toArray());
+        if (event["type"] == "viewers") {
+            handleViewerEvent(event, QStringLiteral("kick"));
+            continue;
+        }
         if (event["type"] != "status") continue;
         const auto state = event["state"].toString();
+        if (state != "connected") setPlatformViewers(QStringLiteral("kick"), -1);
         const auto codeVal = event["code"];
         const QString codeText = codeVal.isDouble()
             ? QStringLiteral(" (%1)").arg(codeVal.toInteger())

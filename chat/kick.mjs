@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { toNonNegativeInt } from './events.mjs';
 
 const rawChannel = (process.argv[2] ?? '').trim().toLowerCase();
 const channel = rawChannel.replace(/^https?:\/\/(www\.)?kick\.com\//i, '').replace(/^@/, '').replace(/\/.*$/, '');
@@ -145,6 +146,11 @@ function parseKickMessage(raw, emoteMap) {
     return { text, parts: hasEmote ? parts : null };
 }
 
+function extractKickViewers(data) {
+    if (!data?.livestream || data.livestream.is_live === false) return null;
+    return toNonNegativeInt(data.livestream.viewer_count);
+}
+
 async function resolveChannelInfo(slug) {
     const res = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`, {
         headers: HEADERS,
@@ -155,7 +161,7 @@ async function resolveChannelInfo(slug) {
     const data = await res.json();
     const id = data?.id;
     if (!id) return { error: 'no_channel' };
-    return { id, userId: data?.user_id ?? null };
+    return { id, userId: data?.user_id ?? null, viewers: extractKickViewers(data) };
 }
 
 const emoteMap = buildBaseEmotes();
@@ -180,6 +186,14 @@ for (;;) {
         let firstPoll = true;
         let connected = false;
         let failStreak = 0;
+        let lastViewers = undefined;
+        let viewerPollTicks = 0;
+        let pollActive = true;
+        const emitKickViewers = count => {
+            if (count === lastViewers) return;
+            lastViewers = count;
+            emit({ type: 'viewers', platform: 'kick', count });
+        };
 
         for (;;) {
             try {
@@ -189,6 +203,8 @@ for (;;) {
                 });
                 if (!res.ok) {
                     if (++failStreak >= 4) {
+                        pollActive = false;
+                        if (lastViewers !== null && lastViewers !== undefined) emitKickViewers(null);
                         status('unavailable', { code: `http_${res.status}` });
                         break;
                     }
@@ -201,6 +217,14 @@ for (;;) {
                 if (!connected) {
                     connected = true;
                     status('connected');
+                    if (resolved.viewers !== null) emitKickViewers(resolved.viewers);
+                } else if (++viewerPollTicks >= 20) {
+                    viewerPollTicks = 0;
+                    fetchJsonSafe(`https://kick.com/api/v2/channels/${encodeURIComponent(channel)}`, 6000)
+                        .then(info => {
+                            if (pollActive && info?.id) emitKickViewers(extractKickViewers(info));
+                        })
+                        .catch(() => {});
                 }
 
                 // API returns newest-first; iterate oldest-first for natural chat order
@@ -226,6 +250,8 @@ for (;;) {
                 if (fresh.length) emit({ type: 'messages', messages: fresh });
             } catch {
                 if (++failStreak >= 4) {
+                    pollActive = false;
+                    if (lastViewers !== null && lastViewers !== undefined) emitKickViewers(null);
                     status('disconnected');
                     break;
                 }

@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { TikTokLiveConnection, WebcastEvent, ControlEvent } from 'tiktok-live-connector';
-import { author, classifyError, extractChatText, liveEvents } from './events.mjs';
+import { author, classifyError, extractChatText, extractInitialViewerCount, extractViewerCount, liveEvents } from './events.mjs';
 
 const account = process.argv[2];
 if (!/^[a-z\d_.]{1,24}$/i.test(account ?? '')) process.exit(2);
@@ -55,11 +55,20 @@ for (;;) {
         const msg = err?.info || err?.exception?.message || err?.message || String(err ?? '');
         if (msg) process.stderr.write(`[tiktok-chat] ${msg.slice(0, 240)}\n`);
     });
+    let lastViewers = null;
+    const emitViewers = rawCount => {
+        if (rawCount === null || rawCount === undefined) return;
+        if (rawCount === lastViewers) return;
+        lastViewers = rawCount;
+        emit({ type: 'viewers', platform: 'tiktok', count: rawCount });
+    };
     const updateRoom = id => {
         if (!events.enterRoom(id)) return;
         pending = pending.filter(message => message.kind !== 'gift');
         emit({ type: 'clearGifts' });
         emit({ type: 'giftStats', count: 0, diamonds: 0 });
+        lastViewers = null;
+        emit({ type: 'viewers', platform: 'tiktok', count: null });
         taps = { count: null };
         scheduleTaps();
     };
@@ -107,6 +116,12 @@ for (;;) {
             scheduleTaps();
         }
     });
+    if (WebcastEvent.ROOM_USER) {
+        client.on(WebcastEvent.ROOM_USER, event => {
+            updateRoom(client.roomId || event.common?.roomId);
+            emitViewers(extractViewerCount(event));
+        });
+    }
     let streamEnded = false;
     client.on(WebcastEvent.STREAM_END, () => { streamEnded = true; });
     const disconnected = new Promise(resolve => client.once(ControlEvent.DISCONNECTED, resolve));
@@ -123,7 +138,12 @@ for (;;) {
             scheduleTaps();
         }
         status('connected');
+        emitViewers(extractInitialViewerCount(connection?.roomInfo));
         const disconnectEvent = await disconnected;
+        if (lastViewers !== null) {
+            lastViewers = null;
+            emit({ type: 'viewers', platform: 'tiktok', count: null });
+        }
         if (streamEnded) {
             status('offline');
         } else {
@@ -131,6 +151,10 @@ for (;;) {
             status('disconnected', wsCode !== undefined ? { code: wsCode } : {});
         }
     } catch (error) {
+        if (lastViewers !== null) {
+            lastViewers = null;
+            emit({ type: 'viewers', platform: 'tiktok', count: null });
+        }
         const classified = classifyError(error);
         status(classified.state, classified.code !== undefined ? { code: classified.code } : {});
     } finally {
