@@ -262,7 +262,9 @@ private:
     QLineEdit *m_imagePath = nullptr, *m_mediaPath = nullptr, *m_browserUrl = nullptr;
     QLineEdit *m_alertGiftImage = nullptr, *m_alertGiftSound = nullptr, *m_alertFollowImage = nullptr, *m_alertFollowSound = nullptr;
     QCheckBox *m_mediaLoop = nullptr, *m_browserMuted = nullptr, *m_alertOnGift = nullptr, *m_alertOnFollow = nullptr;
-    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr, *m_alertDuration = nullptr, *m_alertGiftVolume = nullptr, *m_alertFollowVolume = nullptr;
+    QSpinBox *m_browserWidth = nullptr, *m_browserHeight = nullptr, *m_browserFps = nullptr, *m_alertDuration = nullptr,
+             *m_alertGiftVolume = nullptr, *m_alertFollowVolume = nullptr,
+             *m_alertGiftMonitorVolume = nullptr, *m_alertFollowMonitorVolume = nullptr;
     QPlainTextEdit *m_text = nullptr, *m_browserCss = nullptr;
     QFontComboBox *m_font = nullptr;
     QSpinBox *m_fontSize = nullptr, *m_outlineW = nullptr;

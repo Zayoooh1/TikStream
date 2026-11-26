@@ -157,7 +157,7 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         var copy = s.Clone();
         bool virtualAudioChanged =
-            copy.TtsVolume != previous.TtsVolume || copy.TtsMuted != previous.TtsMuted ||
+            copy.TtsVolume != previous.TtsVolume || copy.TtsMonitorVolume != previous.TtsMonitorVolume || copy.TtsMuted != previous.TtsMuted ||
             copy.TtsMonitorMode != previous.TtsMonitorMode || copy.TtsVertical != previous.TtsVertical || copy.TtsHorizontal != previous.TtsHorizontal ||
             copy.SoundboardVolume != previous.SoundboardVolume || copy.SoundboardMuted != previous.SoundboardMuted ||
             copy.SoundboardMonitorMode != previous.SoundboardMonitorMode || copy.SoundboardVertical != previous.SoundboardVertical || copy.SoundboardHorizontal != previous.SoundboardHorizontal;

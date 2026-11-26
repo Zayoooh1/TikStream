@@ -69,7 +69,7 @@ private:
     // tts
     QCheckBox *m_ttsEnabled = nullptr, *m_ttsOnGift = nullptr, *m_ttsOnFollow = nullptr, *m_ttsOnChat = nullptr;
     QComboBox *m_ttsProvider = nullptr, *m_ttsVoice = nullptr, *m_ttsMonitor = nullptr;
-    QSpinBox *m_ttsRate = nullptr, *m_ttsGiftMinDiamonds = nullptr, *m_ttsCooldown = nullptr, *m_ttsMaxChars = nullptr;
+    QSpinBox *m_ttsRate = nullptr, *m_ttsVolume = nullptr, *m_ttsMonitorVolume = nullptr, *m_ttsGiftMinDiamonds = nullptr, *m_ttsCooldown = nullptr, *m_ttsMaxChars = nullptr;
     QLineEdit *m_ttsChatPrefix = nullptr;
     // hotkeys
     QHash<QString, QKeySequenceEdit *> m_hotkeys;

@@ -2002,8 +2002,12 @@ void MainWindow::loadAlertBoxDock()
     m_alertDuration->setValue(anySrc["alertDurationSec"].toInt(5));
     const double gFallbackVol = g.value("alertVolume").toDouble(1.0);
     const double fFallbackVol = fl.value("alertVolume").toDouble(1.0);
+    const double gFallbackMon = g.value("alertMonitorVolume").toDouble(1.0);
+    const double fFallbackMon = fl.value("alertMonitorVolume").toDouble(1.0);
     m_alertGiftVolume->setValue(qRound(g.value("alertGiftVolume").toDouble(gFallbackVol) * 100.0));
+    m_alertGiftMonitorVolume->setValue(qRound(g.value("alertGiftMonitorVolume").toDouble(gFallbackMon) * 100.0));
     m_alertFollowVolume->setValue(qRound(fl.value("alertFollowVolume").toDouble(fFallbackVol) * 100.0));
+    m_alertFollowMonitorVolume->setValue(qRound(fl.value("alertFollowMonitorVolume").toDouble(fFallbackMon) * 100.0));
     m_alertOnGift->setChecked(g["alertOnGift"].toBool(true));
     m_alertOnFollow->setChecked(fl["alertOnFollow"].toBool(true));
     m_loading = prevLoading;
@@ -2051,8 +2055,15 @@ QWidget *MainWindow::pageAlertBox()
     m_alertGiftVolume->setRange(0, 200);
     m_alertGiftVolume->setSingleStep(5);
     m_alertGiftVolume->setSuffix(" %");
-    m_alertGiftVolume->setToolTip("100% = 0 dB (normal), below 100% = quieter, 100-200% = up to +18 dB boost");
-    f->addRow("Gift Sound Volume", m_alertGiftVolume);
+    m_alertGiftVolume->setToolTip("Głośność alertu Gift dla widzów na streamie (100% = 0 dB, do +18 dB).");
+    f->addRow("Gift — Widzowie (LIVE)", m_alertGiftVolume);
+
+    m_alertGiftMonitorVolume = new PaddedSpinBox;
+    m_alertGiftMonitorVolume->setRange(0, 200);
+    m_alertGiftMonitorVolume->setSingleStep(5);
+    m_alertGiftMonitorVolume->setSuffix(" %");
+    m_alertGiftMonitorVolume->setToolTip("Niezależna głośność odsłuchu alertu Gift w Twoich słuchawkach.");
+    f->addRow("Gift — Odsłuch (Ty)", m_alertGiftMonitorVolume);
 
     m_alertOnFollow = new QCheckBox("Enable Follow alerts");
     f->addRow("", m_alertOnFollow);
@@ -2062,8 +2073,15 @@ QWidget *MainWindow::pageAlertBox()
     m_alertFollowVolume->setRange(0, 200);
     m_alertFollowVolume->setSingleStep(5);
     m_alertFollowVolume->setSuffix(" %");
-    m_alertFollowVolume->setToolTip("100% = 0 dB (normal), below 100% = quieter, 100-200% = up to +18 dB boost");
-    f->addRow("Follow Sound Volume", m_alertFollowVolume);
+    m_alertFollowVolume->setToolTip("Głośność alertu Follow dla widzów na streamie (100% = 0 dB, do +18 dB).");
+    f->addRow("Follow — Widzowie (LIVE)", m_alertFollowVolume);
+
+    m_alertFollowMonitorVolume = new PaddedSpinBox;
+    m_alertFollowMonitorVolume->setRange(0, 200);
+    m_alertFollowMonitorVolume->setSingleStep(5);
+    m_alertFollowMonitorVolume->setSuffix(" %");
+    m_alertFollowMonitorVolume->setToolTip("Niezależna głośność odsłuchu alertu Follow w Twoich słuchawkach.");
+    f->addRow("Follow — Odsłuch (Ty)", m_alertFollowMonitorVolume);
 
     m_alertDuration = new PaddedSpinBox;
     m_alertDuration->setRange(2, 15);
@@ -2095,6 +2113,9 @@ QWidget *MainWindow::pageAlertBox()
             m_strips[sid + ":gift"].slider->setValue(v);
         }
     });
+    connect(m_alertGiftMonitorVolume, &QSpinBox::valueChanged, this, [this](int v) {
+        if (!m_loading) editAlertBoxSource("gift", [v](QJsonObject &s) { s["alertGiftMonitorVolume"] = v / 100.0; });
+    });
     connect(m_alertFollowVolume, &QSpinBox::valueChanged, this, [this](int v) {
         if (m_loading) return;
         const QString sid = alertBoxSource("follow")["id"].toString();
@@ -2103,6 +2124,9 @@ QWidget *MainWindow::pageAlertBox()
             QSignalBlocker b(m_strips[sid + ":follow"].slider);
             m_strips[sid + ":follow"].slider->setValue(v);
         }
+    });
+    connect(m_alertFollowMonitorVolume, &QSpinBox::valueChanged, this, [this](int v) {
+        if (!m_loading) editAlertBoxSource("follow", [v](QJsonObject &s) { s["alertFollowMonitorVolume"] = v / 100.0; });
     });
     connect(m_alertOnGift, &QCheckBox::toggled, this, [this](bool on) {
         if (!m_loading) editAlertBoxSource("gift", [on](QJsonObject &s) { s["alertOnGift"] = on; });

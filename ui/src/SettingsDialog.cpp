@@ -23,6 +23,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QScrollArea>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTemporaryDir>
@@ -966,6 +967,32 @@ QWidget *SettingsDialog::pageTts()
     m_ttsMonitor->setCurrentIndex(std::max(0, m_ttsMonitor->findData(m_s["ttsMonitorMode"].toString("MonitorAndOutput"))));
     f->addRow("Odsłuch (Monitoring)", m_ttsMonitor);
 
+    auto makeVolRow = [this](QSpinBox *&spin, double initVal, const QString &tip) {
+        auto *row = new QHBoxLayout;
+        auto *sl = new QSlider(Qt::Horizontal);
+        sl->setRange(0, 200);
+        sl->setObjectName("volume");
+        spin = track(new PaddedSpinBox);
+        spin->setRange(0, 200);
+        spin->setSingleStep(5);
+        spin->setSuffix(" %");
+        spin->setFixedWidth(92);
+        const int v0 = std::clamp(int(std::lround(initVal * 100.0)), 0, 200);
+        sl->setValue(v0);
+        spin->setValue(v0);
+        sl->setToolTip(tip);
+        spin->setToolTip(tip);
+        connect(sl, &QSlider::valueChanged, spin, &QSpinBox::setValue);
+        connect(spin, &QSpinBox::valueChanged, sl, &QSlider::setValue);
+        row->addWidget(sl, 1);
+        row->addWidget(spin);
+        return row;
+    };
+    f->addRow("Głośność dla widzów (LIVE)", makeVolRow(m_ttsVolume, m_s.value("ttsVolume").toDouble(1.0),
+        "Poziom głośności TTS słyszany przez widzów na streamie (0%–200%)."));
+    f->addRow("Głośność odsłuchu (Ty)", makeVolRow(m_ttsMonitorVolume, m_s.value("ttsMonitorVolume").toDouble(1.0),
+        "Niezależny poziom głośności TTS słyszany przez Ciebie w słuchawkach (0%–200%)."));
+
     auto *testRow = new QHBoxLayout;
     auto *testBtn = new QPushButton("Test TTS");
     testBtn->setCursor(Qt::PointingHandCursor);
@@ -985,6 +1012,9 @@ QWidget *SettingsDialog::pageTts()
             {"provider", prov},
             {"voice", voice},
             {"rate", rate},
+            {"volume", m_ttsVolume->value() / 100.0},
+            {"monitorVolume", m_ttsMonitorVolume->value() / 100.0},
+            {"monitorMode", m_ttsMonitor->currentData().toString()},
         });
     });
     connect(skipBtn, &QPushButton::clicked, this, [] { EngineHost::instance().call("ttsSkip"); });
@@ -1184,6 +1214,8 @@ QJsonObject SettingsDialog::result() const
     s["ttsProvider"] = m_ttsProvider->currentData().toString();
     s["ttsVoice"] = m_ttsVoice->currentData().toString();
     s["ttsRate"] = m_ttsRate->value() / 100.0;
+    s["ttsVolume"] = m_ttsVolume->value() / 100.0;
+    s["ttsMonitorVolume"] = m_ttsMonitorVolume->value() / 100.0;
     s["ttsMonitorMode"] = m_ttsMonitor->currentData().toString();
     s["ttsOnGift"] = m_ttsOnGift->isChecked();
     s["ttsGiftMinDiamonds"] = m_ttsGiftMinDiamonds->value();

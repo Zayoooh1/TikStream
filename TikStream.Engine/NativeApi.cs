@@ -467,6 +467,11 @@ public static unsafe class NativeApi
                 var provider = j["provider"]?.GetValue<string>();
                 var voice = j["voice"]?.GetValue<string>();
                 float? rate = j["rate"] != null ? j["rate"]!.GetValue<float>() : null;
+                float? streamVol = j["volume"] != null ? j["volume"]!.GetValue<float>() : null;
+                float? monVol = j["monitorVolume"] != null ? j["monitorVolume"]!.GetValue<float>() : null;
+                var monMode = j["monitorMode"]?.GetValue<string>();
+                if (streamVol.HasValue || monVol.HasValue || !string.IsNullOrEmpty(monMode))
+                    Engine().Audio.SetTtsPreviewGains(streamVol, monVol, monMode);
                 Engine().Tts.Enqueue(text, priority, provider, voice, rate);
                 return Ok();
             }

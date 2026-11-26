@@ -88,10 +88,15 @@ public sealed record SourceDef
     public string AlertFollowImagePath { get; set; } = "";
     public string AlertFollowSoundPath { get; set; } = "";
     public float AlertVolume { get; set; } = 1.0f;
+    public float AlertMonitorVolume { get; set; } = 1.0f;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public float? AlertGiftVolume { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public float? AlertFollowVolume { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float? AlertGiftMonitorVolume { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float? AlertFollowMonitorVolume { get; set; }
     public bool AlertGiftMuted { get; set; }
     public bool AlertFollowMuted { get; set; }
     public int AlertDurationSec { get; set; } = 5;
@@ -279,6 +284,7 @@ public sealed class AppSettings
     public string TtsVoice { get; set; } = "";
     public float TtsRate { get; set; } = 1.0f;
     public float TtsVolume { get; set; } = 1.0f;
+    public float TtsMonitorVolume { get; set; } = 1.0f;
     public bool TtsMuted { get; set; }
     public string TtsMonitorMode { get; set; } = "MonitorAndOutput";
     public bool TtsVertical { get; set; } = true;

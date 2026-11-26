@@ -147,7 +147,7 @@ public sealed class AudioEngine : IDisposable
                 bool onV = !d.Muted && (audibleV?.Contains(d.Id) != false);
                 const bool onH = false;
                 string mon = string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode;
-                void syncAlertChannel(string chId, string chName, float vol, bool muted)
+                void syncAlertChannel(string chId, string chName, float vol, float monVol, bool muted)
                 {
                     alertChannelIds.Add(chId);
                     if (!_inputs.TryGetValue(chId, out var inp))
@@ -156,7 +156,8 @@ public sealed class AudioEngine : IDisposable
                         _inputs[chId] = inp;
                     }
                     bool active = !muted && onV;
-                    inp.SetVolume(active ? VolumeToGain(vol) : 0);
+                    inp.SetVolume(active ? 1f : 0f);
+                    inp.SetSplitGains(active ? VolumeToGain(vol) : 0f, active ? VolumeToGain(monVol) : 0f);
                     inp.SetRouting(onV && !muted, onH);
                     inp.SetMonitorMode(mon);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
@@ -165,9 +166,9 @@ public sealed class AudioEngine : IDisposable
                 }
                 string role = (d.AlertRole ?? "").Trim().ToLowerInvariant();
                 if (role != "follow")
-                    syncAlertChannel(d.Id + ":gift", d.Name + " · Gift", d.AlertGiftVolume ?? d.AlertVolume, d.AlertGiftMuted);
+                    syncAlertChannel(d.Id + ":gift", d.Name + " · Gift", d.AlertGiftVolume ?? d.AlertVolume, d.AlertGiftMonitorVolume ?? d.AlertMonitorVolume, d.AlertGiftMuted);
                 if (role != "gift")
-                    syncAlertChannel(d.Id + ":follow", d.Name + " · Follow", d.AlertFollowVolume ?? d.AlertVolume, d.AlertFollowMuted);
+                    syncAlertChannel(d.Id + ":follow", d.Name + " · Follow", d.AlertFollowVolume ?? d.AlertVolume, d.AlertFollowMonitorVolume ?? d.AlertMonitorVolume, d.AlertFollowMuted);
             }
             foreach (var id in _inputs.Where(kv => kv.Value.IsAlert && !alertChannelIds.Contains(kv.Key)).Select(kv => kv.Key).ToList())
             {
@@ -175,7 +176,7 @@ public sealed class AudioEngine : IDisposable
                 _inputs.Remove(id);
             }
 
-            // Dedicated built-in TTS channel ("__tts__")
+            // Dedicated built-in TTS channel ("__tts__") with independent stream & monitor gain
             if (!_inputs.TryGetValue(TtsChannelId, out var ttsInp))
             {
                 ttsInp = Input.FromPush("TTS", _mixer);
@@ -183,7 +184,9 @@ public sealed class AudioEngine : IDisposable
             }
             bool ttsOnV = !settings.TtsMuted && settings.TtsVertical;
             bool ttsOnH = !settings.TtsMuted && settings.TtsHorizontal;
-            ttsInp.SetVolume((ttsOnV || ttsOnH) ? VolumeToGain(settings.TtsVolume) : 0f);
+            bool ttsActive = !settings.TtsMuted;
+            ttsInp.SetVolume(ttsActive ? 1f : 0f);
+            ttsInp.SetSplitGains((ttsOnV || ttsOnH) ? VolumeToGain(settings.TtsVolume) : 0f, ttsActive ? VolumeToGain(settings.TtsMonitorVolume) : 0f);
             ttsInp.SetRouting(ttsOnV, ttsOnH);
             ttsInp.SetMonitorMode(string.IsNullOrEmpty(settings.TtsMonitorMode) ? "MonitorAndOutput" : settings.TtsMonitorMode);
 
@@ -303,7 +306,7 @@ public sealed class AudioEngine : IDisposable
             bool splitRouting = false;
             foreach (var inp in _inputs.Values)
             {
-                if (!inp.RouteVertical || !inp.RouteHorizontal) { splitRouting = true; break; }
+                if (!inp.RouteVertical || !inp.RouteHorizontal || inp.HasSplitMonitorGain) { splitRouting = true; break; }
             }
             if (splitRouting)
             {
@@ -314,14 +317,22 @@ public sealed class AudioEngine : IDisposable
                 {
                     if (inp.IsMonitorOnly) continue;
                     if (!inp.RouteVertical && (horizBuffer == null || !inp.RouteHorizontal)) continue;
+                    float outG = inp.HasSplitMonitorGain ? inp.OutputGain : 1f;
+                    if (outG <= 0f) continue;
                     inp.CopyLastSamples(_monitorTmp, samples);
                     if (inp.RouteVertical)
                     {
-                        for (int k = 0; k < samples; k++) buffer[k] += _monitorTmp[k];
+                        if (Math.Abs(outG - 1f) < 0.0001f)
+                            for (int k = 0; k < samples; k++) buffer[k] += _monitorTmp[k];
+                        else
+                            for (int k = 0; k < samples; k++) buffer[k] += _monitorTmp[k] * outG;
                     }
                     if (horizBuffer != null && inp.RouteHorizontal)
                     {
-                        for (int k = 0; k < samples; k++) horizBuffer[k] += _monitorTmp[k];
+                        if (Math.Abs(outG - 1f) < 0.0001f)
+                            for (int k = 0; k < samples; k++) horizBuffer[k] += _monitorTmp[k];
+                        else
+                            for (int k = 0; k < samples; k++) horizBuffer[k] += _monitorTmp[k] * outG;
                     }
                 }
             }
@@ -341,6 +352,8 @@ public sealed class AudioEngine : IDisposable
             foreach (var inp in _inputs.Values)
             {
                 if (!inp.IsMonitored) continue;
+                float monG = inp.HasSplitMonitorGain ? inp.MonitorGain : 1f;
+                if (monG <= 0f) continue;
                 if (!hasMonitor)
                 {
                     if (_monitorMix.Length < samples) { _monitorMix = new float[samples]; _monitorTmp = new float[samples]; _monitorBytes = new byte[samples * 4]; }
@@ -348,7 +361,10 @@ public sealed class AudioEngine : IDisposable
                     hasMonitor = true;
                 }
                 inp.CopyLastSamples(_monitorTmp, samples);
-                for (int k = 0; k < samples; k++) _monitorMix[k] += _monitorTmp[k];
+                if (Math.Abs(monG - 1f) < 0.0001f)
+                    for (int k = 0; k < samples; k++) _monitorMix[k] += _monitorTmp[k];
+                else
+                    for (int k = 0; k < samples; k++) _monitorMix[k] += _monitorTmp[k] * monG;
             }
             if (hasMonitor) FeedMonitorLocked(samples);
             else if (_monitorOut != null) StopMonitorLocked();
@@ -488,6 +504,19 @@ public sealed class AudioEngine : IDisposable
         Input? target;
         lock (_lock) _inputs.TryGetValue(TtsChannelId, out target);
         target?.ClearBuffer();
+    }
+
+    public void SetTtsPreviewGains(float? streamVol, float? monitorVol, string? monitorMode)
+    {
+        lock (_lock)
+        {
+            if (!_inputs.TryGetValue(TtsChannelId, out var ttsInp)) return;
+            float outG = streamVol.HasValue ? VolumeToGain(streamVol.Value) : ttsInp.OutputGain;
+            float monG = monitorVol.HasValue ? VolumeToGain(monitorVol.Value) : ttsInp.MonitorGain;
+            ttsInp.SetVolume(1f);
+            ttsInp.SetSplitGains(outG, monG);
+            if (!string.IsNullOrEmpty(monitorMode)) ttsInp.SetMonitorMode(monitorMode);
+        }
     }
 
     /// <summary>
@@ -640,6 +669,9 @@ public sealed class AudioEngine : IDisposable
         public bool IsAlert { get; private init; }
         public bool IsMonitored { get; private set; }
         public bool IsMonitorOnly => _tap.SuppressOutput;
+        public bool HasSplitMonitorGain { get; private set; }
+        public float OutputGain { get; private set; } = 1f;
+        public float MonitorGain { get; private set; } = 1f;
         public bool RouteVertical { get; private set; } = true;
         public bool RouteHorizontal { get; private set; } = true;
         public bool DuckingEnabled { get; private set; }
@@ -658,6 +690,13 @@ public sealed class AudioEngine : IDisposable
         {
             IsMonitored = mode is "MonitorOnly" or "MonitorAndOutput";
             _tap.SuppressOutput = mode == "MonitorOnly";
+        }
+
+        public void SetSplitGains(float outputGain, float monitorGain)
+        {
+            HasSplitMonitorGain = true;
+            OutputGain = Math.Max(0f, outputGain);
+            MonitorGain = Math.Max(0f, monitorGain);
         }
 
         private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer, int maxBufferMs = 35, ISampleProvider? customSource = null)
