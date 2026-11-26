@@ -2391,7 +2391,7 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
 
     QDialog dlg(this);
     dlg.setWindowTitle("Audio Filters — " + src["name"].toString());
-    dlg.resize(680, 350);
+    dlg.resize(680, 410);
 
     auto *root = new QVBoxLayout(&dlg);
     root->setContentsMargins(14, 14, 14, 14);
@@ -2425,6 +2425,10 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     }
     addFilterItem("Compressor", "compressorEnabled", src["compressorEnabled"].toBool(false));
     addFilterItem("Limiter", "limiterEnabled", src["limiterEnabled"].toBool(false));
+    QListWidgetItem *duckListItem = nullptr;
+    if (!isInput) {
+        duckListItem = addFilterItem("Auto-Ducking (Sidechain)", "duckingEnabled", src["duckingEnabled"].toBool(false));
+    }
     {
         auto *syncIt = new QListWidgetItem("Sync Offset (Delay)", list);
         syncIt->setSizeHint(QSize(0, 34));
@@ -2564,6 +2568,70 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
         pages->addWidget(p);
     }
 
+    // Auto-Ducking (Sidechain from microphone)
+    QCheckBox *duckCheck = nullptr;
+    if (!isInput) {
+        auto *p = new QWidget;
+        auto *f = form(p);
+        duckCheck = new QCheckBox("Enable Auto-Ducking (Sidechain)");
+        duckCheck->setChecked(src["duckingEnabled"].toBool(false));
+        f->addRow("", duckCheck);
+
+        auto *trigCombo = new QComboBox;
+        trigCombo->addItem("Auto (first active microphone)", "");
+        for (const auto &v : sources()) {
+            const auto o = v.toObject();
+            if (o["type"].toString() == "AudioInput" && o["id"].toString() != sourceId)
+                trigCombo->addItem(o["name"].toString(), o["id"].toString());
+        }
+        const QString curTrig = src["duckingSourceId"].toString();
+        trigCombo->setCurrentIndex(std::max(0, trigCombo->findData(curTrig)));
+        f->addRow("Trigger Mic", trigCombo);
+
+        f->addRow("Ducking Amount", makeDbRow(-30, 0, qRound(src["duckingAmountDb"].toDouble(-12)), "duckingAmountDb", false));
+        f->addRow("Threshold", makeDbRow(-60, 0, qRound(src["duckingThresholdDb"].toDouble(-32)), "duckingThresholdDb", false));
+
+        auto *timingWrap = new QWidget;
+        auto *timingRow = new QHBoxLayout(timingWrap);
+        timingRow->setContentsMargins(0, 0, 0, 0);
+        timingRow->setSpacing(8);
+        auto makeMsSpin = [&](int minMs, int maxMs, int step, int defVal, const QString &key) {
+            auto *sp = new QSpinBox;
+            sp->setRange(minMs, maxMs);
+            sp->setSingleStep(step);
+            sp->setSuffix(" ms");
+            sp->setValue(std::clamp(src[key].toInt(defVal), minMs, maxMs));
+            sp->setKeyboardTracking(false);
+            connect(sp, &QSpinBox::valueChanged, &dlg, [updateSrc, key](int val) {
+                updateSrc([key, val](QJsonObject &s) { s[key] = val; });
+            });
+            connect(sp, &QSpinBox::editingFinished, sp, &QWidget::clearFocus);
+            return sp;
+        };
+        timingRow->addWidget(new QLabel("Attack"));
+        timingRow->addWidget(makeMsSpin(5, 500, 5, 30, "duckingAttackMs"));
+        timingRow->addWidget(new QLabel("Hold"));
+        timingRow->addWidget(makeMsSpin(0, 1000, 10, 150, "duckingHoldMs"));
+        timingRow->addWidget(new QLabel("Release"));
+        timingRow->addWidget(makeMsSpin(50, 2000, 25, 400, "duckingReleaseMs"));
+        timingRow->addStretch();
+        f->addRow("Envelope", timingWrap);
+        f->addRow("", hintLabel("Smoothly lowers this source when voice is detected on the trigger microphone (measured after Noise Suppression and Noise Gate)."));
+
+        connect(duckCheck, &QCheckBox::toggled, &dlg, [duckListItem, updateSrc](bool on) {
+            if (duckListItem) {
+                const Qt::CheckState want = on ? Qt::Checked : Qt::Unchecked;
+                if (duckListItem->checkState() != want) duckListItem->setCheckState(want);
+            }
+            updateSrc([on](QJsonObject &s) { s["duckingEnabled"] = on; });
+        });
+        connect(trigCombo, &QComboBox::currentIndexChanged, &dlg, [trigCombo, updateSrc] {
+            const QString id = trigCombo->currentData().toString();
+            updateSrc([id](QJsonObject &s) { s["duckingSourceId"] = id; });
+        });
+        pages->addWidget(p);
+    }
+
     // A/V Sync Offset (delay in ms — e.g. aligning microphone with a 1080p60 USB webcam)
     {
         auto *p = new QWidget;
@@ -2620,6 +2688,10 @@ void MainWindow::openAudioFiltersDialog(const QString &sourceId)
     connect(list, &QListWidget::itemChanged, &dlg, [=, &updateSrc](QListWidgetItem *it) {
         const int row = list->row(it);
         const bool on = it->checkState() == Qt::Checked;
+        if (it == duckListItem && duckCheck && duckCheck->isChecked() != on) {
+            QSignalBlocker b(duckCheck);
+            duckCheck->setChecked(on);
+        }
         if (row >= 0 && row < filterKeys.size() && !filterKeys[row].isEmpty()) {
             const QString k = filterKeys[row];
             updateSrc([k, on](QJsonObject &s) { s[k] = on; });

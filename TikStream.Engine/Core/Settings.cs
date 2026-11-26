@@ -111,6 +111,15 @@ public sealed record SourceDef
     public bool LimiterEnabled { get; set; }
     public float LimiterCeilingDb { get; set; } = -1f;
 
+    // auto-ducking (sidechain from microphone)
+    public bool DuckingEnabled { get; set; }
+    public string DuckingSourceId { get; set; } = ""; // "" = auto (first active microphone)
+    public float DuckingAmountDb { get; set; } = -12f;
+    public float DuckingThresholdDb { get; set; } = -32f;
+    public int DuckingAttackMs { get; set; } = 30;
+    public int DuckingReleaseMs { get; set; } = 400;
+    public int DuckingHoldMs { get; set; } = 150;
+
     public static string NewId() => Guid.NewGuid().ToString("N");
 
     [JsonIgnore] public bool IsVisual => Type is not (SourceType.AudioInput or SourceType.AudioOutput or SourceType.AudioApplication);
@@ -194,6 +203,8 @@ public sealed class AppSettings
     public string SecondStreamName { get; set; } = "Second Channel";
     public string SecondServerUrl { get; set; } = "";
     public string SecondStreamKeyProtected { get; set; } = "";
+    public string SecondStreamCanvas { get; set; } = "vertical"; // "vertical" | "horizontal"
+    public int SecondStreamVideoBitrateKbps { get; set; }        // 0 = use main VideoBitrateKbps
 
     // ---------- Output ----------
     public int VideoBitrateKbps { get; set; } = 6000;
@@ -421,5 +432,11 @@ public sealed class AppSettings
         Width = Math.Clamp(Width, 128, 4096) & ~1;
         Height = Math.Clamp(Height, 128, 4096) & ~1;
         Fps = Math.Clamp(Fps, 1, 120);
+        SecondStreamCanvas = string.Equals(SecondStreamCanvas, "horizontal", StringComparison.OrdinalIgnoreCase)
+            ? "horizontal"
+            : "vertical";
+        SecondStreamVideoBitrateKbps = SecondStreamVideoBitrateKbps > 0
+            ? Math.Clamp(SecondStreamVideoBitrateKbps, 1000, 20000)
+            : 0;
     }
 }

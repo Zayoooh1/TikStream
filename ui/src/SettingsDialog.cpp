@@ -267,7 +267,7 @@ QWidget *SettingsDialog::pageStream()
     m_key->setEnabled(!m_live);
 
     QFormLayout *f2;
-    v->addWidget(card(w, &f2, "Multistream (Second RTMP Output)", "Sends the same stream from one NVENC encoder to a second platform simultaneously (e.g., Kick, YouTube Shorts LIVE, Twitch)."));
+    v->addWidget(card(w, &f2, "Multistream (Second RTMP Output)", "Sends a parallel RTMP stream to a second platform (e.g., Kick, YouTube, Twitch) using either the main 9:16 canvas (shared NVENC) or the horizontal 16:9 Dual Canvas (dedicated zero-copy NVENC)."));
     m_secondEnabled = track(new QCheckBox("Enable second parallel output"));
     m_secondEnabled->setChecked(m_s["secondStreamEnabled"].toBool());
     m_secondName = track(new QLineEdit(m_s["secondStreamName"].toString("Second Channel")));
@@ -286,19 +286,35 @@ QWidget *SettingsDialog::pageStream()
     });
     keyRow2->addWidget(m_secondKey, 1);
     keyRow2->addWidget(show2);
+    m_secondCanvas = track(new QComboBox);
+    m_secondCanvas->addItem("Pionowy 9:16 (główny — współdzielony NVENC)", "vertical");
+    m_secondCanvas->addItem("Poziomy 16:9 (Dual Canvas — osobny NVENC)", "horizontal");
+    m_secondCanvas->setCurrentIndex(m_s["secondStreamCanvas"].toString("vertical").compare("horizontal", Qt::CaseInsensitive) == 0 ? 1 : 0);
+    m_secondBitrate = track(new PaddedSpinBox);
+    m_secondBitrate->setRange(0, 20000);
+    m_secondBitrate->setSingleStep(500);
+    m_secondBitrate->setSuffix(" kbps");
+    m_secondBitrate->setSpecialValueText("Same as main video bitrate");
+    m_secondBitrate->setValue(m_s["secondStreamVideoBitrateKbps"].toInt(0));
     f2->addRow(m_secondEnabled);
     f2->addRow("Output Name", m_secondName);
     f2->addRow("RTMP Server", m_secondServer);
     f2->addRow("Stream Key", keyRow2);
-    auto updateSecondEnabled = [this](bool on) {
-        const bool e = on && !m_live;
+    f2->addRow("Canvas", m_secondCanvas);
+    f2->addRow("Video Bitrate", m_secondBitrate);
+    auto updateSecondEnabled = [this] {
+        const bool e = m_secondEnabled->isChecked() && !m_live;
+        const bool isHoriz = m_secondCanvas->currentData().toString() == "horizontal";
         m_secondName->setEnabled(e);
         m_secondServer->setEnabled(e);
         m_secondKey->setEnabled(e);
+        m_secondCanvas->setEnabled(e);
+        m_secondBitrate->setEnabled(e && isHoriz);
     };
-    connect(m_secondEnabled, &QCheckBox::toggled, this, updateSecondEnabled);
+    connect(m_secondEnabled, &QCheckBox::toggled, this, [updateSecondEnabled](bool) { updateSecondEnabled(); });
+    connect(m_secondCanvas, &QComboBox::currentIndexChanged, this, [updateSecondEnabled](int) { updateSecondEnabled(); });
     m_secondEnabled->setEnabled(!m_live);
-    updateSecondEnabled(m_secondEnabled->isChecked());
+    updateSecondEnabled();
 
     // ---------- TikTok LIVE Native Account (QR + LIVE Studio Import) ----------
     QFormLayout *ttForm;
@@ -831,14 +847,17 @@ QWidget *SettingsDialog::pageVideo()
     fd->addRow("Recording Canvas", dualRow);
     auto updateDual = [this] {
         const bool dualOn = m_dualCanvas->isChecked();
+        const bool secondHoriz = m_secondEnabled && m_secondEnabled->isChecked()
+            && m_secondCanvas && m_secondCanvas->currentData().toString() == "horizontal";
         const bool anyDual = dualOn || (m_secondEnabled && m_secondEnabled->isChecked());
-        m_dualW->setEnabled(!m_live && dualOn);
-        m_dualH->setEnabled(!m_live && dualOn);
+        m_dualW->setEnabled(!m_live && (dualOn || secondHoriz));
+        m_dualH->setEnabled(!m_live && (dualOn || secondHoriz));
         m_dualRecordTarget->setEnabled(!m_live && dualOn);
         m_dualPreview->setEnabled(anyDual);
     };
     connect(m_dualCanvas, &QCheckBox::toggled, this, [updateDual](bool) { updateDual(); });
     if (m_secondEnabled) connect(m_secondEnabled, &QCheckBox::toggled, this, [updateDual](bool) { updateDual(); });
+    if (m_secondCanvas) connect(m_secondCanvas, &QComboBox::currentIndexChanged, this, [updateDual](int) { updateDual(); });
     m_dualCanvas->setEnabled(!m_live);
     updateDual();
 
@@ -959,6 +978,8 @@ QJsonObject SettingsDialog::result() const
     s["secondStreamName"] = m_secondName->text().trimmed();
     s["secondServerUrl"] = m_secondServer->text().trimmed();
     s["secondStreamKey"] = m_secondKey->text().trimmed();
+    s["secondStreamCanvas"] = m_secondCanvas->currentData().toString();
+    s["secondStreamVideoBitrateKbps"] = m_secondBitrate->value();
 
     s["videoBitrateKbps"] = m_bitrate->value();
     s["keyframeSec"] = m_keyframe->value();

@@ -92,7 +92,7 @@ public sealed class AudioEngine : IDisposable
                     try
                     {
                         var cap = CreateCapture(d.Type, target);
-                        if (cap != null) { _inputs[d.Id] = Input.FromDevice(d.Name, key, cap, _mixer, d.Type == SourceType.AudioInput ? 16 : 35); _failed.Remove(d.Id); }
+                        if (cap != null) { _inputs[d.Id] = Input.FromDevice(d.Name, key, cap, _mixer, d.Type == SourceType.AudioInput ? 16 : 35, isAudioInput: d.Type == SourceType.AudioInput); _failed.Remove(d.Id); }
                         else _failed[d.Id] = (key, DateTime.UtcNow.AddSeconds(5));
                     }
                     catch (Exception ex)
@@ -110,6 +110,7 @@ public sealed class AudioEngine : IDisposable
                     inp.SetMonitorMode(d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                    inp.SetDucking(d.DuckingEnabled, d.DuckingSourceId, d.DuckingAmountDb, d.DuckingThresholdDb, d.DuckingAttackMs, d.DuckingReleaseMs, d.DuckingHoldMs);
                 }
             }
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.Browser))
@@ -123,6 +124,7 @@ public sealed class AudioEngine : IDisposable
                     inp.SetMonitorMode(string.IsNullOrEmpty(d.MonitorMode) ? "MonitorAndOutput" : d.MonitorMode);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                    inp.SetDucking(d.DuckingEnabled, d.DuckingSourceId, d.DuckingAmountDb, d.DuckingThresholdDb, d.DuckingAttackMs, d.DuckingReleaseMs, d.DuckingHoldMs);
                 }
             }
             foreach (var d in settings.Sources.Where(x => x.Type == SourceType.Media))
@@ -132,6 +134,7 @@ public sealed class AudioEngine : IDisposable
                     bool onV = !d.Muted && (audibleV?.Contains(d.Id) == true);
                     bool onH = !d.Muted && (audibleH?.Contains(d.Id) == true);
                     inp.SetRouting(onV, onH);
+                    inp.SetDucking(d.DuckingEnabled, d.DuckingSourceId, d.DuckingAmountDb, d.DuckingThresholdDb, d.DuckingAttackMs, d.DuckingReleaseMs, d.DuckingHoldMs);
                 }
             }
             var alertChannelIds = new HashSet<string>();
@@ -155,6 +158,7 @@ public sealed class AudioEngine : IDisposable
                     inp.SetMonitorMode(mon);
                     inp.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                         d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio, d.LimiterEnabled, d.LimiterCeilingDb);
+                    inp.SetDucking(d.DuckingEnabled, d.DuckingSourceId, d.DuckingAmountDb, d.DuckingThresholdDb, d.DuckingAttackMs, d.DuckingReleaseMs, d.DuckingHoldMs);
                 }
                 string role = (d.AlertRole ?? "").Trim().ToLowerInvariant();
                 if (role != "follow")
@@ -216,6 +220,8 @@ public sealed class AudioEngine : IDisposable
                 i.SetFilters(d.SyncOffsetMs, d.NoiseSuppressEnabled, d.NoiseSuppressMethod, d.NoiseSuppressLevelDb,
                     d.NoiseGateEnabled, d.NoiseGateThresholdDb, d.CompressorEnabled, d.CompressorThresholdDb, d.CompressorRatio,
                     d.LimiterEnabled, d.LimiterCeilingDb);
+                i.SetDucking(d.DuckingEnabled, d.DuckingSourceId, d.DuckingAmountDb, d.DuckingThresholdDb,
+                    d.DuckingAttackMs, d.DuckingReleaseMs, d.DuckingHoldMs);
             }
     }
 
@@ -238,6 +244,32 @@ public sealed class AudioEngine : IDisposable
         lock (_lock)
         {
             foreach (var i in _inputs.Values) i.TrimLatency();
+            // Update sidechain trigger levels for any ducking-enabled inputs (zero heap allocations).
+            float autoMicLevel = -1f;
+            foreach (var inp in _inputs.Values)
+            {
+                if (!inp.DuckingEnabled) continue;
+                float trigLevel = 0f;
+                if (!string.IsNullOrEmpty(inp.DuckingSourceId))
+                {
+                    if (_inputs.TryGetValue(inp.DuckingSourceId, out var trig) && !ReferenceEquals(trig, inp))
+                        trigLevel = trig.SidechainLevel;
+                }
+                else
+                {
+                    if (autoMicLevel < 0f)
+                    {
+                        autoMicLevel = 0f;
+                        foreach (var m in _inputs.Values)
+                        {
+                            if (m.IsAudioInput && m.SidechainLevel > autoMicLevel)
+                                autoMicLevel = m.SidechainLevel;
+                        }
+                    }
+                    trigLevel = autoMicLevel;
+                }
+                inp.SetDuckingTriggerLevel(trigLevel);
+            }
             int read = _mixer.Read(buffer, 0, samples);
             if (read < samples) Array.Clear(buffer, read, samples - read);
 
@@ -462,6 +494,7 @@ public sealed class AudioEngine : IDisposable
         private readonly NoiseSuppressorProvider _noiseSuppressor;
         private readonly DynamicsProvider _dynamics;
         private readonly VolumeSampleProvider _volume;
+        private readonly DuckingProvider _ducking;
         private readonly LimiterProvider _limiter;
         private readonly DelayProvider _delay;
         private readonly TapSampleProvider _tap;
@@ -473,11 +506,15 @@ public sealed class AudioEngine : IDisposable
         public string Name { get; }
         public string Key { get; private init; } = "";
         public bool IsDevice => _capture != null;
+        public bool IsAudioInput { get; private init; }
         public bool IsAlert { get; private init; }
         public bool IsMonitored { get; private set; }
         public bool IsMonitorOnly => _tap.SuppressOutput;
         public bool RouteVertical { get; private set; } = true;
         public bool RouteHorizontal { get; private set; } = true;
+        public bool DuckingEnabled { get; private set; }
+        public string DuckingSourceId { get; private set; } = "";
+        public float SidechainLevel => _volume.Volume > 0f ? _dynamics.PostGatePeak : 0f;
         public volatile bool Stopped;
         public float Peak;
 
@@ -513,7 +550,8 @@ public sealed class AudioEngine : IDisposable
             _noiseSuppressor = new NoiseSuppressorProvider(sp, monoInput);
             _dynamics = new DynamicsProvider(_noiseSuppressor);
             _volume = new VolumeSampleProvider(_dynamics);
-            _limiter = new LimiterProvider(_volume);
+            _ducking = new DuckingProvider(_volume);
+            _limiter = new LimiterProvider(_ducking);
             _delay = new DelayProvider(_limiter);
             var meter = new MeteringSampleProvider(_delay, SampleRate / 60);
             meter.StreamVolume += (_, e) => Peak = e.MaxSampleValues.Length > 0 ? e.MaxSampleValues.Max() : 0;
@@ -542,8 +580,8 @@ public sealed class AudioEngine : IDisposable
             }
         }
 
-        public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer, int maxBufferMs = 35)
-            => new(name, cap, cap.WaveFormat, true, mixer, maxBufferMs) { Key = key };
+        public static Input FromDevice(string name, string key, IWaveIn cap, MixingSampleProvider mixer, int maxBufferMs = 35, bool isAudioInput = false)
+            => new(name, cap, cap.WaveFormat, true, mixer, maxBufferMs) { Key = key, IsAudioInput = isAudioInput };
 
         public static Input FromPush(string name, MixingSampleProvider mixer, bool isAlert = false)
             => new(name, null, MixFormat, false, mixer) { Key = "push", IsAlert = isAlert };
@@ -561,6 +599,15 @@ public sealed class AudioEngine : IDisposable
             _dynamics.Configure(gateOn, gateDb, compOn, compDb, compRatio);
             _limiter.Configure(limOn, limDb);
         }
+
+        public void SetDucking(bool enabled, string? sourceId, float amountDb, float thresholdDb, int attackMs, int releaseMs, int holdMs)
+        {
+            DuckingEnabled = enabled;
+            DuckingSourceId = sourceId ?? "";
+            _ducking.Configure(enabled, amountDb, thresholdDb, attackMs, releaseMs, holdMs);
+        }
+
+        public void SetDuckingTriggerLevel(float level) => _ducking.SetTriggerLevel(level);
 
         public void Push(float[] samples, int count)
         {
@@ -610,6 +657,7 @@ public sealed class AudioEngine : IDisposable
         private static readonly float CompAttackCoeff = MathF.Exp(-1f / (SampleRate * 0.010f));
         private static readonly float CompReleaseCoeff = MathF.Exp(-1f / (SampleRate * 0.100f));
 
+        public float PostGatePeak;
         public WaveFormat WaveFormat => source.WaveFormat;
 
         public void Configure(bool gateOn, float gateDb, bool compOn, float compDb, float compRatio)
@@ -627,7 +675,17 @@ public sealed class AudioEngine : IDisposable
         {
             int read = source.Read(buffer, offset, count);
             bool gateOn = _gateOn, compOn = _compOn;
-            if (!gateOn && !compOn) return read;
+            float peak = 0f;
+            if (!gateOn && !compOn)
+            {
+                for (int i = 0; i < read; i++)
+                {
+                    float a = MathF.Abs(buffer[offset + i]);
+                    if (a > peak) peak = a;
+                }
+                PostGatePeak = peak;
+                return read;
+            }
             for (int i = 0; i + 1 < read; i += 2)
             {
                 float l = buffer[offset + i], r = buffer[offset + i + 1];
@@ -642,6 +700,9 @@ public sealed class AudioEngine : IDisposable
                     else _gateGain = MathF.Max(0f, _gateGain - GateRelease);
                     gain *= _gateGain;
                 }
+
+                float postGate = level * gain;
+                if (postGate > peak) peak = postGate;
 
                 if (compOn)
                 {
@@ -661,6 +722,91 @@ public sealed class AudioEngine : IDisposable
                 buffer[offset + i] = l * gain;
                 buffer[offset + i + 1] = r * gain;
             }
+            PostGatePeak = peak;
+            return read;
+        }
+    }
+
+    /// <summary>Sidechain auto-ducking with per-sample exponential attack/hold/release envelope and 3 dB hysteresis, zero allocations.</summary>
+    private sealed class DuckingProvider(ISampleProvider source) : ISampleProvider
+    {
+        private volatile bool _enabled;
+        private float _duckGainLin = 0.25118864f; // -12 dB
+        private float _openThreshLin = 0.025118864f; // -32 dB
+        private float _closeThreshLin = 0.017782794f; // -35 dB
+        private float _attackCoeff = MathF.Exp(-1f / (SampleRate * 0.030f));
+        private float _releaseCoeff = MathF.Exp(-1f / (SampleRate * 0.400f));
+        private int _holdSamples = SampleRate * 150 / 1000;
+        private float _triggerLevel;
+        private float _gain = 1f;
+        private int _holdLeft;
+        private bool _active;
+
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public void Configure(bool enabled, float amountDb, float thresholdDb, int attackMs, int releaseMs, int holdMs)
+        {
+            _enabled = enabled;
+            _duckGainLin = MathF.Pow(10f, Math.Clamp(amountDb, -30f, 0f) / 20f);
+            float tDb = Math.Clamp(thresholdDb, -60f, 0f);
+            _openThreshLin = MathF.Pow(10f, tDb / 20f);
+            _closeThreshLin = MathF.Pow(10f, (tDb - 3f) / 20f);
+            float aSec = Math.Clamp(attackMs, 5, 500) * 0.001f;
+            float rSec = Math.Clamp(releaseMs, 50, 2000) * 0.001f;
+            _attackCoeff = MathF.Exp(-1f / (SampleRate * aSec));
+            _releaseCoeff = MathF.Exp(-1f / (SampleRate * rSec));
+            _holdSamples = SampleRate * Math.Clamp(holdMs, 0, 1000) / 1000;
+        }
+
+        public void SetTriggerLevel(float level) => _triggerLevel = level;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            bool enabled = _enabled;
+            if (!enabled && _gain >= 0.9999f)
+            {
+                _gain = 1f;
+                _active = false;
+                _holdLeft = 0;
+                return read;
+            }
+            float trig = enabled ? _triggerLevel : 0f;
+            float openLin = _openThreshLin;
+            float closeLin = _closeThreshLin;
+            float duckLin = _duckGainLin;
+            float atk = _attackCoeff;
+            float rel = _releaseCoeff;
+            int holdMax = _holdSamples;
+            float gain = _gain;
+            bool active = enabled && _active;
+            int holdLeft = enabled ? _holdLeft : 0;
+
+            for (int i = 0; i + 1 < read; i += 2)
+            {
+                if (enabled)
+                {
+                    if (trig >= openLin)
+                    {
+                        active = true;
+                        holdLeft = holdMax;
+                    }
+                    else if (active)
+                    {
+                        if (trig >= closeLin) holdLeft = holdMax;
+                        else if (holdLeft > 0) holdLeft--;
+                        else active = false;
+                    }
+                }
+                float target = active ? duckLin : 1f;
+                float coeff = target < gain ? atk : rel;
+                gain = coeff * gain + (1f - coeff) * target;
+                buffer[offset + i] *= gain;
+                buffer[offset + i + 1] *= gain;
+            }
+            _gain = gain;
+            _active = active;
+            _holdLeft = holdLeft;
             return read;
         }
     }

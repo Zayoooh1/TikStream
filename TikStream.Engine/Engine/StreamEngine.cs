@@ -87,11 +87,15 @@ public sealed unsafe class StreamEngine : IDisposable
 
     // outputs
     private VideoEncoder? _venc;
-    private VideoEncoder? _recVenc;    // dedicated encoder when RecordCodec != h264 or DualCanvas is enabled
-    private Compositor? _dualComp;     // secondary horizontal/custom canvas for simultaneous dual-canvas recording
+    private VideoEncoder? _horizVenc;  // dedicated horizontal h264_nvenc shared by horizontal SecondStream and h264 horizontal recording
+    private VideoEncoder? _recVenc;    // dedicated recording encoder when RecordCodec != h264 (hevc/av1)
+    private string? _recVideoOutputName;
+    private bool _recVencIsHoriz;
+    private Compositor? _dualComp;     // secondary horizontal/custom canvas for simultaneous dual-canvas streaming/recording
     private AudioEncoder? _aenc;
     private AudioEncoder? _aencHoriz;
-    private readonly HashSet<string> _horizOutputs = new();
+    private volatile HashSet<string> _horizOutputs = new();      // outputs receiving _aencHoriz audio (copy-on-write for lock-free audio thread reads)
+    private readonly HashSet<string> _horizVideoOutputs = new(); // outputs receiving _horizVenc video (render thread only)
     private readonly object _audioEncLock = new();
     private readonly List<(string SourceId, string Title, AudioEncoder Enc, float[] Buf)> _extraAudio = new();
     private volatile Dictionary<string, float[]>? _extraAudioMap;
@@ -102,6 +106,7 @@ public sealed unsafe class StreamEngine : IDisposable
     private long _encStartTicks;
     private long _lastPts = -1;
     private volatile bool _forceKey;
+    private volatile bool _forceHorizKey;
     private long _encodedFrames;
     private long _streamStart, _recordStart;
     private string _lastError = "";
@@ -331,7 +336,50 @@ public sealed unsafe class StreamEngine : IDisposable
     }
 
     public void RequestKeyframe() => _forceKey = true;
+    public void RequestHorizKeyframe() => _forceHorizKey = true;
     public void ClearError() => _lastError = "";
+
+    private void AddHorizAudioOutput(string name)
+    {
+        var next = new HashSet<string>(_horizOutputs) { name };
+        _horizOutputs = next;
+    }
+
+    private bool RemoveHorizAudioOutput(string name)
+    {
+        if (!_horizOutputs.Contains(name)) return false;
+        var next = new HashSet<string>(_horizOutputs);
+        next.Remove(name);
+        _horizOutputs = next;
+        return true;
+    }
+
+    private Compositor EnsureDualCompositor()
+    {
+        int rw = Math.Clamp(_scene.DualCanvasWidth & ~1, 128, 4096);
+        int rh = Math.Clamp(_scene.DualCanvasHeight & ~1, 128, 4096);
+        if (_dualComp == null || _dualComp.Width != rw || _dualComp.Height != rh)
+        {
+            _dualComp?.Dispose();
+            _dualComp = new Compositor(Gpu, rw, rh);
+            if (_dualPreviewHwnd != IntPtr.Zero) _dualPreviewDirty = true;
+        }
+        return _dualComp;
+    }
+
+    private VideoEncoder EnsureHorizVideoEncoder(int bitrateKbps)
+    {
+        if (_horizVenc != null) return _horizVenc;
+        var dc = EnsureDualCompositor();
+        var s = _scene;
+        int kbps = bitrateKbps > 0 ? Math.Clamp(bitrateKbps, 1000, 20000) : s.VideoBitrateKbps;
+        _horizVenc = new VideoEncoder(Gpu, dc.Width, dc.Height, new VideoEncoderOptions(
+            _fps, kbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, "h264"), globalHeader: true);
+        _forceHorizKey = true;
+        return _horizVenc;
+    }
+
+    private bool HasHorizVideoEncoder => _horizVenc != null || (_recVenc != null && _recVencIsHoriz);
 
     public BrowserCapture? GetBrowser(string sourceId) =>
         _sources.TryGetValue(sourceId, out var rt) && rt is BrowserRt br ? br.Capture : null;
@@ -351,17 +399,38 @@ public sealed unsafe class StreamEngine : IDisposable
             throw new InvalidOperationException("TikTok LIVE returned an invalid RTMP server URL.");
         EnsureEncoders();
         var opts = new OutputOptions(_scene.AutoReconnect, _scene.ReconnectDelaySec, _scene.ReconnectMaxRetries);
-        AddOutput(new StreamOutput("Stream", url, _venc!, _aenc!, _fps, opts, RequestKeyframe));
+
+        bool startSecond = false;
+        string url2 = "";
+        string name2 = "";
+        bool secondHoriz = false;
+        VideoEncoder? secondVenc = null;
         if (_scene.SecondStreamEnabled)
         {
-            var url2 = _scene.BuildSecondRtmpUrl();
+            url2 = _scene.BuildSecondRtmpUrl();
             if (url2.Length > 0 && !string.IsNullOrWhiteSpace(_scene.SecondStreamKey))
             {
-                var name2 = string.IsNullOrWhiteSpace(_scene.SecondStreamName) ? "Second Channel" : _scene.SecondStreamName.Trim();
-                if (name2 == "Stream" || name2 == "File") name2 = "Stream 2";
-                _horizOutputs.Add(name2);
-                AddOutput(new StreamOutput(name2, url2, _venc!, _aencHoriz ?? _aenc!, _fps, opts, RequestKeyframe));
+                name2 = string.IsNullOrWhiteSpace(_scene.SecondStreamName) ? "Second Channel" : _scene.SecondStreamName.Trim();
+                if (name2 is "Stream" or "File" or "FileHorizontal") name2 = "Stream 2";
+                secondHoriz = string.Equals(_scene.SecondStreamCanvas, "horizontal", StringComparison.OrdinalIgnoreCase);
+                secondVenc = secondHoriz
+                    ? EnsureHorizVideoEncoder(_scene.SecondStreamVideoBitrateKbps > 0 ? _scene.SecondStreamVideoBitrateKbps : _scene.VideoBitrateKbps)
+                    : _venc!;
+                startSecond = true;
             }
+        }
+
+        AddOutput(new StreamOutput("Stream", url, _venc!, _aenc!, _fps, opts, RequestKeyframe));
+        if (startSecond)
+        {
+            AddHorizAudioOutput(name2);
+            if (secondHoriz)
+            {
+                _horizVideoOutputs.Add(name2);
+                _forceHorizKey = true;
+            }
+            AddOutput(new StreamOutput(name2, url2, secondVenc!, _aencHoriz ?? _aenc!, _fps, opts,
+                secondHoriz ? RequestHorizKeyframe : RequestKeyframe));
         }
         _streamStart = _clock.ElapsedTicks;
         if (_scene.RecordToFile && !IsRecording) StartRecordInternal();
@@ -464,6 +533,8 @@ public sealed unsafe class StreamEngine : IDisposable
                 _recVenc?.Dispose();
                 _recVenc = new VideoEncoder(Gpu, _comp.Width, _comp.Height, new VideoEncoderOptions(
                     _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
+                _recVideoOutputName = "File";
+                _recVencIsHoriz = false;
                 vertVenc = _recVenc;
             }
             AddOutput(new StreamOutput("File", path, vertVenc, _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, extraForOutput));
@@ -471,20 +542,31 @@ public sealed unsafe class StreamEngine : IDisposable
 
         if (recordHorizontal)
         {
-            int rw = Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096);
-            int rh = Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096);
-            if (_dualComp == null || _dualComp.Width != rw || _dualComp.Height != rh)
-            {
-                _dualComp?.Dispose();
-                _dualComp = new Compositor(Gpu, rw, rh);
-            }
-            _recVenc?.Dispose();
-            _recVenc = new VideoEncoder(Gpu, rw, rh, new VideoEncoderOptions(
-                _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
+            var dc = EnsureDualCompositor();
             var hName = recordVertical ? "FileHorizontal" : "File";
             var hPath = recordVertical ? Path.Combine(folder, $"TikStream {DateTime.Now:yyyy-MM-dd HH-mm-ss} (Horizontal).{ext}") : path;
-            _horizOutputs.Add(hName);
-            AddOutput(new StreamOutput(hName, hPath, _recVenc, _aencHoriz ?? _aenc!, _fps, new OutputOptions(false, 0, 0), RequestKeyframe, recordVertical ? null : extraForOutput));
+            VideoEncoder hVenc;
+            Action hReqKey;
+            if (s.RecordCodec is "hevc" or "av1")
+            {
+                _recVenc?.Dispose();
+                _recVenc = new VideoEncoder(Gpu, dc.Width, dc.Height, new VideoEncoderOptions(
+                    _fps, s.VideoBitrateKbps, s.NvencPreset, s.NvencProfile, s.KeyframeSec, s.BFrames, s.SpatialAq, s.LookAhead, s.NvencZeroFpsImpact, s.RecordCodec), globalHeader: true);
+                _recVideoOutputName = hName;
+                _recVencIsHoriz = true;
+                hVenc = _recVenc;
+                hReqKey = RequestHorizKeyframe;
+            }
+            else
+            {
+                // Share the horizontal h264_nvenc session with horizontal SecondStream if active.
+                hVenc = EnsureHorizVideoEncoder(s.VideoBitrateKbps);
+                _horizVideoOutputs.Add(hName);
+                _forceHorizKey = true;
+                hReqKey = RequestHorizKeyframe;
+            }
+            AddHorizAudioOutput(hName);
+            AddOutput(new StreamOutput(hName, hPath, hVenc, _aencHoriz ?? _aenc!, _fps, new OutputOptions(false, 0, 0), hReqKey, recordVertical ? null : extraForOutput));
         }
         _recordStart = _clock.ElapsedTicks;
     }
@@ -559,32 +641,40 @@ public sealed unsafe class StreamEngine : IDisposable
         var o = _outputs.FirstOrDefault(x => x.Name == name);
         if (o == null) return;
         _outputs = _outputs.Where(x => x != o).ToArray();
-        bool wasHoriz = _horizOutputs.Remove(name);
-        if (name is "File" or "FileHorizontal")
+        bool wasHorizAudio = RemoveHorizAudioOutput(name);
+        bool wasHorizVideo = _horizVideoOutputs.Remove(name);
+        bool wasRecVideo = _recVenc != null && name == _recVideoOutputName;
+
+        if (wasRecVideo && _recVenc != null)
         {
-            bool stillRecording = _outputs.Any(x => x.Name is "File" or "FileHorizontal");
-            if (!stillRecording && _recVenc != null)
-            {
-                try { _recVenc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, o)); } catch { }
-                _recVenc.Dispose();
-                _recVenc = null;
-            }
-            if (!stillRecording && _dualPreviewHwnd == IntPtr.Zero)
-            {
-                _dualComp?.Dispose();
-                _dualComp = null;
-            }
-            if (name == "File")
-            {
-                lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
-            }
+            try { _recVenc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, o)); } catch { }
+            _recVenc.Dispose();
+            _recVenc = null;
+            _recVideoOutputName = null;
+            _recVencIsHoriz = false;
         }
-        if (_outputs.Length == 0 && _replay == null) TeardownEncoders(flushTo: o, flushToHoriz: wasHoriz);
+        if (wasHorizVideo && _horizVideoOutputs.Count == 0 && _horizVenc != null)
+        {
+            try { _horizVenc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, o)); } catch { }
+            _horizVenc.Dispose();
+            _horizVenc = null;
+        }
+        if (!HasHorizVideoEncoder && _dualPreviewHwnd == IntPtr.Zero && _dualComp != null)
+        {
+            _dualComp.Dispose();
+            _dualComp = null;
+        }
+        if (name == "File")
+        {
+            lock (_audioEncLock) DisposeExtraAudioLocked(flushTo: o);
+        }
+        if (_outputs.Length == 0 && _replay == null)
+            TeardownEncoders(flushTo: o, flushToHorizAudio: wasHorizAudio, flushMainVideo: !wasHorizVideo && !wasRecVideo);
         Task.Run(o.Dispose);
         Log.Info($"=== STOP: {name} ({reason})");
     }
 
-    private void TeardownEncoders(StreamOutput? flushTo = null, bool flushToHoriz = false)
+    private void TeardownEncoders(StreamOutput? flushTo = null, bool flushToHorizAudio = false, bool flushMainVideo = true)
     {
         AudioEncoder? aenc, aencHoriz;
         lock (_audioEncLock)
@@ -600,13 +690,24 @@ public sealed unsafe class StreamEngine : IDisposable
         {
             try
             {
-                _venc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, flushTo));
-                var flushAenc = (flushToHoriz && aencHoriz != null) ? aencHoriz : aenc;
+                if (flushMainVideo) _venc.Flush(p => DeliverTo(p, StreamOutput.VideoIndex, flushTo));
+                var flushAenc = (flushToHorizAudio && aencHoriz != null) ? aencHoriz : aenc;
                 flushAenc.Flush(p => DeliverTo(p, StreamOutput.AudioIndex, flushTo));
             }
             catch (Exception ex) { Log.Warn("Encoder flush: " + ex.Message); }
         }
         _venc?.Dispose(); _venc = null;
+        _horizVenc?.Dispose(); _horizVenc = null;
+        _recVenc?.Dispose(); _recVenc = null;
+        _recVideoOutputName = null;
+        _recVencIsHoriz = false;
+        _horizVideoOutputs.Clear();
+        _horizOutputs = new HashSet<string>();
+        if (_dualPreviewHwnd == IntPtr.Zero && _dualComp != null)
+        {
+            _dualComp.Dispose();
+            _dualComp = null;
+        }
         aenc?.Dispose();
         aencHoriz?.Dispose();
     }
@@ -615,9 +716,10 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         var pkt = (AVPacket*)p;
         pkt->stream_index = StreamOutput.AudioIndex;
+        var horizSet = _horizOutputs;
         foreach (var o in _outputs)
         {
-            bool isHoriz = _horizOutputs.Contains(o.Name);
+            bool isHoriz = horizSet.Contains(o.Name);
             if (isHoriz == horizontal) o.Enqueue(pkt);
         }
         if (!horizontal) _replay?.Enqueue(pkt, StreamOutput.AudioIndex);
@@ -628,18 +730,28 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         var pkt = (AVPacket*)p;
         pkt->stream_index = streamIndex;
-        bool hasFileHoriz = _outputs.Any(o => o.Name == "FileHorizontal");
-        bool dedicatedFileVideo = streamIndex == StreamOutput.VideoIndex && _recVenc != null;
+        bool isVideo = streamIndex == StreamOutput.VideoIndex;
         foreach (var o in _outputs)
         {
-            if (dedicatedFileVideo)
+            if (isVideo)
             {
-                if (hasFileHoriz && o.Name == "FileHorizontal") continue;
-                if (!hasFileHoriz && o.Name == "File") continue;
+                if (_horizVideoOutputs.Contains(o.Name)) continue;
+                if (_recVenc != null && o.Name == _recVideoOutputName) continue;
             }
             o.Enqueue(pkt);
         }
         _replay?.Enqueue(pkt, streamIndex);
+        ffmpeg.av_packet_free(&pkt);
+    }
+
+    private void DeliverHorizVideo(IntPtr p)
+    {
+        var pkt = (AVPacket*)p;
+        pkt->stream_index = StreamOutput.VideoIndex;
+        foreach (var o in _outputs)
+        {
+            if (_horizVideoOutputs.Contains(o.Name)) o.Enqueue(pkt);
+        }
         ffmpeg.av_packet_free(&pkt);
     }
 
@@ -1086,6 +1198,7 @@ public sealed unsafe class StreamEngine : IDisposable
         }
 
         // 3. encode — straight into NVENC texture
+        bool dualRendered = false;
         if (_venc != null)
         {
             // PTS is derived from the scheduled frame time so late wakeups never duplicate timestamps.
@@ -1099,19 +1212,30 @@ public sealed unsafe class StreamEngine : IDisposable
                 bool key = _forceKey;
                 _forceKey = false;
                 _venc.Encode(frame, pts, key, p => Deliver(p, StreamOutput.VideoIndex));
-                if (_recVenc != null)
+
+                bool horizKey = _forceHorizKey;
+                _forceHorizKey = false;
+                if (HasHorizVideoEncoder && _dualComp != null)
                 {
-                    var recComp = _dualComp ?? _comp;
-                    if (_dualComp != null)
-                    {
-                        BuildDualDrawList(_dualComp, scene);
-                        _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
-                    }
+                    BuildDualDrawList(_dualComp, scene);
+                    _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
+                    dualRendered = true;
+                }
+                if (_horizVenc != null && _dualComp != null)
+                {
+                    var hFrame = _horizVenc.AcquireFrame(out var hy, out var huv);
+                    _dualComp.ConvertToNv12(hy, huv);
+                    ctx.Flush();
+                    _horizVenc.Encode(hFrame, pts, horizKey || key, DeliverHorizVideo);
+                }
+                if (_recVenc != null && _recVideoOutputName != null)
+                {
+                    var recComp = _recVencIsHoriz ? _dualComp! : _comp;
                     var rFrame = _recVenc.AcquireFrame(out var ry, out var ruv);
                     recComp.ConvertToNv12(ry, ruv);
                     ctx.Flush();
-                    string recOutName = _outputs.Any(o => o.Name == "FileHorizontal") ? "FileHorizontal" : "File";
-                    _recVenc.Encode(rFrame, pts, key, p => DeliverToFile(p, StreamOutput.VideoIndex, recOutName));
+                    string recOutName = _recVideoOutputName;
+                    _recVenc.Encode(rFrame, pts, (_recVencIsHoriz ? horizKey : false) || key, p => DeliverToFile(p, StreamOutput.VideoIndex, recOutName));
                 }
                 _lastPts = pts;
                 _encodedFrames++;
@@ -1133,11 +1257,12 @@ public sealed unsafe class StreamEngine : IDisposable
         {
             int dw = Math.Clamp(s.DualCanvasWidth & ~1, 128, 4096);
             int dh = Math.Clamp(s.DualCanvasHeight & ~1, 128, 4096);
-            if (_dualComp == null || (_recVenc == null && (_dualComp.Width != dw || _dualComp.Height != dh)))
+            if (_dualComp == null || (!HasHorizVideoEncoder && (_dualComp.Width != dw || _dualComp.Height != dh)))
             {
                 _dualComp?.Dispose();
                 _dualComp = new Compositor(Gpu, dw, dh);
                 _dualPreviewDirty = true;
+                dualRendered = false;
             }
             if (_dualPreviewDirty)
             {
@@ -1145,7 +1270,7 @@ public sealed unsafe class StreamEngine : IDisposable
                 try { _dualComp.SetPreviewTarget(_dualPreviewHwnd, _dualPreviewW, _dualPreviewH); }
                 catch (Exception ex) { Log.Warn("Dual preview: " + ex.Message); }
             }
-            if (_recVenc == null)
+            if (!dualRendered)
             {
                 BuildDualDrawList(_dualComp, scene);
                 _dualComp.RenderCanvas(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_dualDrawList));
@@ -1156,7 +1281,7 @@ public sealed unsafe class StreamEngine : IDisposable
         {
             _dualPreviewDirty = false;
             try { _dualComp?.SetPreviewTarget(IntPtr.Zero, 0, 0); } catch { }
-            if (_recVenc == null && _dualComp != null)
+            if (!HasHorizVideoEncoder && _dualComp != null)
             {
                 _dualComp.Dispose();
                 _dualComp = null;

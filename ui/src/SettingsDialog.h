@@ -51,6 +51,8 @@ private:
     QLineEdit *m_signerKey = nullptr, *m_signerUrl = nullptr;
     QCheckBox *m_secondEnabled = nullptr;
     QLineEdit *m_secondName = nullptr, *m_secondServer = nullptr, *m_secondKey = nullptr;
+    QComboBox *m_secondCanvas = nullptr;
+    QSpinBox *m_secondBitrate = nullptr;
     // output
     QSpinBox *m_bitrate = nullptr, *m_keyframe = nullptr, *m_bframes = nullptr, *m_replaySec = nullptr;
     QComboBox *m_preset = nullptr, *m_profile = nullptr, *m_audioBitrate = nullptr, *m_recFormat = nullptr, *m_recCodec = nullptr;
