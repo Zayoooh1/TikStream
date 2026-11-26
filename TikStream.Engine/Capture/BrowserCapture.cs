@@ -174,6 +174,7 @@ public sealed unsafe class BrowserCapture : IDisposable
     private string _css;
     private bool _muted;
     private int _reloadNonce;
+    private bool _hidden;
     private volatile bool _disposed;
     private volatile string _status = "Starting browser…";
 
@@ -267,6 +268,7 @@ public sealed unsafe class BrowserCapture : IDisposable
                     {
                         host.WindowlessFrameRate = _fps;
                         host.SetAudioMuted(_muted);
+                        if (_hidden) host.WasHidden(true);
                     }
                 }
                 catch { }
@@ -381,17 +383,45 @@ public sealed unsafe class BrowserCapture : IDisposable
         catch { }
     }
 
-    private void OnRawPaint(IntPtr buffer, int width, int height)
+    public void SetHidden(bool hidden)
+    {
+        ChromiumWebBrowser? b;
+        lock (_stateLock)
+        {
+            if (_hidden == hidden) return;
+            _hidden = hidden;
+            b = _browser;
+        }
+        if (b == null || !b.IsBrowserInitialized) return;
+        try { b.GetBrowserHost()?.WasHidden(hidden); }
+        catch { }
+    }
+
+    private void OnRawPaint(Rect dirtyRect, IntPtr buffer, int width, int height)
     {
         if (_disposed || buffer == IntPtr.Zero || width <= 0 || height <= 0) return;
         int bytes = checked(width * height * 4);
         lock (_frameLock)
         {
-            if (_frameBuf == null || _frameBuf.Length < bytes) _frameBuf = new byte[bytes];
-            fixed (byte* dst = _frameBuf)
-                Buffer.MemoryCopy((void*)buffer, dst, bytes, bytes);
-            _frameW = width;
-            _frameH = height;
+            bool resized = _frameBuf == null || _frameBuf.Length < bytes || _frameW != width || _frameH != height;
+            if (resized)
+            {
+                if (_frameBuf == null || _frameBuf.Length < bytes) _frameBuf = new byte[bytes];
+                fixed (byte* dst = _frameBuf)
+                    Buffer.MemoryCopy((void*)buffer, dst, bytes, bytes);
+                _frameW = width;
+                _frameH = height;
+            }
+            else
+            {
+                int y0 = Math.Clamp(dirtyRect.Y, 0, height - 1);
+                int y1 = Math.Clamp(dirtyRect.Y + dirtyRect.Height, y0 + 1, height);
+                long rowBytes = (long)width * 4;
+                long off = y0 * rowBytes;
+                long copyBytes = (y1 - y0) * rowBytes;
+                fixed (byte* dst = _frameBuf)
+                    Buffer.MemoryCopy((byte*)buffer + off, dst + off, bytes - off, copyBytes);
+            }
             Interlocked.Increment(ref _frameVersion);
         }
     }
@@ -507,16 +537,16 @@ public sealed unsafe class BrowserCapture : IDisposable
 
     private sealed class RawBgraRenderHandler : DefaultRenderHandler
     {
-        private readonly Action<IntPtr, int, int> _onPaint;
+        private readonly Action<Rect, IntPtr, int, int> _onPaint;
 
-        public RawBgraRenderHandler(ChromiumWebBrowser browser, Action<IntPtr, int, int> onPaint) : base(browser)
+        public RawBgraRenderHandler(ChromiumWebBrowser browser, Action<Rect, IntPtr, int, int> onPaint) : base(browser)
         {
             _onPaint = onPaint;
         }
 
         public override void OnPaint(PaintElementType type, Rect dirtyRect, IntPtr buffer, int width, int height)
         {
-            if (type == PaintElementType.View) _onPaint(buffer, width, height);
+            if (type == PaintElementType.View) _onPaint(dirtyRect, buffer, width, height);
         }
     }
 

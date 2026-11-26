@@ -792,6 +792,7 @@ public sealed unsafe class StreamEngine : IDisposable
     {
         uint idx = 0;
         var mm = Native.AvSetMmThreadCharacteristicsW("Pro Audio", ref idx);
+        using var waiter = new PreciseWaiter();
         try
         {
             const int step = 480;     // 10.0 ms @ 48 kHz (exact RNNoise/Speex frame size)
@@ -821,10 +822,20 @@ public sealed unsafe class StreamEngine : IDisposable
                 }
                 while (produced + step <= target && _run)
                 {
-                    var extraMap = _extraAudioMap;
-                    Audio.Read(stepBuf, step, extraMap, stepBufHoriz);
+                    bool encoding = _encRun;
+                    var extraMap = encoding ? _extraAudioMap : null;
+                    Audio.Read(stepBuf, step, extraMap, encoding && _horizOutputs.Count > 0 ? stepBufHoriz : null);
+                    produced += step;
+
+                    if (!encoding)
+                    {
+                        encFill = 0;
+                        continue;
+                    }
+
                     Array.Copy(stepBuf, 0, encRing, encFill * ch, step * ch);
-                    Array.Copy(stepBufHoriz, 0, encRingHoriz, encFill * ch, step * ch);
+                    if (_horizOutputs.Count > 0)
+                        Array.Copy(stepBufHoriz, 0, encRingHoriz, encFill * ch, step * ch);
 
                     lock (_audioEncLock)
                     {
@@ -845,7 +856,6 @@ public sealed unsafe class StreamEngine : IDisposable
                         }
 
                         encFill += step;
-                        produced += step;
 
                         while (encFill >= encFrame)
                         {
@@ -875,7 +885,8 @@ public sealed unsafe class StreamEngine : IDisposable
                             if (rem > 0)
                             {
                                 Array.Copy(encRing, encFrame * ch, encRing, 0, rem * ch);
-                                Array.Copy(encRingHoriz, encFrame * ch, encRingHoriz, 0, rem * ch);
+                                if (_horizOutputs.Count > 0)
+                                    Array.Copy(encRingHoriz, encFrame * ch, encRingHoriz, 0, rem * ch);
                                 if (extraMap != null && extraRings.Count == _extraAudio.Count)
                                 {
                                     for (int i = 0; i < extraRings.Count; i++)
@@ -886,7 +897,9 @@ public sealed unsafe class StreamEngine : IDisposable
                         }
                     }
                 }
-                Thread.Sleep(1);
+                long nextSample = produced + step;
+                long nextTick = (long)((double)nextSample * freq / AudioEngine.SampleRate);
+                waiter.WaitUntil(_clock, nextTick, spinFinish: false);
             }
         }
         catch (Exception ex) { Log.Error("Audio thread", ex); }
@@ -912,8 +925,18 @@ public sealed unsafe class StreamEngine : IDisposable
 
         while (_run)
         {
-            long interval = freq / Math.Max(1, _fps);
-            waiter.WaitUntil(_clock, next);
+            bool encoding = _venc != null;
+            bool minimized = false;
+            if (!encoding && _previewHwnd != IntPtr.Zero)
+            {
+                var root = Native.GetAncestor(_previewHwnd, Native.GA_ROOT);
+                if (root != IntPtr.Zero && Native.IsIconic(root)) minimized = true;
+            }
+            int targetFps = encoding
+                ? Math.Max(1, _fps)
+                : ((!_previewEnabled || _previewHwnd == IntPtr.Zero || minimized) ? 5 : Math.Max(1, _fps));
+            long interval = freq / targetFps;
+            waiter.WaitUntil(_clock, next, spinFinish: encoding);
             long now = _clock.ElapsedTicks;
             long frameTime = next;
             if (now - next > interval * 2)
@@ -1013,6 +1036,7 @@ public sealed unsafe class StreamEngine : IDisposable
 
     private readonly List<DrawCmd> _drawList = new(32);
     private readonly List<DrawCmd> _dualDrawList = new(32);
+    private readonly HashSet<string> _activeVisibleIds = new();
 
     private void BuildDualDrawList(Compositor dualComp, Scene? scene)
     {
@@ -1115,8 +1139,24 @@ public sealed unsafe class StreamEngine : IDisposable
         var s = _scene;
         float W = _comp.Width, H = _comp.Height;
 
-        // 1. update all sources (including inactive scenes so scene switching is instant)
-        foreach (var rt in _sources.Values) rt.Update(Gpu, _comp);
+        // 1. update sources (pause hidden Media/Browser sources to save CPU when not visible in active scene)
+        _activeVisibleIds.Clear();
+        var activeSc = s.ActiveScene;
+        if (activeSc != null)
+        {
+            foreach (var it in activeSc.Items)
+            {
+                if (it.Visible || (_dualComp != null && it.EffectiveDualVisible))
+                    _activeVisibleIds.Add(it.SourceId);
+            }
+        }
+        foreach (var (sid, rt) in _sources)
+        {
+            bool vis = _activeVisibleIds.Contains(sid);
+            rt.SetSceneVisible(vis);
+            if (vis || rt is not (MediaRt or BrowserRt))
+                rt.Update(Gpu, _comp);
+        }
         _monitors.EndFrame();
 
         // 2. active scene items, bottom to top

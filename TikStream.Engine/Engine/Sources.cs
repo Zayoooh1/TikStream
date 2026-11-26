@@ -29,6 +29,7 @@ internal abstract class RtSource : IDisposable
     public bool Ready => Srv != null && Width > 0 && Height > 0;
 
     public virtual void Update(GpuDevice gpu, Compositor comp) { }
+    public virtual void SetSceneVisible(bool visible) { }
     public abstract void Dispose();
 
     public static string KeyOf(SourceDef d) => d.Type switch
@@ -119,7 +120,7 @@ internal sealed class CaptureRt : RtSource
     /// </summary>
     private void TryOpen()
     {
-        _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2;
+        _nextResolve = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 3;
         if (_resolving != null) return;
         var def = Def;
         var factory = _gpu.Factory;
@@ -268,6 +269,8 @@ internal sealed class MediaRt : RtSource
 
     public override string Status => _player?.Status ?? "No file selected";
 
+    public override void SetSceneVisible(bool visible) => _player?.SetPaused(!visible);
+
     public override void Update(GpuDevice gpu, Compositor comp)
     {
         if (_player == null) return;
@@ -390,6 +393,7 @@ internal sealed class BrowserRt : RtSource
     private readonly BrowserCapture _cap;
     private ID3D11Texture2D? _tex;
     private ID3D11ShaderResourceView? _srv;
+    private SourceDef? _lastAppliedDef;
 
     public BrowserCapture Capture => _cap;
     public override bool Croppable => false;
@@ -399,6 +403,7 @@ internal sealed class BrowserRt : RtSource
     public BrowserRt(SourceDef def, AudioEngine audio)
     {
         Def = def;
+        _lastAppliedDef = def;
         _audio = audio;
         var pushAudio = audio.RegisterPushInput(def.Id, def.Name);
         audio.SetVolume(def.Id, !def.Muted && !def.BrowserMuted ? def.Volume : 0);
@@ -407,10 +412,16 @@ internal sealed class BrowserRt : RtSource
         _cap = new BrowserCapture(def.BrowserUrl, def.BrowserWidth, def.BrowserHeight, def.BrowserFps, def.BrowserCss, def.BrowserMuted, def.BrowserReloadNonce, pushAudio);
     }
 
+    public override void SetSceneVisible(bool visible) => _cap.SetHidden(!visible);
+
     public override void Update(GpuDevice gpu, Compositor comp)
     {
         var d = Def;
-        _cap.Apply(d.BrowserUrl, d.BrowserWidth, d.BrowserHeight, d.BrowserFps, d.BrowserCss, d.BrowserMuted, d.BrowserReloadNonce);
+        if (!ReferenceEquals(d, _lastAppliedDef))
+        {
+            _lastAppliedDef = d;
+            _cap.Apply(d.BrowserUrl, d.BrowserWidth, d.BrowserHeight, d.BrowserFps, d.BrowserCss, d.BrowserMuted, d.BrowserReloadNonce);
+        }
         int w = Width, h = Height;
         if (_cap.TryUpload(gpu, ref _tex, ref _srv, ref w, ref h))
         {

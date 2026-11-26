@@ -19,6 +19,9 @@ public sealed unsafe class MediaPlayer : IDisposable
     private readonly Action<float[], int>? _audioSink;
     private readonly Thread _thread;
     private volatile bool _run = true;
+    private volatile bool _paused;
+
+    public void SetPaused(bool paused) => _paused = paused;
 
     private readonly object _lock = new();
     private byte[] _front = [], _back = [], _upload = [];
@@ -133,6 +136,13 @@ public sealed unsafe class MediaPlayer : IDisposable
 
             while (_run)
             {
+                if (_paused)
+                {
+                    bool wasPaused = false;
+                    while (_run && _paused) { wasPaused = true; Thread.Sleep(50); }
+                    if (!_run) break;
+                    if (wasPaused) { clock.Restart(); startPts = double.NaN; }
+                }
                 int r = ffmpeg.av_read_frame(fmt, pkt);
                 if (r < 0) break; // end of file
                 AVCodecContext* dec = pkt->stream_index == vi ? vdec : pkt->stream_index == ai ? adec : null;

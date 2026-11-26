@@ -49,8 +49,8 @@ MeterWidget::MeterWidget(QWidget *parent, Qt::Orientation orientation) : QWidget
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     }
     m_clock.start();
-    m_animation.setInterval(16);
-    m_animation.setTimerType(Qt::PreciseTimer);
+    m_animation.setInterval(33);
+    m_animation.setTimerType(Qt::CoarseTimer);
     connect(&m_animation, &QTimer::timeout, this, &MeterWidget::animateLevel);
 }
 

@@ -599,8 +599,8 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     connect(m_levelsTimer, &QTimer::timeout, this, &MainWindow::pollLevels);
     auto *devicesTimer = new QTimer(this);
     connect(devicesTimer, &QTimer::timeout, this, [this] { refreshAudioDevices(); });
-    devicesTimer->start(3000);
-    m_levelsTimer->start(40);
+    devicesTimer->start(5000);
+    m_levelsTimer->start(50);
 
     m_nowPlayingTimer = new QTimer(this);
     connect(m_nowPlayingTimer, &QTimer::timeout, this, &MainWindow::pollNowPlaying);
@@ -5760,12 +5760,14 @@ void MainWindow::pollStats()
 
 void MainWindow::pollLevels()
 {
+    if (isMinimized() || !isVisible()) return;
     const auto l = EngineHost::instance().callObj("levels");
     for (auto it = m_strips.begin(); it != m_strips.end(); ++it) {
         const double v = it.value().mute->isChecked() ? 0 : l[it.key()].toDouble();
         it.value().meter->setLevel(float(v));
         const double db = v > 0.000001 ? 20 * std::log10(v) : -1000;
-        it.value().db->setText(db < -60 ? "-inf dB" : QString("%1 dB").arg(db, 0, 'f', 1));
+        const QString txt = db < -60 ? QStringLiteral("-inf dB") : QString("%1 dB").arg(db, 0, 'f', 1);
+        if (it.value().db->text() != txt) it.value().db->setText(txt);
     }
 }
 

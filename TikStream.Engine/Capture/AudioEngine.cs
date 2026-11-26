@@ -315,7 +315,7 @@ public sealed class AudioEngine : IDisposable
                 if (horizBuffer != null) Array.Clear(horizBuffer, 0, samples);
                 foreach (var inp in _inputs.Values)
                 {
-                    if (inp.IsMonitorOnly) continue;
+                    if (inp.IsMonitorOnly || inp.Peak <= 0f) continue;
                     if (!inp.RouteVertical && (horizBuffer == null || !inp.RouteHorizontal)) continue;
                     float outG = inp.HasSplitMonitorGain ? inp.OutputGain : 1f;
                     if (outG <= 0f) continue;
@@ -363,7 +363,7 @@ public sealed class AudioEngine : IDisposable
             }
             foreach (var inp in _inputs.Values)
             {
-                if (!inp.IsMonitored) continue;
+                if (!inp.IsMonitored || inp.Peak <= 0f) continue;
                 float monG = inp.HasSplitMonitorGain ? inp.MonitorGain : 1f;
                 if (monG <= 0f) continue;
                 if (!hasMonitor)

@@ -64,6 +64,8 @@ internal static partial class Native
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    public const uint GA_ROOT = 2;
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder sb, int max);
     [DllImport("user32.dll")] public static extern int GetWindowTextLengthW(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
@@ -102,7 +104,7 @@ internal sealed class PreciseWaiter : IDisposable
 {
     private readonly IntPtr _timer = Native.CreateHighResTimer();
 
-    public void WaitUntil(System.Diagnostics.Stopwatch clock, long targetTicks)
+    public void WaitUntil(System.Diagnostics.Stopwatch clock, long targetTicks, bool spinFinish = true)
     {
         long freq = System.Diagnostics.Stopwatch.Frequency;
         while (true)
@@ -110,14 +112,28 @@ internal sealed class PreciseWaiter : IDisposable
             long remaining = targetTicks - clock.ElapsedTicks;
             if (remaining <= 0) return;
             double ms = remaining * 1000.0 / freq;
-            if (ms > 0.5 && _timer != IntPtr.Zero)
+            if (!spinFinish)
             {
-                long due = -(long)((ms - 0.2) * 10_000);
+                if (_timer != IntPtr.Zero)
+                {
+                    long due = -Math.Max(1000L, (long)(ms * 10_000));
+                    if (Native.SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
+                    {
+                        Native.WaitForSingleObject(_timer, 0xFFFFFFFF);
+                        return;
+                    }
+                }
+                Thread.Sleep(Math.Max(1, (int)ms));
+                return;
+            }
+            if (ms > 0.3 && _timer != IntPtr.Zero)
+            {
+                long due = -(long)((ms - 0.1) * 10_000);
                 if (Native.SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
                     Native.WaitForSingleObject(_timer, 0xFFFFFFFF);
                 else Thread.Sleep(1);
             }
-            else if (ms > 0.2) Thread.Yield();
+            else if (ms > 0.1) Thread.Yield();
             else Thread.SpinWait(50);
         }
     }

@@ -24,6 +24,37 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
     public void StartRecording() => _worker ??= Task.Run(() => Run(_shutdown.Token));
     public void StopRecording() => _shutdown.Cancel();
 
+    private static readonly object SnapshotLock = new();
+    private static long _snapshotTick;
+    private static (int Pid, string Name)[] _snapshot = Array.Empty<(int, string)>();
+
+    private static List<int> FindPidsByName(string exeName)
+    {
+        long now = Stopwatch.GetTimestamp();
+        (int Pid, string Name)[] snap;
+        lock (SnapshotLock)
+        {
+            if (now - _snapshotTick > Stopwatch.Frequency * 25 / 10)
+            {
+                var list = new List<(int, string)>(128);
+                foreach (var p in Process.GetProcesses())
+                {
+                    try { list.Add((p.Id, p.ProcessName)); }
+                    catch { }
+                    finally { p.Dispose(); }
+                }
+                _snapshot = list.ToArray();
+                _snapshotTick = now;
+            }
+            snap = _snapshot;
+        }
+        var pids = new List<int>(4);
+        foreach (var (pid, name) in snap)
+            if (string.Equals(name, exeName, StringComparison.OrdinalIgnoreCase))
+                pids.Add(pid);
+        return pids;
+    }
+
     private void Run(CancellationToken stop)
     {
         string? lastFailure = null;
@@ -31,24 +62,32 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
         {
             while (!stop.IsCancellationRequested)
             {
-                var apps = Process.GetProcessesByName(executable);
-                try
+                var pids = FindPidsByName(executable);
+                if (pids.Count > 0)
                 {
-                    var app = SelectTargetProcess(apps);
-                    if (app != null)
+                    var apps = new List<Process>(pids.Count);
+                    foreach (var pid in pids)
                     {
-                        try { Record(app, stop); }
-                        catch (Exception ex) when (!stop.IsCancellationRequested &&
-                            ex is COMException or TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
+                        try { apps.Add(Process.GetProcessById(pid)); } catch { }
+                    }
+                    try
+                    {
+                        var app = SelectTargetProcess(apps.ToArray());
+                        if (app != null)
                         {
-                            if (lastFailure != ex.Message)
-                                Log.Warn($"Application audio '{executable}': {ex.Message} Retrying capture.");
-                            lastFailure = ex.Message;
+                            try { Record(app, stop); }
+                            catch (Exception ex) when (!stop.IsCancellationRequested &&
+                                ex is COMException or TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
+                            {
+                                if (lastFailure != ex.Message)
+                                    Log.Warn($"Application audio '{executable}': {ex.Message} Retrying capture.");
+                                lastFailure = ex.Message;
+                            }
                         }
                     }
+                    finally { foreach (var app in apps) app.Dispose(); }
                 }
-                finally { foreach (var app in apps) app.Dispose(); }
-                stop.WaitHandle.WaitOne(1000);
+                stop.WaitHandle.WaitOne(2500);
             }
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
@@ -84,13 +123,13 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
                 {
                     var pointer = capture.GetBuffer(out int frames, out var flags);
                     int bytes = frames * WaveFormat.BlockAlign;
+                    bool silent = (flags & AudioClientBufferFlags.Silent) != 0;
                     try
                     {
-                        if (bytes <= 0) continue;
+                        if (bytes <= 0 || silent) continue;
                         // Packet size comes from GetBuffer, not from the virtual device's GetBufferSize.
                         if (buffer.Length < bytes) buffer = new byte[bytes];
-                        if ((flags & AudioClientBufferFlags.Silent) != 0) Array.Clear(buffer, 0, bytes);
-                        else if (captureChannels == StereoChannels)
+                        if (captureChannels == StereoChannels)
                         {
                             Marshal.Copy(pointer, buffer, 0, bytes);
                         }
@@ -105,7 +144,7 @@ internal sealed unsafe class ApplicationAudioCapture(string executable) : IWaveI
                         }
                     }
                     finally { capture.ReleaseBuffer(frames); }
-                    DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytes));
+                    if (!silent) DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytes));
                 }
             }
         }
