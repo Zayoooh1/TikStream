@@ -29,10 +29,10 @@ public sealed class AudioEngine : IDisposable
     private float[] _monitorTmp = new float[2048];
     private byte[] _monitorBytes = new byte[2048 * 4];
 
-    /// <summary>Peak levels (0..1) per source — used for mixer meters.</summary>
+    /// <summary>Peak levels (0..1) per source — used for mixer meters (reflects actual stream output gain, or monitor gain in MonitorOnly mode).</summary>
     public IReadOnlyDictionary<string, float> Levels
     {
-        get { lock (_lock) return _inputs.ToDictionary(k => k.Key, v => v.Value.Peak); }
+        get { lock (_lock) return _inputs.ToDictionary(k => k.Key, v => v.Value.MeterPeak); }
     }
 
     /// <summary>True when any device has stopped or is waiting for retry (hot-plug / recovery).</summary>
@@ -345,7 +345,19 @@ public sealed class AudioEngine : IDisposable
             {
                 foreach (var (id, buf) in perSource)
                 {
-                    if (_inputs.TryGetValue(id, out var inp)) inp.CopyLastSamples(buf, samples);
+                    if (_inputs.TryGetValue(id, out var inp))
+                    {
+                        inp.CopyLastSamples(buf, samples);
+                        if (inp.HasSplitMonitorGain)
+                        {
+                            float outG = inp.IsMonitorOnly ? 0f : inp.OutputGain;
+                            if (Math.Abs(outG - 1f) > 0.0001f)
+                            {
+                                int n = Math.Min(buf.Length, samples);
+                                for (int k = 0; k < n; k++) buf[k] *= outG;
+                            }
+                        }
+                    }
                     else Array.Clear(buf, 0, Math.Min(buf.Length, samples));
                 }
             }
@@ -679,6 +691,9 @@ public sealed class AudioEngine : IDisposable
         public float SidechainLevel => _volume.Volume > 0f ? _dynamics.PostGatePeak : 0f;
         public volatile bool Stopped;
         public float Peak;
+        public float MeterPeak => HasSplitMonitorGain
+            ? Peak * (IsMonitorOnly ? MonitorGain : OutputGain)
+            : Peak;
 
         public void SetRouting(bool vertical, bool horizontal)
         {
