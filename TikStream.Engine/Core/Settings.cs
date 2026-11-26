@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace TikStream.Core;
 
-public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay, Browser, AlertBox }
+public enum SourceType { Screen, Window, Camera, Image, Text, Color, Media, AudioInput, AudioOutput, Game, AudioApplication, ChatOverlay, Browser, AlertBox, GoalBar, NowPlaying }
 public enum FitMode { Free, Fill, FitBlur }
 
 /// <summary>Rectangle in normalized canvas coordinates (0..1, Y axis pointing down).</summary>
@@ -120,6 +120,25 @@ public sealed record SourceDef
     public int DuckingReleaseMs { get; set; } = 400;
     public int DuckingHoldMs { get; set; } = 150;
 
+    // native Goal Bar overlay
+    public string GoalTitle { get; set; } = "Cel: Diamenty";
+    public string GoalMetric { get; set; } = "diamonds"; // "diamonds" | "gifts" | "taps" | "follows"
+    public int GoalTarget { get; set; } = 1000;
+    public int GoalManualOffset { get; set; }
+    public bool GoalAutoResetOnStreamStart { get; set; } = true;
+    public int GoalFillColorArgb { get; set; } = unchecked((int)0xFFFE2C55);
+    public int GoalBgColorArgb { get; set; } = unchecked((int)0xD814161F);
+    public int GoalTextColorArgb { get; set; } = unchecked((int)0xFFFFFFFF);
+    public bool GoalShowPercent { get; set; } = true;
+
+    // native Now Playing (Windows SMTC) overlay
+    public bool NowPlayingHideWhenPaused { get; set; } = true;
+    public bool NowPlayingShowArt { get; set; } = true;
+    public string NowPlayingAppFilter { get; set; } = "";
+    public int NowPlayingBgColorArgb { get; set; } = unchecked((int)0xD814161F);
+    public int NowPlayingAccentColorArgb { get; set; } = unchecked((int)0xFF25F4EE);
+    public int NowPlayingTextColorArgb { get; set; } = unchecked((int)0xFFFFFFFF);
+
     public static string NewId() => Guid.NewGuid().ToString("N");
 
     [JsonIgnore] public bool IsVisual => Type is not (SourceType.AudioInput or SourceType.AudioOutput or SourceType.AudioApplication);
@@ -189,6 +208,18 @@ public sealed class Scene
     public List<SceneItem> Items { get; set; } = new();
 }
 
+public sealed record SoundboardPad
+{
+    public string Id { get; set; } = SourceDef.NewId();
+    public string Name { get; set; } = "New Pad";
+    public string FilePath { get; set; } = "";
+    public float Volume { get; set; } = 1.0f;
+    public string ColorHex { get; set; } = "#2563EB";
+    public string Hotkey { get; set; } = "";
+    public string GiftTriggerName { get; set; } = "";
+    public int GiftMinDiamonds { get; set; }
+}
+
 public sealed class AppSettings
 {
     // ---------- Stream ----------
@@ -239,6 +270,34 @@ public sealed class AppSettings
     public bool RecordToFile { get; set; }          // automatically record while streaming
     public bool Snapping { get; set; } = true;
     public bool SnapToSources { get; set; } = true;
+    public bool ShowPostStreamSummary { get; set; } = true;
+    public bool AutoSaveStreamReports { get; set; } = true;
+
+    // ---------- Built-in TTS ----------
+    public bool TtsEnabled { get; set; }
+    public string TtsProvider { get; set; } = "google"; // "google" | "streamelements" | "windows"
+    public string TtsVoice { get; set; } = "";
+    public float TtsRate { get; set; } = 1.0f;
+    public float TtsVolume { get; set; } = 1.0f;
+    public bool TtsMuted { get; set; }
+    public string TtsMonitorMode { get; set; } = "MonitorAndOutput";
+    public bool TtsVertical { get; set; } = true;
+    public bool TtsHorizontal { get; set; } = true;
+    public bool TtsOnGift { get; set; } = true;
+    public int TtsGiftMinDiamonds { get; set; } = 10;
+    public bool TtsOnFollow { get; set; }
+    public bool TtsOnChat { get; set; }
+    public string TtsChatPrefix { get; set; } = "!tts";
+    public int TtsCooldownSec { get; set; } = 5;
+    public int TtsMaxChars { get; set; } = 140;
+
+    // ---------- Native Soundboard ----------
+    public List<SoundboardPad> SoundboardPads { get; set; } = new();
+    public float SoundboardVolume { get; set; } = 1.0f;
+    public bool SoundboardMuted { get; set; }
+    public string SoundboardMonitorMode { get; set; } = "MonitorAndOutput";
+    public bool SoundboardVertical { get; set; } = true;
+    public bool SoundboardHorizontal { get; set; } = true;
 
     // ---------- Advanced ----------
     public bool PreviewEnabled { get; set; } = true;

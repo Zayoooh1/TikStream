@@ -606,12 +606,19 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
     m_autoScrollBtn->setCheckable(true);
     m_autoScrollBtn->setToolTip("Automatically scroll to the newest chat messages");
     auto *open = new QPushButton("Open LIVE", this);
+    m_ttsSkipBtn = new QPushButton("Skip TTS", this);
+    m_ttsSkipBtn->setToolTip("Skip the currently speaking TTS message");
+    m_ttsMuteBtn = new QPushButton("Mute TTS", this);
+    m_ttsMuteBtn->setCheckable(true);
+    m_ttsMuteBtn->setToolTip("Mute / unmute built-in TTS audio");
     auto *actions = new QHBoxLayout;
     actions->setSpacing(5);
     actions->addWidget(m_connection);
     actions->addWidget(refresh);
     actions->addWidget(m_autoScrollBtn);
     actions->addWidget(open);
+    actions->addWidget(m_ttsSkipBtn);
+    actions->addWidget(m_ttsMuteBtn);
 
     auto *zoomOut = new QPushButton("-", this);
     zoomOut->setFixedSize(28, 26);
@@ -677,6 +684,14 @@ LiveChat::LiveChat(QWidget *parent) : QWidget(parent)
             QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.tiktok.com/@%1/live").arg(m_account)));
         else if (!m_kickAccount.isEmpty())
             QDesktopServices::openUrl(QUrl(QStringLiteral("https://kick.com/%1").arg(m_kickAccount)));
+    });
+    connect(m_ttsSkipBtn, &QPushButton::clicked, this, &LiveChat::ttsSkipRequested);
+    connect(m_ttsMuteBtn, &QPushButton::toggled, this, [this](bool muted) {
+        m_ttsMuteBtn->setText(muted ? QStringLiteral("TTS Muted") : QStringLiteral("Mute TTS"));
+        m_ttsMuteBtn->setStyleSheet(muted
+            ? QStringLiteral("background: rgba(239, 68, 68, 45); border: 1px solid rgba(239, 68, 68, 130); color: #fca5a5;")
+            : QString());
+        emit ttsMuteToggled(muted);
     });
     connect(refresh, &QPushButton::clicked, this, [this] {
         m_paused = false;
@@ -837,6 +852,31 @@ void LiveChat::updateGiftStats()
         const double usd = double(m_totalDiamonds) * 0.005;
         m_giftEarned->setText(QStringLiteral("Earned: ~$%1").arg(QString::number(usd, 'f', 2)));
     }
+}
+
+QList<QPair<QString, qint64>> LiveChat::topGifters(int limit) const
+{
+    QList<QPair<QString, qint64>> list;
+    list.reserve(m_gifterDiamonds.size());
+    for (auto it = m_gifterDiamonds.cbegin(); it != m_gifterDiamonds.cend(); ++it)
+        list.append({it.key(), it.value()});
+    std::sort(list.begin(), list.end(), [](const auto &a, const auto &b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
+    if (limit > 0 && list.size() > limit) list.resize(limit);
+    return list;
+}
+
+void LiveChat::resetSessionStats()
+{
+    m_totalGifts = 0;
+    m_totalDiamonds = 0;
+    m_totalTaps = 0;
+    m_totalFollows = 0;
+    m_totalChatMessages = 0;
+    m_gifterDiamonds.clear();
+    updateGiftStats();
+    emit statsChanged();
 }
 
 int LiveChat::viewerCount() const
@@ -1231,16 +1271,19 @@ void LiveChat::readEvents()
             m_totalGifts = std::max<qint64>(0, event["count"].toInteger(0));
             m_totalDiamonds = std::max<qint64>(0, event["diamonds"].toInteger(0));
             updateGiftStats();
+            emit statsChanged();
         }
         if (event["type"] == "taps") {
             const auto count = event["count"].toInteger(-1);
-            if (count < 0) { m_tapsText.clear(); m_taps->setText("Likes: —"); }
+            if (count < 0) { m_totalTaps = 0; m_tapsText.clear(); m_taps->setText("Likes: —"); }
             else {
+                m_totalTaps = count;
                 m_tapsText = QString(event["partial"].toBool() ? "Received likes: %1" : "Likes: %1")
                                  .arg(QLocale(QLocale::English).toString(count));
                 m_taps->setText(m_tapsText);
             }
             notifyOverlay();
+            emit statsChanged();
         }
         if (event["type"] == "viewers") {
             handleViewerEvent(event, QStringLiteral("tiktok"));
@@ -1317,15 +1360,26 @@ void LiveChat::appendMessages(const QJsonArray &messages)
         if (nick.isEmpty() || text.isEmpty()) continue;
         if (message["kind"] == "gift") {
             const auto sender = message["senderId"].toString().left(160);
+            const QString giftName = message["giftName"].toString();
+            const int giftCount = std::max(1, message["giftCount"].toInt(1));
+            const int diamonds = std::max(0, message["diamonds"].toInt(0));
+            if (diamonds > 0) m_gifterDiamonds[nick] += diamonds;
+            else if (!m_gifterDiamonds.contains(nick)) m_gifterDiamonds[nick] += giftCount;
             m_gifts->add(sender.isEmpty() ? nick : sender, nick, text);
             emit alertTriggered("gift", nick, text);
+            emit giftReceived(nick, giftName, giftCount, diamonds, text);
             giftChanged = true;
             continue;
         }
         if (message["kind"] == "follow") {
+            ++m_totalFollows;
             emit alertTriggered("follow", nick, "followed the channel!");
+            emit followReceived(nick);
+            emit statsChanged();
             continue;
         }
+        ++m_totalChatMessages;
+        emit chatMessageReceived(platform, nick, text);
         if (!chatChanged) {
             m_messages->setUpdatesEnabled(false);
             chatChanged = true;

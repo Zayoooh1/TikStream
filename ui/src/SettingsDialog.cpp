@@ -168,6 +168,7 @@ SettingsDialog::SettingsDialog(const QJsonObject &settings, const QJsonObject &a
     addPage("Output", "output", pageOutput());
     addPage("Video", "monitor", pageVideo());
     addPage("Audio", "speaker", pageAudio());
+    addPage("TTS", "mic", pageTts());
     addPage("Hotkeys", "keyboard", pageHotkeys());
     addPage("Advanced", "sliders", pageAdvanced());
     connect(m_nav, &QListWidget::currentRowChanged, m_pages, &QStackedWidget::setCurrentIndex);
@@ -210,9 +211,15 @@ QWidget *SettingsDialog::pageGeneral()
     m_autoRecord->setChecked(m_s["recordToFile"].toBool());
     m_minToTray = track(new QCheckBox("Minimize to system tray when closing window"));
     m_minToTray->setChecked(m_s["minimizeToTray"].toBool(false));
+    m_showSummary = track(new QCheckBox("Show Post-Stream Summary after stopping stream"));
+    m_showSummary->setChecked(m_s["showPostStreamSummary"].toBool(true));
+    m_autoSaveReports = track(new QCheckBox("Auto-save stream reports as JSON in AppData\\TikStream\\reports"));
+    m_autoSaveReports->setChecked(m_s["autoSaveStreamReports"].toBool(true));
     f->addRow(m_confirmStop);
     f->addRow(m_autoRecord);
     f->addRow(m_minToTray);
+    f->addRow(m_showSummary);
+    f->addRow(m_autoSaveReports);
 
     QFormLayout *f2;
     v->addWidget(card(w, &f2, "Preview", "How items behave when dragging them with the mouse."));
@@ -892,6 +899,138 @@ QWidget *SettingsDialog::pageAudio()
     return scrollPage(w, v);
 }
 
+QWidget *SettingsDialog::pageTts()
+{
+    QVBoxLayout *v;
+    auto *w = page(&v);
+    QFormLayout *f;
+    v->addWidget(card(w, &f, "Wbudowany TTS (Text-to-Speech)",
+        "Czyta na głos gifty, followy i wiadomości z czatu klasycznym głosem donejtowym (Google TTS / Ivona / Windows Offline) na dedykowanym kanale miksera audio."));
+
+    m_ttsEnabled = track(new QCheckBox("Włącz wbudowany TTS"));
+    m_ttsEnabled->setChecked(m_s["ttsEnabled"].toBool(false));
+    f->addRow("", m_ttsEnabled);
+
+    m_ttsProvider = track(new QComboBox);
+    m_ttsProvider->addItem("Google TTS (Donejtowy)", "google");
+    m_ttsProvider->addItem("Ivona / Polly (Maja, Jacek, Jan, Ewa)", "streamelements");
+    m_ttsProvider->addItem("Windows (Offline)", "windows");
+    const QString initProvider = m_s["ttsProvider"].toString("google");
+    m_ttsProvider->setCurrentIndex(std::max(0, m_ttsProvider->findData(initProvider)));
+    f->addRow("Silnik TTS", m_ttsProvider);
+
+    auto *voiceRow = new QHBoxLayout;
+    m_ttsVoice = track(new QComboBox);
+    auto populateVoices = [this](const QString &provider, const QString &selectedId) {
+        const QSignalBlocker blocked(m_ttsVoice);
+        m_ttsVoice->clear();
+        if (provider == "windows")
+            m_ttsVoice->addItem("Domyślny głos systemu Windows", "");
+        for (const auto &vv : EngineHost::instance().callArr("listTtsVoices", QJsonObject{{"provider", provider}})) {
+            const auto vo = vv.toObject();
+            const QString id = vo["id"].toString();
+            const QString label = provider == "windows"
+                ? QStringLiteral("%1 (%2)").arg(vo["displayName"].toString(), vo["language"].toString())
+                : vo["displayName"].toString();
+            m_ttsVoice->addItem(label, id);
+        }
+        const int idx = m_ttsVoice->findData(selectedId);
+        m_ttsVoice->setCurrentIndex(idx >= 0 ? idx : 0);
+    };
+    populateVoices(m_ttsProvider->currentData().toString(), m_s["ttsVoice"].toString());
+    auto *refreshVoices = new QPushButton("Odśwież");
+    refreshVoices->setCursor(Qt::PointingHandCursor);
+    connect(refreshVoices, &QPushButton::clicked, this, [this, populateVoices] {
+        populateVoices(m_ttsProvider->currentData().toString(), m_ttsVoice->currentData().toString());
+    });
+    voiceRow->addWidget(m_ttsVoice, 1);
+    voiceRow->addWidget(refreshVoices);
+    f->addRow("Głos", voiceRow);
+
+    m_ttsRate = track(new PaddedSpinBox);
+    m_ttsRate->setRange(50, 200);
+    m_ttsRate->setSingleStep(10);
+    m_ttsRate->setSuffix(" %");
+    m_ttsRate->setValue(int(std::lround(m_s["ttsRate"].toDouble(1.0) * 100.0)));
+    m_ttsRate->setToolTip("Szybkość mowy (50%–200%) bez zmiany tonacji głosu (pitch-preserving).");
+    f->addRow("Szybkość mowy", m_ttsRate);
+
+    connect(m_ttsProvider, &QComboBox::currentIndexChanged, this, [this, populateVoices](int) {
+        populateVoices(m_ttsProvider->currentData().toString(), "");
+    });
+
+    m_ttsMonitor = track(new QComboBox);
+    m_ttsMonitor->addItem("Monitor and Output (stream + słuchawki)", "MonitorAndOutput");
+    m_ttsMonitor->addItem("Monitor Only (tylko słuchawki)", "MonitorOnly");
+    m_ttsMonitor->addItem("Output Only (tylko stream)", "Off");
+    m_ttsMonitor->setCurrentIndex(std::max(0, m_ttsMonitor->findData(m_s["ttsMonitorMode"].toString("MonitorAndOutput"))));
+    f->addRow("Odsłuch (Monitoring)", m_ttsMonitor);
+
+    auto *testRow = new QHBoxLayout;
+    auto *testBtn = new QPushButton("Test TTS");
+    testBtn->setCursor(Qt::PointingHandCursor);
+    auto *skipBtn = new QPushButton("Skip");
+    skipBtn->setCursor(Qt::PointingHandCursor);
+    connect(testBtn, &QPushButton::clicked, this, [this] {
+        const QString prov = m_ttsProvider->currentData().toString();
+        const QString voice = m_ttsVoice->currentData().toString();
+        const double rate = m_ttsRate->value() / 100.0;
+        const bool isEnglish = voice == "en" || voice == "Brian" || voice == "Amy" || voice == "Joey";
+        const QString sample = isEnglish
+            ? QStringLiteral("Testing TikStream donation voice. Thank you for the gift!")
+            : QStringLiteral("Test głosu donejtowego TikStream. Dzięki wielkie za gifta!");
+        EngineHost::instance().call("ttsSpeak", QJsonObject{
+            {"text", sample},
+            {"priority", true},
+            {"provider", prov},
+            {"voice", voice},
+            {"rate", rate},
+        });
+    });
+    connect(skipBtn, &QPushButton::clicked, this, [] { EngineHost::instance().call("ttsSkip"); });
+    testRow->addWidget(testBtn);
+    testRow->addWidget(skipBtn);
+    testRow->addStretch(1);
+    f->addRow("", testRow);
+
+    QFormLayout *f2;
+    v->addWidget(card(w, &f2, "Reguły wyzwalania TTS"));
+    m_ttsOnGift = track(new QCheckBox("Czytaj gifty z TikTok LIVE"));
+    m_ttsOnGift->setChecked(m_s["ttsOnGift"].toBool(true));
+    f2->addRow("", m_ttsOnGift);
+
+    m_ttsGiftMinDiamonds = track(new PaddedSpinBox);
+    m_ttsGiftMinDiamonds->setRange(0, 1000000);
+    m_ttsGiftMinDiamonds->setSuffix(" 💎");
+    m_ttsGiftMinDiamonds->setValue(m_s["ttsGiftMinDiamonds"].toInt(10));
+    f2->addRow("Min. diamentów (gift)", m_ttsGiftMinDiamonds);
+
+    m_ttsOnFollow = track(new QCheckBox("Czytaj nowe followy"));
+    m_ttsOnFollow->setChecked(m_s["ttsOnFollow"].toBool(false));
+    f2->addRow("", m_ttsOnFollow);
+
+    m_ttsOnChat = track(new QCheckBox("Czytaj wiadomości z czatu"));
+    m_ttsOnChat->setChecked(m_s["ttsOnChat"].toBool(false));
+    f2->addRow("", m_ttsOnChat);
+
+    m_ttsChatPrefix = track(new QLineEdit(m_s["ttsChatPrefix"].toString("!tts")));
+    m_ttsChatPrefix->setPlaceholderText("np. !tts (puste = czytaj wszystko)");
+    f2->addRow("Prefix czatu", m_ttsChatPrefix);
+
+    m_ttsCooldown = track(new PaddedSpinBox);
+    m_ttsCooldown->setRange(0, 120);
+    m_ttsCooldown->setSuffix(" s");
+    m_ttsCooldown->setValue(m_s["ttsCooldownSec"].toInt(5));
+    f2->addRow("Cooldown (czat)", m_ttsCooldown);
+
+    m_ttsMaxChars = track(new PaddedSpinBox);
+    m_ttsMaxChars->setRange(20, 500);
+    m_ttsMaxChars->setValue(m_s["ttsMaxChars"].toInt(140));
+    f2->addRow("Maks. znaków", m_ttsMaxChars);
+
+    return scrollPage(w, v);
+}
+
 QWidget *SettingsDialog::pageHotkeys()
 {
     QVBoxLayout *v;
@@ -966,6 +1105,8 @@ QJsonObject SettingsDialog::result() const
     s["confirmStreamStop"] = m_confirmStop->isChecked();
     s["recordToFile"] = m_autoRecord->isChecked();
     s["minimizeToTray"] = m_minToTray->isChecked();
+    s["showPostStreamSummary"] = m_showSummary->isChecked();
+    s["autoSaveStreamReports"] = m_autoSaveReports->isChecked();
     s["snapping"] = m_snapping->isChecked();
     s["snapToSources"] = m_snapSources->isChecked();
     s["autoUpdateEnabled"] = m_autoUpdate->isChecked();
@@ -1038,5 +1179,18 @@ QJsonObject SettingsDialog::result() const
     s["autoReconnect"] = m_reconnect->isChecked();
     s["reconnectDelaySec"] = m_retryDelay->value();
     s["reconnectMaxRetries"] = m_retryMax->value();
+
+    s["ttsEnabled"] = m_ttsEnabled->isChecked();
+    s["ttsProvider"] = m_ttsProvider->currentData().toString();
+    s["ttsVoice"] = m_ttsVoice->currentData().toString();
+    s["ttsRate"] = m_ttsRate->value() / 100.0;
+    s["ttsMonitorMode"] = m_ttsMonitor->currentData().toString();
+    s["ttsOnGift"] = m_ttsOnGift->isChecked();
+    s["ttsGiftMinDiamonds"] = m_ttsGiftMinDiamonds->value();
+    s["ttsOnFollow"] = m_ttsOnFollow->isChecked();
+    s["ttsOnChat"] = m_ttsOnChat->isChecked();
+    s["ttsChatPrefix"] = m_ttsChatPrefix->text().trimmed();
+    s["ttsCooldownSec"] = m_ttsCooldown->value();
+    s["ttsMaxChars"] = m_ttsMaxChars->value();
     return s;
 }

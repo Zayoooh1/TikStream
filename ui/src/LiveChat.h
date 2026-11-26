@@ -34,6 +34,15 @@ public:
     void setDemoPreview(bool enabled);
     bool demoPreview() const { return m_demoPreview; }
     int viewerCount() const;
+    int tiktokViewerCount() const { return m_ttViewers >= 0 ? int(m_ttViewers) : -1; }
+    int kickViewerCount() const { return m_kickViewers >= 0 ? int(m_kickViewers) : -1; }
+    qint64 totalGifts() const { return m_totalGifts; }
+    qint64 totalDiamonds() const { return m_totalDiamonds; }
+    qint64 totalTaps() const { return m_totalTaps; }
+    qint64 totalFollows() const { return m_totalFollows; }
+    qint64 totalChatMessages() const { return m_totalChatMessages; }
+    QList<QPair<QString, qint64>> topGifters(int limit = 5) const;
+    void resetSessionStats();
     quint64 overlayRevision() const { return m_overlayRevision; }
     QImage renderOverlay(int width, int height, bool showChat, bool showGifts, bool showTaps) const;
 
@@ -43,6 +52,12 @@ signals:
     void kickAccountChanged(const QString &channel);
     void viewerCountChanged(int count);
     void alertTriggered(const QString &kind, const QString &user, const QString &detail);
+    void statsChanged();
+    void giftReceived(const QString &user, const QString &giftName, int count, int diamonds, const QString &detail);
+    void followReceived(const QString &user);
+    void chatMessageReceived(const QString &platform, const QString &user, const QString &text);
+    void ttsSkipRequested();
+    void ttsMuteToggled(bool muted);
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -81,9 +96,15 @@ private:
     QLabel *m_giftEarned = nullptr;
     qint64 m_totalGifts = 0;
     qint64 m_totalDiamonds = 0;
+    qint64 m_totalTaps = 0;
+    qint64 m_totalFollows = 0;
+    qint64 m_totalChatMessages = 0;
+    QHash<QString, qint64> m_gifterDiamonds;
     qint64 m_ttViewers = -1;
     qint64 m_kickViewers = -1;
     int m_lastEmittedViewers = -1;
+    QPushButton *m_ttsSkipBtn = nullptr;
+    QPushButton *m_ttsMuteBtn = nullptr;
     QListWidget *m_messages;
     ChatMessageDelegate *m_delegate = nullptr;
     QPushButton *m_zoomReset = nullptr;

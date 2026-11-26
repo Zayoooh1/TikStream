@@ -58,6 +58,8 @@ public sealed unsafe class StreamEngine : IDisposable
 {
     public GpuDevice Gpu { get; }
     public AudioEngine Audio { get; } = new();
+    public TtsService Tts { get; }
+    public NowPlayingService NowPlaying { get; } = new();
     public EngineStats Stats { get; private set; } = new();
 
     private Compositor _comp;
@@ -130,6 +132,9 @@ public sealed unsafe class StreamEngine : IDisposable
         Native.timeBeginPeriod(1);
         ApplyPriority(settings.ProcessPriority);
         Audio.SyncDevices(settings);
+        Tts = new TtsService(Audio);
+        Tts.ApplySettings(settings);
+        NowPlaying.SetActive(settings.Sources.Any(x => x.Type == SourceType.NowPlaying));
         _cmds.Enqueue(SyncSources);
 
         _renderThread = new Thread(RenderLoop) { IsBackground = true, Name = "Render", Priority = ThreadPriority.Highest };
@@ -151,9 +156,17 @@ public sealed unsafe class StreamEngine : IDisposable
     public void ApplySettings(AppSettings s, AppSettings previous)
     {
         var copy = s.Clone();
-        if (Sig(copy.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) != Sig(previous.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) ||
+        bool virtualAudioChanged =
+            copy.TtsVolume != previous.TtsVolume || copy.TtsMuted != previous.TtsMuted ||
+            copy.TtsMonitorMode != previous.TtsMonitorMode || copy.TtsVertical != previous.TtsVertical || copy.TtsHorizontal != previous.TtsHorizontal ||
+            copy.SoundboardVolume != previous.SoundboardVolume || copy.SoundboardMuted != previous.SoundboardMuted ||
+            copy.SoundboardMonitorMode != previous.SoundboardMonitorMode || copy.SoundboardVertical != previous.SoundboardVertical || copy.SoundboardHorizontal != previous.SoundboardHorizontal;
+        if (virtualAudioChanged ||
+            Sig(copy.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) != Sig(previous.Sources.Where(x => !x.IsVisual || x.Type is SourceType.AlertBox or SourceType.Browser)) ||
             !AudibleDeviceIds(copy).SetEquals(AudibleDeviceIds(previous)))
             Audio.SyncDevices(copy);
+        Tts.ApplySettings(copy);
+        NowPlaying.SetActive(copy.Sources.Any(x => x.Type == SourceType.NowPlaying));
         var oldMedia = previous.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox or SourceType.Browser).ToDictionary(x => x.Id);
         foreach (var m in copy.Sources.Where(x => x.Type is SourceType.Media or SourceType.AlertBox or SourceType.Browser))
         {
@@ -1309,6 +1322,8 @@ public sealed unsafe class StreamEngine : IDisposable
         foreach (var rt in _sources.Values) rt.Dispose();
         _sources.Clear();
         CefHost.Shutdown();
+        Tts.Dispose();
+        NowPlaying.Dispose();
         Audio.Dispose();
         _dualComp?.Dispose();
         _comp.Dispose();

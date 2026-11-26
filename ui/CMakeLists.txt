@@ -19,6 +19,8 @@ add_executable(TikStream WIN32
     src/OverlayRaster.cpp   src/OverlayRaster.h
     src/AddSourceDialog.cpp src/AddSourceDialog.h
     src/Hotkeys.cpp         src/Hotkeys.h
+    src/SoundboardWidget.cpp src/SoundboardWidget.h
+    src/PostStreamSummaryDialog.cpp src/PostStreamSummaryDialog.h
     src/SourceTypes.h
     res/resources.qrc
 )

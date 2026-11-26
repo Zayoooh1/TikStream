@@ -39,6 +39,8 @@ public static unsafe class NativeApi
                   or "setDualItemTransform" or "setDualSelection" or "setItemCrop"
                   or "checkUpdate" or "startUpdate" or "updateStatus" or "installUpdate" or "appVersion"
                   or "browserFrame" or "browserInteract" or "playAlertSound"
+                  or "listTtsVoices" or "ttsSpeak" or "ttsSkip" or "ttsClear"
+                  or "playSoundboardPad" or "stopSoundboard" or "getNowPlaying"
                   or "tiktokAccountStatus" or "tiktokQrBegin" or "tiktokQrPoll" or "tiktokQrCancel"
                   or "tiktokImportStudio" or "tiktokLogout" or "tiktokCheckCreateInfo" or "tiktokCreateRoom" or "tiktokFinishRoom")
                 result = Dispatch(m, a);
@@ -450,6 +452,58 @@ public static unsafe class NativeApi
                 var vol = j["volume"]?.GetValue<float>() ?? 1f;
                 Engine().Audio.PlayAlertSound(sourceId, path, vol);
                 return Ok();
+            }
+
+            case "listTtsVoices":
+            {
+                var provider = j["provider"]?.GetValue<string>();
+                return JsonSerializer.Serialize(TtsService.ListVoices(provider), Json);
+            }
+
+            case "ttsSpeak":
+            {
+                var text = j["text"]?.GetValue<string>() ?? "";
+                var priority = j["priority"]?.GetValue<bool>() ?? false;
+                var provider = j["provider"]?.GetValue<string>();
+                var voice = j["voice"]?.GetValue<string>();
+                float? rate = j["rate"] != null ? j["rate"]!.GetValue<float>() : null;
+                Engine().Tts.Enqueue(text, priority, provider, voice, rate);
+                return Ok();
+            }
+
+            case "ttsSkip":
+                Engine().Tts.SkipCurrent();
+                return Ok();
+
+            case "ttsClear":
+                Engine().Tts.ClearQueue();
+                return Ok();
+
+            case "playSoundboardPad":
+            {
+                var padId = j["id"]?.GetValue<string>() ?? "";
+                var path = j["path"]?.GetValue<string>() ?? "";
+                var vol = j["volume"]?.GetValue<float>() ?? 1f;
+                if (string.IsNullOrWhiteSpace(path) && !string.IsNullOrEmpty(padId))
+                {
+                    lock (Lock)
+                    {
+                        var pad = _settings.SoundboardPads.FirstOrDefault(p => p.Id == padId);
+                        if (pad != null) { path = pad.FilePath; vol = pad.Volume; }
+                    }
+                }
+                Engine().Audio.PlaySoundboardPad(path, vol);
+                return Ok();
+            }
+
+            case "stopSoundboard":
+                Engine().Audio.StopSoundboard();
+                return Ok();
+
+            case "getNowPlaying":
+            {
+                ulong sinceRev = j["sinceRevision"]?.GetValue<ulong>() ?? 0;
+                return JsonSerializer.Serialize(Engine().NowPlaying.GetState(sinceRev), Json);
             }
 
             case "shutdown":

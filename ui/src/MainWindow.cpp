@@ -5,8 +5,10 @@
 #include "Hotkeys.h"
 #include "LiveChat.h"
 #include "OverlayRaster.h"
+#include "PostStreamSummaryDialog.h"
 #include "PreviewWidget.h"
 #include "SettingsDialog.h"
+#include "SoundboardWidget.h"
 #include "SourceTypes.h"
 #include "Widgets.h"
 
@@ -71,7 +73,7 @@
 #include <utility>
 
 namespace {
-enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgBrowser, PgAlertBox, PgChatOverlay, PgApplicationAudio, PgAudioDevice, PgNone };
+enum Page { PgScreen, PgWindow, PgCamera, PgImage, PgText, PgColor, PgMedia, PgBrowser, PgAlertBox, PgChatOverlay, PgGoalBar, PgNowPlaying, PgApplicationAudio, PgAudioDevice, PgNone };
 
 QString newId() { return QUuid::createUuid().toString(QUuid::Id128); }
 
@@ -600,6 +602,10 @@ MainWindow::MainWindow(int canvasW, int canvasH, const QString &gpuName)
     devicesTimer->start(3000);
     m_levelsTimer->start(40);
 
+    m_nowPlayingTimer = new QTimer(this);
+    connect(m_nowPlayingTimer, &QTimer::timeout, this, &MainWindow::pollNowPlaying);
+    m_nowPlayingTimer->start(1500);
+
     m_updateTimer = new QTimer(this);
     m_updateTimer->setInterval(6 * 3600 * 1000); // check every 6 hours when enabled
     connect(m_updateTimer, &QTimer::timeout, this, [this] {
@@ -846,6 +852,17 @@ void MainWindow::buildDocks()
     m_liveChat->setKickAccount(m_s["kickUsername"].toString("zayosh"));
     connect(m_liveChat, &LiveChat::overlayChanged, this, &MainWindow::updateChatOverlays);
     connect(m_liveChat, &LiveChat::alertTriggered, this, &MainWindow::triggerAlert);
+    connect(m_liveChat, &LiveChat::statsChanged, this, &MainWindow::updateGoalBarOverlays);
+    connect(m_liveChat, &LiveChat::giftReceived, this, &MainWindow::handleGiftTtsAndSoundboard);
+    connect(m_liveChat, &LiveChat::followReceived, this, &MainWindow::handleFollowTts);
+    connect(m_liveChat, &LiveChat::chatMessageReceived, this, &MainWindow::handleChatTts);
+    connect(m_liveChat, &LiveChat::ttsSkipRequested, this, [] { EngineHost::instance().call("ttsSkip"); });
+    connect(m_liveChat, &LiveChat::ttsMuteToggled, this, [this](bool muted) {
+        m_s["ttsMuted"] = muted;
+        m_mixerSignature.clear();
+        rebuildMixer();
+        applySoon();
+    });
     connect(m_liveChat, &LiveChat::accountChanged, this, [this](const QString &nick) {
         m_s["tikTokUsername"] = nick;
         pushSettings();
@@ -999,6 +1016,27 @@ void MainWindow::buildDocks()
     m_alertBoxDock->setFeatures(m_alertBoxDock->features() | QDockWidget::DockWidgetClosable);
     if (auto *pm = findChild<QMenu *>("panelsMenu"))
         pm->addAction(m_alertBoxDock->toggleViewAction());
+
+    m_soundboard = new SoundboardWidget;
+    m_soundboard->setPads(m_s["soundboardPads"].toArray());
+    connect(m_soundboard, &SoundboardWidget::padTriggered, this, [](const QString &id, const QString &path, double vol) {
+        EngineHost::instance().call("playSoundboardPad", QJsonObject{{"id", id}, {"path", path}, {"volume", vol}});
+    });
+    connect(m_soundboard, &SoundboardWidget::stopAllRequested, this, [] {
+        EngineHost::instance().call("stopSoundboard");
+    });
+    connect(m_soundboard, &SoundboardWidget::padsChanged, this, [this](const QJsonArray &pads) {
+        m_s["soundboardPads"] = pads;
+        applyHotkeys();
+        m_mixerSignature.clear();
+        rebuildMixer();
+        applySoon();
+    });
+    m_soundboardDock = makeDock("Soundboard", "dockSoundboard", m_soundboard, Qt::RightDockWidgetArea);
+    m_soundboardDock->setFeatures(m_soundboardDock->features() | QDockWidget::DockWidgetClosable);
+    if (auto *pm = findChild<QMenu *>("panelsMenu"))
+        pm->addAction(m_soundboardDock->toggleViewAction());
+    m_soundboardDock->hide();
 
     splitDockWidget(dProps, dMix, Qt::Vertical);
     splitDockWidget(dMix, dCtl, Qt::Vertical);
@@ -1366,6 +1404,8 @@ void MainWindow::buildProperties(QWidget *host)
         m_pages->addWidget(abHint);
     }
     m_pages->addWidget(pageChatOverlay());
+    m_pages->addWidget(pageGoalBar());
+    m_pages->addWidget(pageNowPlaying());
     m_pages->addWidget(pageApplicationAudio());
     m_pages->addWidget(pageAudioDevice());
     m_pages->addWidget(new QWidget);
@@ -2094,6 +2134,136 @@ QWidget *MainWindow::pageChatOverlay()
     connect(m_chatShowTaps, &QCheckBox::toggled, this, [this](bool on) { if (!m_loading) editSource([on](QJsonObject &s) { s["showTaps"] = on; }); });
     connect(m_chatDemoBtn, &QPushButton::toggled, this, [this](bool on) {
         if (m_liveChat) m_liveChat->setDemoPreview(on);
+    });
+    return w;
+}
+
+QWidget *MainWindow::pageGoalBar()
+{
+    auto *w = new QWidget;
+    auto *f = form(w);
+    m_goalTitle = new QLineEdit;
+    m_goalTitle->setPlaceholderText("Cel: Diamenty");
+    f->addRow("Tytuł", m_goalTitle);
+
+    m_goalMetric = new QComboBox;
+    widenChoice(m_goalMetric);
+    m_goalMetric->addItem("Diamenty (Diamonds)", "diamonds");
+    m_goalMetric->addItem("Gifty (Gifts)", "gifts");
+    m_goalMetric->addItem("Lajki / Tapy (Likes)", "taps");
+    m_goalMetric->addItem("Followy (Follows)", "follows");
+    f->addRow("Metryka", m_goalMetric);
+
+    m_goalTarget = new PaddedSpinBox;
+    m_goalTarget->setRange(1, 10000000);
+    m_goalTarget->setSingleStep(50);
+    f->addRow("Cel", m_goalTarget);
+
+    m_goalAutoReset = new QCheckBox("Resetuj automatycznie przy starcie streama");
+    m_goalShowPercent = new QCheckBox("Pokazuj procent postępu");
+    f->addRow("", m_goalAutoReset);
+    f->addRow("", m_goalShowPercent);
+
+    m_goalFillColor = new ColorButton("Kolor paska");
+    m_goalBgColor = new ColorButton("Kolor tła");
+    m_goalTextColor = new ColorButton("Kolor tekstu");
+    f->addRow("Pasek", m_goalFillColor);
+    f->addRow("Tło", m_goalBgColor);
+    f->addRow("Tekst", m_goalTextColor);
+
+    auto *btnRow = new QHBoxLayout;
+    auto *resetBtn = new QPushButton("Resetuj postęp");
+    auto *testBtn = new QPushButton("+10 (Test)");
+    resetBtn->setCursor(Qt::PointingHandCursor);
+    testBtn->setCursor(Qt::PointingHandCursor);
+    btnRow->addWidget(resetBtn);
+    btnRow->addWidget(testBtn);
+    f->addRow("", btnRow);
+
+    auto liveMetricVal = [this](const QString &metric) -> qint64 {
+        if (!m_liveChat) return 0;
+        if (metric == "gifts") return m_liveChat->totalGifts();
+        if (metric == "taps") return m_liveChat->totalTaps();
+        if (metric == "follows") return m_liveChat->totalFollows();
+        return m_liveChat->totalDiamonds();
+    };
+
+    connect(m_goalTitle, &QLineEdit::textChanged, this, [this](const QString &t) {
+        if (!m_loading) editSource([t](QJsonObject &s) { s["goalTitle"] = t; });
+    });
+    connect(m_goalMetric, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (!m_loading) editSource([m = m_goalMetric->currentData().toString()](QJsonObject &s) { s["goalMetric"] = m; });
+    });
+    connect(m_goalTarget, &QSpinBox::valueChanged, this, [this](int v) {
+        if (!m_loading) editSource([v](QJsonObject &s) { s["goalTarget"] = v; });
+    });
+    connect(m_goalAutoReset, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["goalAutoResetOnStreamStart"] = on; });
+    });
+    connect(m_goalShowPercent, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["goalShowPercent"] = on; });
+    });
+    connect(m_goalFillColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["goalFillColorArgb"] = double(qint32(c.rgba())); });
+    });
+    connect(m_goalBgColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["goalBgColorArgb"] = double(qint32(c.rgba())); });
+    });
+    connect(m_goalTextColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["goalTextColorArgb"] = double(qint32(c.rgba())); });
+    });
+    connect(resetBtn, &QPushButton::clicked, this, [this, liveMetricVal] {
+        editSource([liveMetricVal](QJsonObject &s) {
+            const qint64 cur = liveMetricVal(s["goalMetric"].toString("diamonds"));
+            s["goalManualOffset"] = double(-cur);
+        });
+    });
+    connect(testBtn, &QPushButton::clicked, this, [this] {
+        editSource([](QJsonObject &s) {
+            s["goalManualOffset"] = s["goalManualOffset"].toInt(0) + 10;
+        });
+    });
+    return w;
+}
+
+QWidget *MainWindow::pageNowPlaying()
+{
+    auto *w = new QWidget;
+    auto *f = form(w);
+    m_npHidePaused = new QCheckBox("Ukryj, gdy muzyka jest wstrzymana");
+    m_npShowArt = new QCheckBox("Pokazuj okładkę albumu");
+    f->addRow("", m_npHidePaused);
+    f->addRow("", m_npShowArt);
+
+    m_npAppFilter = new QLineEdit;
+    m_npAppFilter->setPlaceholderText("np. Spotify (puste = wszystkie aplikacje)");
+    f->addRow("Filtr aplikacji", m_npAppFilter);
+
+    m_npBgColor = new ColorButton("Tło karty");
+    m_npAccentColor = new ColorButton("Kolor akcentu");
+    m_npTextColor = new ColorButton("Kolor tekstu");
+    f->addRow("Tło", m_npBgColor);
+    f->addRow("Akcent", m_npAccentColor);
+    f->addRow("Tekst", m_npTextColor);
+    f->addRow("", hintLabel("Odczytuje aktualnie odtwarzany utwór i okładkę bezpośrednio z Windows SMTC (Spotify, Chrome, YouTube Music, Tidal)."));
+
+    connect(m_npHidePaused, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["nowPlayingHideWhenPaused"] = on; });
+    });
+    connect(m_npShowArt, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_loading) editSource([on](QJsonObject &s) { s["nowPlayingShowArt"] = on; });
+    });
+    connect(m_npAppFilter, &QLineEdit::textChanged, this, [this](const QString &t) {
+        if (!m_loading) editSource([t](QJsonObject &s) { s["nowPlayingAppFilter"] = t.trimmed(); });
+    });
+    connect(m_npBgColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["nowPlayingBgColorArgb"] = double(qint32(c.rgba())); });
+    });
+    connect(m_npAccentColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["nowPlayingAccentColorArgb"] = double(qint32(c.rgba())); });
+    });
+    connect(m_npTextColor, &ColorButton::colorChanged, this, [this](const QColor &c) {
+        if (!m_loading) editSource([c](QJsonObject &s) { s["nowPlayingTextColorArgb"] = double(qint32(c.rgba())); });
     });
     return w;
 }
@@ -2954,7 +3124,8 @@ void MainWindow::loadProperties()
     m_srcName->setToolTip(info.name + " — click to rename");
 
     static const QHash<QString, int> pageOf{{"Screen", PgScreen}, {"Window", PgWindow}, {"Camera", PgCamera}, {"Image", PgImage},
-                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"Browser", PgBrowser}, {"AlertBox", PgAlertBox}, {"ChatOverlay", PgChatOverlay}, {"Game", PgWindow},
+                                            {"Text", PgText}, {"Color", PgColor}, {"Media", PgMedia}, {"Browser", PgBrowser}, {"AlertBox", PgAlertBox}, {"ChatOverlay", PgChatOverlay},
+                                            {"GoalBar", PgGoalBar}, {"NowPlaying", PgNowPlaying}, {"Game", PgWindow},
                                             {"AudioApplication", PgApplicationAudio}, {"AudioInput", PgAudioDevice}, {"AudioOutput", PgAudioDevice}};
     m_pages->setCurrentIndex(pageOf.value(type, PgNone));
     // Match stacked widget height to the active page instead of the tallest one (avoids blank space)
@@ -3028,6 +3199,22 @@ void MainWindow::loadProperties()
         m_chatShowGifts->setChecked(src["showGifts"].toBool(true));
         m_chatShowTaps->setChecked(src["showTaps"].toBool(true));
         m_chatDemoBtn->setChecked(m_liveChat && m_liveChat->demoPreview());
+    } else if (type == "GoalBar") {
+        m_goalTitle->setText(src["goalTitle"].toString("Cel: Diamenty"));
+        m_goalMetric->setCurrentIndex(std::max(0, m_goalMetric->findData(src["goalMetric"].toString("diamonds"))));
+        m_goalTarget->setValue(std::max(1, src["goalTarget"].toInt(1000)));
+        m_goalAutoReset->setChecked(src["goalAutoResetOnStreamStart"].toBool(true));
+        m_goalShowPercent->setChecked(src["goalShowPercent"].toBool(true));
+        m_goalFillColor->setColor(argbOf(src["goalFillColorArgb"], QColor(254, 44, 85, 255)));
+        m_goalBgColor->setColor(argbOf(src["goalBgColorArgb"], QColor(20, 22, 31, 216)));
+        m_goalTextColor->setColor(argbOf(src["goalTextColorArgb"], Qt::white));
+    } else if (type == "NowPlaying") {
+        m_npHidePaused->setChecked(src["nowPlayingHideWhenPaused"].toBool(true));
+        m_npShowArt->setChecked(src["nowPlayingShowArt"].toBool(true));
+        m_npAppFilter->setText(src["nowPlayingAppFilter"].toString());
+        m_npBgColor->setColor(argbOf(src["nowPlayingBgColorArgb"], QColor(20, 22, 31, 216)));
+        m_npAccentColor->setColor(argbOf(src["nowPlayingAccentColorArgb"], QColor(37, 244, 238, 255)));
+        m_npTextColor->setColor(argbOf(src["nowPlayingTextColorArgb"], Qt::white));
     } else if (type == "Text") {
         m_text->setPlainText(src["text"].toString());
         m_font->setCurrentFont(QFont(src["fontName"].toString("Segoe UI")));
@@ -3140,7 +3327,17 @@ void MainWindow::rebuildMixer()
                 + (onV ? "V" : "v") + (onH ? "H" : "h");
         }
     }
-    sig << vertPlatform << horizPlatform;
+    sig << vertPlatform << horizPlatform
+        << (m_s["ttsEnabled"].toBool(false) ? "tts1" : "tts0")
+        << (m_s["ttsMuted"].toBool(false) ? "tm" : "tu")
+        << (m_s.value("ttsVertical").toBool(true) ? "tV" : "tv")
+        << (m_s.value("ttsHorizontal").toBool(true) ? "tH" : "th")
+        << m_s["ttsMonitorMode"].toString("MonitorAndOutput")
+        << (!m_s["soundboardPads"].toArray().isEmpty() ? "sb1" : "sb0")
+        << (m_s["soundboardMuted"].toBool(false) ? "sm" : "su")
+        << (m_s.value("soundboardVertical").toBool(true) ? "sV" : "sv")
+        << (m_s.value("soundboardHorizontal").toBool(true) ? "sH" : "sh")
+        << m_s["soundboardMonitorMode"].toString("MonitorAndOutput");
     const QString signature = sig.join(';');
     if (signature == m_mixerSignature && !m_strips.isEmpty()) return;
     m_mixerSignature = signature;
@@ -3375,7 +3572,133 @@ void MainWindow::rebuildMixer()
         m_mixerLayout->insertWidget(m_mixerLayout->count() - 1, w);
         m_strips[stripKey] = Strip{meter, db, mute, slider};
     }
-    if (audio.isEmpty()) {
+
+    auto addVirtualStrip = [&](const QString &chId, const QString &title, const QString &iconName,
+                               const QString &volKey, const QString &muteKey, const QString &monKey,
+                               const QString &vertKey, const QString &horizKey) {
+        auto *w = new QFrame;
+        w->setObjectName("channel");
+        auto *v = new QVBoxLayout(w);
+        v->setContentsMargins(7, 4, 7, 4);
+        v->setSpacing(3);
+
+        auto *head = new QHBoxLayout;
+        auto *ic = new QLabel;
+        ic->setPixmap(themedIcon(iconName).pixmap(16, 16));
+        auto *name = new QLabel(title);
+        name->setObjectName("channelName");
+        if (m_mixerVertical) {
+            w->setFixedWidth(118);
+            name->setAlignment(Qt::AlignCenter);
+        }
+        auto *db = new QLabel("-inf dB");
+        db->setObjectName("channelDb");
+        auto *gear = toolBtn("dots", "Options");
+        gear->setPopupMode(QToolButton::InstantPopup);
+        auto *menu = new QMenu(gear);
+
+        auto *monMenu = menu->addMenu("Monitoring");
+        auto *monGroup = new QActionGroup(monMenu);
+        const QString curMon = m_s[monKey].toString("MonitorAndOutput");
+        for (const auto &[mVal, mLbl] : QList<QPair<QString, QString>>{
+                 {"Off", "Output Only"}, {"MonitorOnly", "Monitor Only"}, {"MonitorAndOutput", "Monitor and Output"}}) {
+            auto *a = monMenu->addAction(mLbl);
+            a->setCheckable(true);
+            a->setChecked(curMon == mVal);
+            monGroup->addAction(a);
+            connect(a, &QAction::triggered, this, [this, monKey, mVal] {
+                m_s[monKey] = mVal;
+                applySoon();
+                QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
+            });
+        }
+        menu->addSeparator();
+        const bool curV = m_s.value(vertKey).toBool(true);
+        const bool curH = m_s.value(horizKey).toBool(true);
+        auto *actV = menu->addAction(QStringLiteral("Hear on %1 (Vertical)").arg(vertPlatform));
+        actV->setCheckable(true);
+        actV->setChecked(curV);
+        connect(actV, &QAction::toggled, this, [this, vertKey](bool on) {
+            m_s[vertKey] = on;
+            applySoon();
+            QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
+        });
+        auto *actH = menu->addAction(QStringLiteral("Hear on %1 (Horizontal)").arg(horizPlatform));
+        actH->setCheckable(true);
+        actH->setChecked(curH);
+        connect(actH, &QAction::toggled, this, [this, horizKey](bool on) {
+            m_s[horizKey] = on;
+            applySoon();
+            QTimer::singleShot(0, this, &MainWindow::rebuildMixer);
+        });
+        gear->setMenu(menu);
+
+        head->addWidget(ic);
+        if (m_mixerVertical) v->addWidget(name);
+        else head->addWidget(name, 1);
+        head->addWidget(db);
+        head->addWidget(gear);
+        v->addLayout(head);
+
+        auto *meter = new MeterWidget(nullptr, m_mixerVertical ? Qt::Vertical : Qt::Horizontal);
+        if (!m_mixerVertical) {
+            meter->setFixedHeight(10);
+            v->addWidget(meter);
+        }
+
+        auto *row = new QHBoxLayout;
+        const bool isMuted = m_s[muteKey].toBool(false);
+        auto *mute = toolBtn(isMuted ? "speaker-off" : "speaker", "Mute");
+        mute->setCheckable(true);
+        mute->setChecked(isMuted);
+        meter->setMuted(isMuted || (!curV && !curH));
+        auto *slider = hslider(0, 200);
+        if (m_mixerVertical) {
+            slider->setOrientation(Qt::Vertical);
+            auto *levels = new QHBoxLayout;
+            levels->addStretch();
+            levels->addWidget(meter);
+            levels->addWidget(slider);
+            levels->addStretch();
+            v->addLayout(levels, 1);
+        }
+        slider->setObjectName("volume");
+        slider->setValue(std::clamp(qRound(m_s.value(volKey).toDouble(1.0) * 100.0), 0, 200));
+        auto *pct = new QLabel(QString("%1%").arg(slider->value()));
+        pct->setObjectName("channelPct");
+        pct->setFixedWidth(40);
+        pct->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        row->addWidget(mute);
+        if (!m_mixerVertical) row->addWidget(slider, 1);
+        else row->addStretch(1);
+        row->addWidget(pct);
+        v->addLayout(row);
+
+        connect(slider, &QSlider::valueChanged, this, [this, volKey, pct, slider, volumeDbTip](int val) {
+            pct->setText(QString("%1%").arg(val));
+            const QString tip = volumeDbTip(val);
+            pct->setToolTip(tip);
+            slider->setToolTip(tip);
+            m_s[volKey] = val / 100.0;
+            applySoon();
+        });
+        connect(mute, &QToolButton::toggled, this, [this, muteKey, mute, meter, curV, curH](bool m) {
+            mute->setIcon(themedIcon(m ? "speaker-off" : "speaker"));
+            meter->setMuted(m || (!curV && !curH));
+            m_s[muteKey] = m;
+            applySoon();
+        });
+
+        m_mixerLayout->insertWidget(m_mixerLayout->count() - 1, w);
+        m_strips[chId] = Strip{meter, db, mute, slider};
+    };
+
+    if (m_s["ttsEnabled"].toBool(false))
+        addVirtualStrip("__tts__", "TTS Voice", "mic", "ttsVolume", "ttsMuted", "ttsMonitorMode", "ttsVertical", "ttsHorizontal");
+    if (!m_s["soundboardPads"].toArray().isEmpty())
+        addVirtualStrip("__soundboard__", "Soundboard", "speaker", "soundboardVolume", "soundboardMuted", "soundboardMonitorMode", "soundboardVertical", "soundboardHorizontal");
+
+    if (audio.isEmpty() && m_strips.isEmpty()) {
         auto *l = hintLabel("No audio sources. Add a microphone or desktop audio via \"Add Source\" or in Settings → Audio.");
         l->setAlignment(Qt::AlignCenter);
         m_mixerLayout->insertWidget(0, l);
@@ -3539,6 +3862,16 @@ QString MainWindow::addSource(const QString &type, const QString &name, const QS
     } else if (type == "AlertBox") {
         // Dimensions are determined dynamically once an alert image/GIF + text is rendered.
         item["x"] = 0.5; item["y"] = 0.25; item["w"] = 0.0; item["h"] = 0.0;
+    } else if (type == "GoalBar") {
+        const double bw = 640.0, bh = 128.0;
+        const double sc = std::min(1.0, 0.78 * cw / bw);
+        const double w = bw * sc / cw, h = bh * sc / ch;
+        item["x"] = (1.0 - w) / 2.0; item["y"] = 0.08; item["w"] = w; item["h"] = h;
+    } else if (type == "NowPlaying") {
+        const double bw = 620.0, bh = 136.0;
+        const double sc = std::min(1.0, 0.75 * cw / bw);
+        const double w = bw * sc / cw, h = bh * sc / ch;
+        item["x"] = 0.04; item["y"] = std::max(0.0, 0.94 - h); item["w"] = w; item["h"] = h;
     } else if (m_rasterSizes.contains(sourceId)) {
         const QSize sz = m_rasterSizes.value(sourceId);
         const double scale = std::min(1.0, 0.8 * cw / sz.width());
@@ -3684,6 +4017,123 @@ void MainWindow::updateChatOverlays()
         const auto s = v.toObject();
         if (s["type"].toString() == "ChatOverlay") uploadRaster(s);
     }
+}
+
+void MainWindow::updateGoalBarOverlays()
+{
+    for (const auto &v : sources()) {
+        const auto s = v.toObject();
+        if (s["type"].toString() == "GoalBar") uploadRaster(s);
+    }
+}
+
+void MainWindow::updateNowPlayingOverlays()
+{
+    for (const auto &v : sources()) {
+        const auto s = v.toObject();
+        if (s["type"].toString() == "NowPlaying") uploadRaster(s);
+    }
+}
+
+void MainWindow::pollNowPlaying()
+{
+    bool hasNp = false;
+    for (const auto &v : sources()) {
+        if (v.toObject()["type"].toString() == "NowPlaying") { hasNp = true; break; }
+    }
+    if (!hasNp) return;
+
+    const auto res = EngineHost::instance().callObj("getNowPlaying", QJsonObject{{"sinceRevision", qint64(m_npRevision)}});
+    if (res.isEmpty() || res["unchanged"].toBool(false)) return;
+
+    const quint64 rev = quint64(std::max<qint64>(0, res["revision"].toInteger(0)));
+    if (rev == m_npRevision && !m_npState.isEmpty()) return;
+    m_npRevision = rev;
+    m_npState = res;
+    const QString b64 = res["thumbnailBase64"].toString();
+    if (b64.isEmpty()) {
+        m_npArt = QImage();
+    } else {
+        QImage art;
+        if (art.loadFromData(QByteArray::fromBase64(b64.toLatin1())))
+            m_npArt = art;
+        else
+            m_npArt = QImage();
+    }
+    updateNowPlayingOverlays();
+}
+
+void MainWindow::handleGiftTtsAndSoundboard(const QString &user, const QString &giftName, int count, int diamonds, const QString &detail)
+{
+    // 1. Built-in TTS for Gifts
+    if (m_s["ttsEnabled"].toBool(false) && !m_s["ttsMuted"].toBool(false) && m_s["ttsOnGift"].toBool(true)) {
+        const int minD = m_s["ttsGiftMinDiamonds"].toInt(10);
+        if (diamonds >= minD) {
+            const QString gLabel = giftName.isEmpty() ? detail : (count > 1 ? QStringLiteral("%1 razy %2").arg(giftName).arg(count) : giftName);
+            const QString msg = QStringLiteral("%1 wysłał %2").arg(user, gLabel).left(std::clamp(m_s["ttsMaxChars"].toInt(140), 20, 500));
+            EngineHost::instance().call("ttsSpeak", QJsonObject{{"text", msg}, {"priority", false}});
+        }
+    }
+
+    // 2. Native Soundboard Gift Trigger (exact GiftTriggerName match first, else highest matching GiftMinDiamonds)
+    const QJsonArray pads = m_s["soundboardPads"].toArray();
+    if (pads.isEmpty()) return;
+    QJsonObject bestPad;
+    int bestMinDiamonds = -1;
+    for (const auto &pv : pads) {
+        const QJsonObject p = pv.toObject();
+        const QString fp = p["filePath"].toString().trimmed();
+        if (fp.isEmpty()) continue;
+        const QString trigName = p["giftTriggerName"].toString().trimmed();
+        if (!trigName.isEmpty() && !giftName.isEmpty() && trigName.compare(giftName, Qt::CaseInsensitive) == 0) {
+            bestPad = p;
+            break;
+        }
+        const int minD = p["giftMinDiamonds"].toInt(0);
+        if (minD > 0 && diamonds >= minD && minD > bestMinDiamonds) {
+            bestMinDiamonds = minD;
+            bestPad = p;
+        }
+    }
+    if (!bestPad.isEmpty()) {
+        EngineHost::instance().call("playSoundboardPad", QJsonObject{
+            {"id", bestPad["id"].toString()},
+            {"path", bestPad["filePath"].toString()},
+            {"volume", bestPad["volume"].toDouble(1.0)},
+        });
+    }
+}
+
+void MainWindow::handleFollowTts(const QString &user)
+{
+    if (!m_s["ttsEnabled"].toBool(false) || m_s["ttsMuted"].toBool(false) || !m_s["ttsOnFollow"].toBool(false)) return;
+    const QString msg = QStringLiteral("Dzięki za follow %1").arg(user).left(std::clamp(m_s["ttsMaxChars"].toInt(140), 20, 500));
+    EngineHost::instance().call("ttsSpeak", QJsonObject{{"text", msg}, {"priority", false}});
+}
+
+void MainWindow::handleChatTts(const QString &, const QString &user, const QString &text)
+{
+    if (!m_s["ttsEnabled"].toBool(false) || m_s["ttsMuted"].toBool(false) || !m_s["ttsOnChat"].toBool(false)) return;
+    QString body = text.trimmed();
+    const QString prefix = m_s["ttsChatPrefix"].toString("!tts").trimmed();
+    if (!prefix.isEmpty()) {
+        if (!body.startsWith(prefix, Qt::CaseInsensitive)) return;
+        body = body.mid(prefix.size()).trimmed();
+    }
+    if (body.isEmpty()) return;
+    // Basic URL & duplicate spam filter
+    if (body.contains("http://", Qt::CaseInsensitive) || body.contains("https://", Qt::CaseInsensitive) || body.contains("www.", Qt::CaseInsensitive))
+        return;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 cooldownMs = qint64(std::max(0, m_s["ttsCooldownSec"].toInt(5))) * 1000;
+    if (nowMs - m_lastChatTtsMs < cooldownMs) return;
+    if (body.compare(m_lastChatTtsText, Qt::CaseInsensitive) == 0 && nowMs - m_lastChatTtsMs < 30000) return;
+
+    m_lastChatTtsMs = nowMs;
+    m_lastChatTtsText = body;
+    const int maxChars = std::clamp(m_s["ttsMaxChars"].toInt(140), 20, 500);
+    const QString msg = QStringLiteral("%1 pisze: %2").arg(user, body).left(maxChars);
+    EngineHost::instance().call("ttsSpeak", QJsonObject{{"text", msg}, {"priority", false}});
 }
 
 void MainWindow::triggerAlert(const QString &kind, const QString &user, const QString &detail)
@@ -3972,8 +4422,19 @@ void MainWindow::setupTray()
 void MainWindow::uploadRaster(const QJsonObject &src)
 {
     const QString type = src["type"].toString();
-    if (type != "Image" && type != "Text" && type != "ChatOverlay" && type != "AlertBox") return;
+    if (type != "Image" && type != "Text" && type != "ChatOverlay" && type != "AlertBox" && type != "GoalBar" && type != "NowPlaying") return;
     const QString id = src["id"].toString();
+    auto goalCurrentVal = [this](const QJsonObject &s) -> qint64 {
+        const QString metric = s["goalMetric"].toString("diamonds");
+        qint64 live = 0;
+        if (m_liveChat) {
+            if (metric == "gifts") live = m_liveChat->totalGifts();
+            else if (metric == "taps") live = m_liveChat->totalTaps();
+            else if (metric == "follows") live = m_liveChat->totalFollows();
+            else live = m_liveChat->totalDiamonds();
+        }
+        return std::max<qint64>(0, live + s["goalManualOffset"].toInt(0));
+    };
     QString key;
     if (type == "ChatOverlay") {
         if (m_liveChat) m_liveChat->ensureStarted();
@@ -3982,6 +4443,26 @@ void MainWindow::uploadRaster(const QJsonObject &src)
                   .arg(src["showGifts"].toBool(true))
                   .arg(src["showTaps"].toBool(true))
                   .arg(m_liveChat ? m_liveChat->overlayRevision() : 0);
+    } else if (type == "GoalBar") {
+        if (m_liveChat) m_liveChat->ensureStarted();
+        key = QString("goal|%1|%2|%3|%4|%5|%6|%7|%8")
+                  .arg(src["goalTitle"].toString("Cel: Diamenty"),
+                       src["goalMetric"].toString("diamonds"),
+                       QString::number(goalCurrentVal(src)),
+                       QString::number(src["goalTarget"].toInt(1000)),
+                       QString::number(src["goalShowPercent"].toBool(true)),
+                       QString::number(src["goalFillColorArgb"].toDouble()),
+                       QString::number(src["goalBgColorArgb"].toDouble()),
+                       QString::number(src["goalTextColorArgb"].toDouble()));
+    } else if (type == "NowPlaying") {
+        key = QString("np|%1|%2|%3|%4|%5|%6|%7")
+                  .arg(QString::number(m_npRevision),
+                       QString::number(src["nowPlayingHideWhenPaused"].toBool(true)),
+                       QString::number(src["nowPlayingShowArt"].toBool(true)),
+                       src["nowPlayingAppFilter"].toString(),
+                       QString::number(src["nowPlayingBgColorArgb"].toDouble()),
+                       QString::number(src["nowPlayingAccentColorArgb"].toDouble()),
+                       QString::number(src["nowPlayingTextColorArgb"].toDouble()));
     } else if (type == "AlertBox") {
         if (m_liveChat) m_liveChat->ensureStarted();
         const QString role = src["alertRole"].toString();
@@ -3997,6 +4478,10 @@ void MainWindow::uploadRaster(const QJsonObject &src)
         QImage img;
         if (type == "ChatOverlay" && m_liveChat) {
             img = m_liveChat->renderOverlay(540, 720, src["showChat"].toBool(true), src["showGifts"].toBool(true), src["showTaps"].toBool(true));
+        } else if (type == "GoalBar") {
+            img = rasterizeGoalBar(src, goalCurrentVal(src));
+        } else if (type == "NowPlaying") {
+            img = rasterizeNowPlaying(src, m_npState, m_npArt);
         } else if (type == "AlertBox") {
             const QString role = src["alertRole"].toString();
             const int si = (role == "follow") ? 1 : (role == "gift" ? 0 : (!m_alertSlots[0].kind.isEmpty() ? 0 : 1));
@@ -4078,6 +4563,10 @@ void MainWindow::uploadRaster(const QJsonObject &src)
             EngineHost::instance().setSourcePixels(id, 0, 0, 0, nullptr);
             return;
         }
+        if (type == "NowPlaying" && img.width() <= 1 && img.height() <= 1) {
+            EngineHost::instance().setSourcePixels(id, img.width(), img.height(), int(img.bytesPerLine()), img.constBits());
+            return;
+        }
         m_rasterSizes[id] = img.size();
         EngineHost::instance().setSourcePixels(id, img.width(), img.height(), int(img.bytesPerLine()), img.constBits());
         if (oldSize == img.size()) return;
@@ -4151,12 +4640,33 @@ void MainWindow::applyHotkeys()
     QHash<QString, QString> map;
     const QJsonObject hk = m_s["hotkeys"].toObject();
     for (auto it = hk.begin(); it != hk.end(); ++it) map[it.key()] = it.value().toString();
+    for (const auto &pv : m_s["soundboardPads"].toArray()) {
+        const auto p = pv.toObject();
+        const QString seq = p["hotkey"].toString().trimmed();
+        const QString pid = p["id"].toString();
+        if (!seq.isEmpty() && !pid.isEmpty()) map["soundboard:" + pid] = seq;
+    }
     const QStringList failed = m_hotkeys->apply(map);
     if (!failed.isEmpty()) m_stMsg->setText("Failed to register hotkeys: " + failed.join(", ") + " (in use by another app?)");
 }
 
 void MainWindow::triggerAction(const QString &action)
 {
+    if (action.startsWith("soundboard:")) {
+        const QString padId = action.mid(11);
+        for (const auto &pv : m_s["soundboardPads"].toArray()) {
+            const auto p = pv.toObject();
+            if (p["id"].toString() == padId) {
+                EngineHost::instance().call("playSoundboardPad", QJsonObject{
+                    {"id", padId},
+                    {"path", p["filePath"].toString()},
+                    {"volume", p["volume"].toDouble(1.0)},
+                });
+                break;
+            }
+        }
+        return;
+    }
     if (action == "toggleStream") toggleStream();
     else if (action == "toggleRecord") toggleRecord();
     else if (action == "toggleReplay") toggleReplay();
@@ -4667,10 +5177,76 @@ void MainWindow::toggleStream()
     pushSettings();
     m_btnStream->setEnabled(false);
     const auto r = EngineHost::instance().callObj(wasStreaming ? "stopStream" : "startStream", wasStreaming ? QJsonObject{} : startArgs);
-    if (r.contains("error")) QMessageBox::warning(this, "Streaming", r["error"].toString());
+    if (r.contains("error")) {
+        QMessageBox::warning(this, "Streaming", r["error"].toString());
+    } else if (!wasStreaming) {
+        startStreamTelemetry();
+    } else {
+        finalizeStreamTelemetry();
+    }
     if (wasStreaming) EngineHost::instance().callObj("tiktokFinishRoom");
     m_btnStream->setEnabled(true);
     pollStats();
+}
+
+void MainWindow::startStreamTelemetry()
+{
+    m_session = StreamSessionSummary{};
+    m_session.startTimeUtc = QDateTime::currentDateTimeUtc();
+    m_sessionActive = true;
+    m_fpsSum = 0.0; m_fpsSamples = 0;
+    m_kbpsSum = 0.0; m_kbpsSamples = 0;
+    m_viewerSum = 0.0; m_viewerSamples = 0;
+    m_viewerSampleTick = 0;
+
+    bool anyAutoResetGoal = false;
+    QJsonArray srcs = sources();
+    for (int i = 0; i < srcs.size(); ++i) {
+        QJsonObject s = srcs[i].toObject();
+        if (s["type"].toString() == "GoalBar" && s["goalAutoResetOnStreamStart"].toBool(true)) {
+            s["goalManualOffset"] = 0;
+            srcs[i] = s;
+            anyAutoResetGoal = true;
+        }
+    }
+    if (anyAutoResetGoal) {
+        m_s["sources"] = srcs;
+        if (m_liveChat) m_liveChat->resetSessionStats();
+        updateGoalBarOverlays();
+        applySoon();
+    } else if (m_liveChat) {
+        m_liveChat->resetSessionStats();
+    }
+}
+
+void MainWindow::finalizeStreamTelemetry()
+{
+    if (!m_sessionActive) return;
+    m_sessionActive = false;
+    m_session.endTimeUtc = QDateTime::currentDateTimeUtc();
+    const double wallSec = std::max(0.0, double(m_session.startTimeUtc.msecsTo(m_session.endTimeUtc)) / 1000.0);
+    if (m_session.durationSec < wallSec) m_session.durationSec = wallSec;
+    if (m_fpsSamples > 0) m_session.avgFps = m_fpsSum / m_fpsSamples;
+    if (m_kbpsSamples > 0) m_session.avgBitrateKbps = m_kbpsSum / m_kbpsSamples;
+    if (m_viewerSamples > 0) m_session.avgViewers = m_viewerSum / m_viewerSamples;
+    if (m_liveChat) {
+        m_session.totalGifts = m_liveChat->totalGifts();
+        m_session.totalDiamonds = m_liveChat->totalDiamonds();
+        m_session.totalTaps = m_liveChat->totalTaps();
+        m_session.totalFollows = m_liveChat->totalFollows();
+        m_session.totalChatMessages = m_liveChat->totalChatMessages();
+        m_session.topGifters = m_liveChat->topGifters(5);
+    }
+
+    if (m_session.durationSec < 10.0) return;
+
+    QString savedPath;
+    if (m_s["autoSaveStreamReports"].toBool(true))
+        savedPath = PostStreamSummaryDialog::autoSaveReport(m_session);
+    if (m_s["showPostStreamSummary"].toBool(true) && !QCoreApplication::arguments().contains("--test")) {
+        PostStreamSummaryDialog dlg(m_session, savedPath, this);
+        dlg.exec();
+    }
 }
 
 bool MainWindow::prepareStream(QJsonObject *startArgs)
@@ -4894,7 +5470,9 @@ void MainWindow::saveReplay()
     if (r.contains("error")) {
         QMessageBox::warning(this, "Replay Buffer", r["error"].toString());
     } else {
-        const QString saved = QFileInfo(r["path"].toString()).fileName();
+        const QString fullPath = r["path"].toString();
+        if (m_sessionActive && !fullPath.isEmpty()) m_session.savedReplays.append(fullPath);
+        const QString saved = QFileInfo(fullPath).fileName();
         m_stMsg->setText("Replay saved: " + saved);
     }
 }
@@ -5106,9 +5684,33 @@ void MainWindow::pollStats()
     m_stFps->setText(QString("%1 / %2 FPS").arg(st["renderFps"].toDouble(), 0, 'f', 2).arg(m_s["fps"].toInt(60)));
     double kbps = 0;
     qint64 dropped = 0;
+    int reconnects = 0;
     for (const auto &ov : st["outputs"].toArray()) {
         const auto o = ov.toObject();
-        if (o["name"].toString() == "Stream") { kbps = o["kbps"].toDouble(); dropped = qint64(o["dropped"].toDouble()); }
+        const QString nm = o["name"].toString();
+        if (nm == "Stream") { kbps = o["kbps"].toDouble(); dropped = qint64(o["dropped"].toDouble()); }
+        if (nm != "File" && nm != "FileHorizontal") reconnects += o["reconnects"].toInt(0);
+    }
+    if (m_sessionActive && s) {
+        m_session.durationSec = std::max(m_session.durationSec, st["streamSeconds"].toDouble());
+        m_session.encodedFrames = std::max<qint64>(m_session.encodedFrames, qint64(st["encodedFrames"].toDouble()));
+        m_session.droppedPackets = std::max<qint64>(m_session.droppedPackets, dropped);
+        m_session.reconnects = std::max(m_session.reconnects, reconnects);
+        const double curFps = st["renderFps"].toDouble();
+        if (curFps > 0.1) { m_fpsSum += curFps; ++m_fpsSamples; }
+        if (kbps > 0.1) { m_kbpsSum += kbps; ++m_kbpsSamples; }
+        if ((m_viewerSampleTick++ % 5) == 0 && m_liveChat) {
+            const int tot = m_liveChat->viewerCount();
+            const int tt = m_liveChat->tiktokViewerCount();
+            const int kk = m_liveChat->kickViewerCount();
+            if (tot >= 0) {
+                m_session.peakViewers = std::max(m_session.peakViewers, tot);
+                m_viewerSum += tot;
+                ++m_viewerSamples;
+            }
+            if (tt >= 0) m_session.peakTikTokViewers = std::max(m_session.peakTikTokViewers, tt);
+            if (kk >= 0) m_session.peakKickViewers = std::max(m_session.peakKickViewers, kk);
+        }
     }
     m_stBitrate->setText(s ? QString("%1 kbps").arg(kbps, 0, 'f', 0) : "— kbps");
     m_stDropped->setText(QString("Dropped: %1").arg(dropped));

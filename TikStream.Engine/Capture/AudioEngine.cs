@@ -15,10 +15,13 @@ public sealed class AudioEngine : IDisposable
 {
     public const int SampleRate = 48000;
     public const int Channels = 2;
+    public const string TtsChannelId = "__tts__";
+    public const string SoundboardChannelId = "__soundboard__";
     public static readonly WaveFormat MixFormat = WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, Channels);
 
     private readonly MixingSampleProvider _mixer = new(MixFormat) { ReadFully = true };
     private readonly Dictionary<string, Input> _inputs = new();
+    private readonly SoundboardSampleProvider _soundboardProvider = new();
     private readonly object _lock = new();
     private WasapiOut? _monitorOut;
     private BufferedWaveProvider? _monitorBuf;
@@ -171,6 +174,30 @@ public sealed class AudioEngine : IDisposable
                 _inputs[id].Dispose(_mixer);
                 _inputs.Remove(id);
             }
+
+            // Dedicated built-in TTS channel ("__tts__")
+            if (!_inputs.TryGetValue(TtsChannelId, out var ttsInp))
+            {
+                ttsInp = Input.FromPush("TTS", _mixer);
+                _inputs[TtsChannelId] = ttsInp;
+            }
+            bool ttsOnV = !settings.TtsMuted && settings.TtsVertical;
+            bool ttsOnH = !settings.TtsMuted && settings.TtsHorizontal;
+            ttsInp.SetVolume((ttsOnV || ttsOnH) ? VolumeToGain(settings.TtsVolume) : 0f);
+            ttsInp.SetRouting(ttsOnV, ttsOnH);
+            ttsInp.SetMonitorMode(string.IsNullOrEmpty(settings.TtsMonitorMode) ? "MonitorAndOutput" : settings.TtsMonitorMode);
+
+            // Dedicated native Soundboard channel ("__soundboard__")
+            if (!_inputs.TryGetValue(SoundboardChannelId, out var sbInp))
+            {
+                sbInp = Input.FromSampleProvider("Soundboard", _soundboardProvider, _mixer);
+                _inputs[SoundboardChannelId] = sbInp;
+            }
+            bool sbOnV = !settings.SoundboardMuted && settings.SoundboardVertical;
+            bool sbOnH = !settings.SoundboardMuted && settings.SoundboardHorizontal;
+            sbInp.SetVolume((sbOnV || sbOnH) ? VolumeToGain(settings.SoundboardVolume) : 0f);
+            sbInp.SetRouting(sbOnV, sbOnH);
+            sbInp.SetMonitorMode(string.IsNullOrEmpty(settings.SoundboardMonitorMode) ? "MonitorAndOutput" : settings.SoundboardMonitorMode);
         }
     }
 
@@ -448,6 +475,109 @@ public sealed class AudioEngine : IDisposable
         });
     }
 
+    public void PushTtsSamples(float[] samples, int count)
+    {
+        if (samples == null || count <= 0) return;
+        Input? target;
+        lock (_lock) _inputs.TryGetValue(TtsChannelId, out target);
+        target?.Push(samples, count);
+    }
+
+    public void ClearTtsBuffer()
+    {
+        Input? target;
+        lock (_lock) _inputs.TryGetValue(TtsChannelId, out target);
+        target?.ClearBuffer();
+    }
+
+    /// <summary>
+    /// Decodes a Soundboard pad audio file (.wav/.mp3/.ogg) asynchronously on a background thread
+    /// to 48 kHz stereo float and mixes it into the dedicated "__soundboard__" channel (supports overlapping clips).
+    /// </summary>
+    public void PlaySoundboardPad(string path, float volume = 1f)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        float padGain = VolumeToGain(volume);
+        Task.Run(() =>
+        {
+            try
+            {
+                using var reader = new AudioFileReader(path);
+                ISampleProvider sp = reader;
+                if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
+                else if (sp.WaveFormat.Channels > 2) sp = new MultiplexingSampleProvider(new[] { sp }, 2);
+                if (sp.WaveFormat.SampleRate != SampleRate) sp = new WdlResamplingSampleProvider(sp, SampleRate);
+                if (Math.Abs(padGain - 1f) > 0.001f) sp = new VolumeSampleProvider(sp) { Volume = padGain };
+
+                var pcm = new List<float>(SampleRate * Channels * 4);
+                var tmp = new float[4096];
+                int n;
+                int maxSamples = SampleRate * Channels * 30;
+                while ((n = sp.Read(tmp, 0, tmp.Length)) > 0 && pcm.Count < maxSamples)
+                {
+                    for (int i = 0; i < n && pcm.Count < maxSamples; i++) pcm.Add(tmp[i]);
+                }
+                if (pcm.Count > 0) _soundboardProvider.Play(pcm.ToArray());
+            }
+            catch (Exception ex) { Log.Warn("Soundboard pad: " + ex.Message); }
+        });
+    }
+
+    public void StopSoundboard() => _soundboardProvider.Clear();
+
+    private sealed class SoundboardSampleProvider : ISampleProvider
+    {
+        private sealed class ActiveClip
+        {
+            public float[] Samples = Array.Empty<float>();
+            public int Pos;
+        }
+
+        private readonly object _clipLock = new();
+        private readonly List<ActiveClip> _clips = new(16);
+        public WaveFormat WaveFormat => MixFormat;
+
+        public void Play(float[] samples)
+        {
+            if (samples.Length == 0) return;
+            lock (_clipLock)
+            {
+                if (_clips.Count >= 16) _clips.RemoveAt(0);
+                _clips.Add(new ActiveClip { Samples = samples, Pos = 0 });
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_clipLock) _clips.Clear();
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            Array.Clear(buffer, offset, count);
+            lock (_clipLock)
+            {
+                for (int c = _clips.Count - 1; c >= 0; c--)
+                {
+                    var clip = _clips[c];
+                    int avail = clip.Samples.Length - clip.Pos;
+                    if (avail <= 0)
+                    {
+                        _clips.RemoveAt(c);
+                        continue;
+                    }
+                    int n = Math.Min(count, avail);
+                    var src = clip.Samples;
+                    int pos = clip.Pos;
+                    for (int i = 0; i < n; i++) buffer[offset + i] += src[pos + i];
+                    clip.Pos += n;
+                    if (clip.Pos >= src.Length) _clips.RemoveAt(c);
+                }
+            }
+            return count;
+        }
+    }
+
     private sealed class OneShotSampleProvider(float[] samples, WaveFormat format) : ISampleProvider
     {
         private int _pos;
@@ -530,7 +660,7 @@ public sealed class AudioEngine : IDisposable
             _tap.SuppressOutput = mode == "MonitorOnly";
         }
 
-        private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer, int maxBufferMs = 35)
+        private Input(string name, IWaveIn? capture, WaveFormat fmt, bool trim, MixingSampleProvider mixer, int maxBufferMs = 35, ISampleProvider? customSource = null)
         {
             Name = name;
             _capture = capture;
@@ -542,8 +672,8 @@ public sealed class AudioEngine : IDisposable
                 DiscardOnBufferOverflow = true,
                 ReadFully = true,
             };
-            bool monoInput = fmt.Channels == 1;
-            ISampleProvider sp = _buffer.ToSampleProvider();
+            bool monoInput = customSource == null && fmt.Channels == 1;
+            ISampleProvider sp = customSource ?? _buffer.ToSampleProvider();
             if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
             else if (sp.WaveFormat.Channels > 2) sp = new MultiplexingSampleProvider(new[] { sp }, 2);
             if (sp.WaveFormat.SampleRate != SampleRate) sp = new WdlResamplingSampleProvider(sp, SampleRate);
@@ -585,6 +715,11 @@ public sealed class AudioEngine : IDisposable
 
         public static Input FromPush(string name, MixingSampleProvider mixer, bool isAlert = false)
             => new(name, null, MixFormat, false, mixer) { Key = "push", IsAlert = isAlert };
+
+        public static Input FromSampleProvider(string name, ISampleProvider provider, MixingSampleProvider mixer)
+            => new(name, null, MixFormat, false, mixer, customSource: provider) { Key = "provider" };
+
+        public void ClearBuffer() => _buffer.ClearBuffer();
 
         public void SetVolume(float v)
         {

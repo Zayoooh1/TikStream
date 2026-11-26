@@ -26,6 +26,8 @@ inline const QList<SourceTypeInfo> &sourceTypes()
         {"Browser", "Browser Source", "globe", "Web page, alert box, or HTML overlay (StreamElements, TikFinity, Streamlabs) with transparent background."},
         {"AlertBox", "TikTok LIVE Alert Box", "broadcast", "Native on-screen alerts with custom image and sound for TikTok LIVE gifts and follows."},
         {"ChatOverlay", "LIVE Chat Overlay", "text", "TikTok LIVE chat, gifts, and taps rendered directly on the stream."},
+        {"GoalBar", "Goal Bar", "sliders", "Native progress bar tracking TikTok LIVE diamonds, gifts, likes, or follows."},
+        {"NowPlaying", "Now Playing (SMTC)", "speaker", "Shows the currently playing track and album art from Spotify, YouTube, or any Windows media player."},
         {"AudioInput", "Audio Input / Microphone", "mic", "Microphone or other audio input device in this scene.", true},
         {"AudioApplication", "Application Audio", "speaker", "Audio from a specific application and its child processes.", true},
         {"AudioOutput", "Desktop Audio / Output", "speaker", "What you hear in your speakers or headphones (game, music, Discord).", true},

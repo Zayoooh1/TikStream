@@ -30,6 +30,7 @@ private:
     QWidget *pageOutput();
     QWidget *pageVideo();
     QWidget *pageAudio();
+    QWidget *pageTts();
     QWidget *pageHotkeys();
     QWidget *pageAdvanced();
     void addPage(const QString &title, const QString &icon, QWidget *page);
@@ -46,6 +47,7 @@ private:
 
     // general
     QCheckBox *m_confirmStop = nullptr, *m_autoRecord = nullptr, *m_snapping = nullptr, *m_snapSources = nullptr, *m_autoUpdate = nullptr, *m_minToTray = nullptr;
+    QCheckBox *m_showSummary = nullptr, *m_autoSaveReports = nullptr;
     // stream
     QLineEdit *m_server = nullptr, *m_key = nullptr;
     QLineEdit *m_signerKey = nullptr, *m_signerUrl = nullptr;
@@ -64,6 +66,11 @@ private:
     QComboBox *m_dualRecordTarget = nullptr;
     // audio
     QComboBox *m_desktopDev = nullptr, *m_micDev = nullptr;
+    // tts
+    QCheckBox *m_ttsEnabled = nullptr, *m_ttsOnGift = nullptr, *m_ttsOnFollow = nullptr, *m_ttsOnChat = nullptr;
+    QComboBox *m_ttsProvider = nullptr, *m_ttsVoice = nullptr, *m_ttsMonitor = nullptr;
+    QSpinBox *m_ttsRate = nullptr, *m_ttsGiftMinDiamonds = nullptr, *m_ttsCooldown = nullptr, *m_ttsMaxChars = nullptr;
+    QLineEdit *m_ttsChatPrefix = nullptr;
     // hotkeys
     QHash<QString, QKeySequenceEdit *> m_hotkeys;
     // advanced

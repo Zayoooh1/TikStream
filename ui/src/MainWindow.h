@@ -1,4 +1,5 @@
 #pragma once
+#include "PostStreamSummaryDialog.h"
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -11,6 +12,7 @@ class MeterWidget;
 class ColorButton;
 class Hotkeys;
 class LiveChat;
+class SoundboardWidget;
 class QListWidget;
 class QStackedWidget;
 class QComboBox;
@@ -71,6 +73,8 @@ private:
     QWidget *pageBrowser();
     QWidget *pageAlertBox();
     QWidget *pageChatOverlay();
+    QWidget *pageGoalBar();
+    QWidget *pageNowPlaying();
     QFrame *buildTransform();
     void openVideoFiltersDialog(const QString &itemId);
     void openAudioFiltersDialog(const QString &sourceId);
@@ -120,6 +124,14 @@ private:
     void switchScene(int delta);
     void uploadRaster(const QJsonObject &src);
     void updateChatOverlays();
+    void updateGoalBarOverlays();
+    void updateNowPlayingOverlays();
+    void pollNowPlaying();
+    void handleGiftTtsAndSoundboard(const QString &user, const QString &giftName, int count, int diamonds, const QString &detail);
+    void handleFollowTts(const QString &user);
+    void handleChatTts(const QString &platform, const QString &user, const QString &text);
+    void startStreamTelemetry();
+    void finalizeStreamTelemetry();
     void applyHotkeys();
     void pushUndo();
     void undo();
@@ -259,6 +271,39 @@ private:
     LiveChat *m_liveChat = nullptr;
     QCheckBox *m_chatShowMessages = nullptr, *m_chatShowGifts = nullptr, *m_chatShowTaps = nullptr;
     QPushButton *m_chatDemoBtn = nullptr;
+
+    // GoalBar properties
+    QLineEdit *m_goalTitle = nullptr;
+    QComboBox *m_goalMetric = nullptr;
+    QSpinBox *m_goalTarget = nullptr;
+    QCheckBox *m_goalAutoReset = nullptr, *m_goalShowPercent = nullptr;
+    ColorButton *m_goalFillColor = nullptr, *m_goalBgColor = nullptr, *m_goalTextColor = nullptr;
+
+    // NowPlaying properties & SMTC cache
+    QCheckBox *m_npHidePaused = nullptr, *m_npShowArt = nullptr;
+    QLineEdit *m_npAppFilter = nullptr;
+    ColorButton *m_npBgColor = nullptr, *m_npAccentColor = nullptr, *m_npTextColor = nullptr;
+    QTimer *m_nowPlayingTimer = nullptr;
+    quint64 m_npRevision = 0;
+    QJsonObject m_npState;
+    QImage m_npArt;
+
+    // Soundboard & TTS runtime
+    QDockWidget *m_soundboardDock = nullptr;
+    SoundboardWidget *m_soundboard = nullptr;
+    qint64 m_lastChatTtsMs = 0;
+    QString m_lastChatTtsText;
+
+    // Post-Stream Summary telemetry
+    bool m_sessionActive = false;
+    StreamSessionSummary m_session;
+    double m_fpsSum = 0.0;
+    int m_fpsSamples = 0;
+    double m_kbpsSum = 0.0;
+    int m_kbpsSamples = 0;
+    double m_viewerSum = 0.0;
+    int m_viewerSamples = 0;
+    int m_viewerSampleTick = 0;
 
     // mixer
     QBoxLayout *m_mixerLayout = nullptr;
